@@ -1,0 +1,47 @@
+FROM python:3.13-slim
+
+ARG USE_MIRROR=true
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST} \
+    PYTHONPATH=/app \
+    TZ=Asia/Shanghai
+
+WORKDIR /app
+
+RUN if [ "$USE_MIRROR" = "true" ]; then \
+      sed -i 's|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/debian.sources && \
+      sed -i 's|http://security.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g' /etc/apt/sources.list.d/debian.sources; \
+    fi
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      build-essential \
+      curl \
+      libxrender1 \
+      libxext6 \
+      libx11-6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install all Python dependencies
+COPY ScienceClaw/backend/requirements.txt .
+RUN pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
+
+# Install seekr_sdk (single-file client for websearch microservice)
+COPY ScienceClaw/websearch/seekr_sdk.py /usr/local/lib/python3.13/site-packages/seekr_sdk.py
+
+# Copy backend code (build context is project root)
+COPY ScienceClaw/backend /app/backend
+
+# Copy built-in skills into image (not mounted from host, avoids macOS case-insensitivity issues)
+COPY ScienceClaw/backend/builtin_skills /app/builtin_skills
+
+EXPOSE 8000
+
+CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]

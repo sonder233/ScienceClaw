@@ -1,0 +1,46 @@
+FROM swr.cn-north-4.myhuaweicloud.com/zdtc-rd/agent-infra-sandbox:latest
+
+
+ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+    PIP_TRUSTED_HOST=mirrors.aliyun.com
+
+# Use Aliyun for Debian/Ubuntu
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list 2>/dev/null || true && \
+    sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list 2>/dev/null || true
+
+# NPM Mirror
+RUN npm config set registry https://registry.npmmirror.com && \
+    npm install -g skills
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── 2. Python 依赖（从慢到快，最大化缓存命中） ──────────────────────
+# 2a. ToolUniverse — 最慢（~300s），极少变动，放最前面
+ENV CC=gcc
+ARG PIP_MIRROR=https://mirrors.aliyun.com/pypi/simple/
+
+RUN python3 -m pip install --no-cache-dir tooluniverse \
+        -i ${PIP_MIRROR} --break-system-packages --ignore-installed \
+    && /opt/python3.11/bin/python3.11 -m pip install --no-cache-dir tooluniverse \
+        -i ${PIP_MIRROR} --ignore-installed \
+    && /opt/python3.12/bin/python3.12 -m pip install --no-cache-dir tooluniverse \
+        -i ${PIP_MIRROR} --ignore-installed
+
+# 2b. @tool 运行依赖 — 较少变动
+RUN pip install --no-cache-dir \
+        langchain-core \
+        pydantic \
+        httpx \
+        pyyaml \
+    -i ${PIP_MIRROR} --break-system-packages --ignore-installed
+
+# ── 3. 项目文件（经常变动，放最后以保护上方缓存） ────────────────────
+COPY ScienceClaw/websearch/seekr_sdk.py /usr/local/lib/python3.10/dist-packages/seekr_sdk.py
+RUN ln -sf /usr/local/lib/python3.10/dist-packages/seekr_sdk.py \
+        /opt/python3.11/lib/python3.11/site-packages/seekr_sdk.py \
+    && ln -sf /usr/local/lib/python3.10/dist-packages/seekr_sdk.py \
+        /opt/python3.12/lib/python3.12/site-packages/seekr_sdk.py
+
+COPY ScienceClaw/sandbox/tool_runner.py /app/_tool_runner.py

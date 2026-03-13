@@ -1,0 +1,14 @@
+# Exclude large/irrelevant directories from Docker build context
+# (used when backend build context is the project root)
+workspace/
+.git/
+.gitignore
+ScienceClaw/frontend/node_modules/
+ScienceClaw/frontend/.npm-cache/
+ScienceClaw/frontend/dist/
+ScienceClaw/websearch/
+!ScienceClaw/websearch/seekr_sdk.py
+*.pyc
+__pycache__/
+.env
+.cursor/
