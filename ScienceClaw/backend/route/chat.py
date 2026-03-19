@@ -20,6 +20,7 @@ from backend.config import settings
 from backend.deepagent.engine import get_llm_model
 from backend.deepagent.runner import arun_science_task_stream
 from backend.deepagent.sessions import async_create_science_session
+from backend.mongodb.db import db
 
 router = APIRouter(tags=["chat"])
 
@@ -95,6 +96,7 @@ class TaskChatRequest(BaseModel):
     source: str = Field(default="task", description="Must be 'task' for task invocation")
     task_id: Optional[str] = Field(default=None, description="Task ID for logging")
     user_id: Optional[str] = Field(default=None, description="Owner user_id so the created session appears in their Chats")
+    model_config_id: Optional[str] = Field(default=None, description="Model config ID to use for this task")
 
 
 async def _verify_task_api_key(x_api_key: Optional[str] = None) -> None:
@@ -122,10 +124,16 @@ async def task_chat(
         raise HTTPException(status_code=400, detail="input is required")
 
     owner_user_id = (body.user_id or "").strip() or "task-system"
+    model_config_dict = None
+    if body.model_config_id:
+        from backend.models import get_model_config
+        mc = await get_model_config(body.model_config_id)
+        if mc:
+            model_config_dict = mc.model_dump()
     session = await async_create_science_session(
         mode="deep",
         user_id=owner_user_id,
-        model_config=None,
+        model_config=model_config_dict,
         source="task",
     )
     chat_id = session.session_id
@@ -197,12 +205,30 @@ async def task_chat(
 
 class ParseScheduleRequest(BaseModel):
     schedule_desc: str = Field(..., description="自然语言定时描述")
+    model_config_id: Optional[str] = Field(default=None, description="Model config ID to use for parsing")
 
 
-def _is_model_configured() -> bool:
-    """系统是否已配置大模型（API Key 必填）。"""
-    key = (getattr(settings, "model_ds_api_key", None) or "").strip()
-    return bool(key)
+async def _resolve_any_model_config() -> Optional[dict]:
+    """找到任意一个可用的模型配置，供 get_llm_model 使用。
+
+    优先使用 settings 中的全局默认（DeepSeek env），
+    其次使用数据库中任意 active 且有 api_key 的模型。
+    无可用模型时返回 None。
+    """
+    if (getattr(settings, "model_ds_api_key", None) or "").strip():
+        return {"_use_default": True}
+    doc = await db.get_collection("models").find_one(
+        {"is_active": True, "api_key": {"$nin": ["", None]}},
+        sort=[("created_at", -1)],
+    )
+    if doc:
+        return {
+            "model_name": doc.get("model_name"),
+            "base_url": doc.get("base_url"),
+            "api_key": doc.get("api_key"),
+            "context_window": doc.get("context_window"),
+        }
+    return None
 
 
 @router.post("/task/parse-schedule")
@@ -228,14 +254,23 @@ async def parse_schedule(
                 "suggestions": ["每天早上9点", "每周一上午10点", "每30分钟执行一次"],
             },
         )
-    if not _is_model_configured():
-        raise HTTPException(
-            status_code=400,
-            detail="请先在设置中配置大模型（如 DeepSeek API Key 与模型），再使用自然语言定时。",
-        )
+    llm_config = None
+    if body.model_config_id:
+        from backend.models import get_model_config
+        mc = await get_model_config(body.model_config_id)
+        if mc:
+            llm_config = mc.model_dump()
+    if llm_config is None:
+        model_cfg = await _resolve_any_model_config()
+        if model_cfg is None:
+            raise HTTPException(
+                status_code=400,
+                detail="请先在设置中配置大模型（API Key 与模型），再使用自然语言定时。",
+            )
+        llm_config = None if "_use_default" in model_cfg else model_cfg
 
     try:
-        llm = get_llm_model(config=None, max_tokens_override=200, streaming=False)
+        llm = get_llm_model(config=llm_config, max_tokens_override=200, streaming=False)
         response = await llm.ainvoke([
             SystemMessage(content=PARSE_SCHEDULE_SYSTEM),
             HumanMessage(content=desc),

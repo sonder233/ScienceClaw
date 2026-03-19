@@ -65,6 +65,7 @@ class VerifyWebhookBody(BaseModel):
 
 class ValidateScheduleBody(BaseModel):
     schedule_desc: str = ""
+    model_config_id: Optional[str] = None
 
 
 @router.post("/validate-schedule")
@@ -74,7 +75,7 @@ async def validate_schedule(body: ValidateScheduleBody) -> dict:
     if not desc:
         raise HTTPException(status_code=400, detail="schedule_desc is required")
     try:
-        crontab = await parse_schedule_to_crontab(desc)
+        crontab = await parse_schedule_to_crontab(desc, model_config_id=body.model_config_id)
     except ScheduleParseError as e:
         detail = {"message": e.message, "suggestions": e.suggestions} if e.suggestions else e.message
         raise HTTPException(status_code=400, detail=detail)
@@ -112,7 +113,7 @@ async def create_task(body: TaskCreate) -> TaskOut:
     crontab = body.crontab
     if not crontab and body.schedule_desc:
         try:
-            crontab = await parse_schedule_to_crontab(body.schedule_desc)
+            crontab = await parse_schedule_to_crontab(body.schedule_desc, model_config_id=body.model_config_id)
         except ScheduleParseError as e:
             detail = {"message": e.message, "suggestions": e.suggestions} if e.suggestions else e.message
             raise HTTPException(status_code=400, detail=detail)
@@ -129,6 +130,7 @@ async def create_task(body: TaskCreate) -> TaskOut:
         "webhook": body.webhook,
         "webhook_ids": body.webhook_ids or [],
         "event_config": body.event_config or [],
+        "model_config_id": (body.model_config_id or "").strip() or None,
         "status": body.status or "enabled",
         "user_id": (body.user_id or "").strip() or None,
         "created_at": now,
@@ -196,7 +198,8 @@ async def update_task(task_id: str, body: TaskUpdate) -> TaskOut:
             update["crontab"] = body.crontab
         else:
             try:
-                crontab = await parse_schedule_to_crontab(body.schedule_desc)
+                mid = body.model_config_id or doc.get("model_config_id")
+                crontab = await parse_schedule_to_crontab(body.schedule_desc, model_config_id=mid)
                 if crontab:
                     update["crontab"] = crontab
             except ScheduleParseError as e:
@@ -210,6 +213,8 @@ async def update_task(task_id: str, body: TaskUpdate) -> TaskOut:
         update["webhook_ids"] = body.webhook_ids
     if body.event_config is not None:
         update["event_config"] = body.event_config
+    if body.model_config_id is not None:
+        update["model_config_id"] = (body.model_config_id or "").strip() or None
     if body.status is not None:
         update["status"] = body.status
     if body.user_id is not None:

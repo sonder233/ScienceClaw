@@ -50,7 +50,7 @@ services:
     volumes:
       - ./ScienceClaw/websearch/config/settings.yml:/etc/searxng/settings.yml
     ports:
-      - "8080:8080"
+      - "26080:8080"
     restart: unless-stopped
 
   # ── 网页搜索 + 爬取服务（替代 Tavily） ──

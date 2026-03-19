@@ -31,6 +31,7 @@ export interface Task {
   webhook?: string;
   webhook_ids?: string[];
   event_config: string[];
+  model_config_id?: string;
   status: string;
   created_at?: string;
   updated_at?: string;
@@ -61,6 +62,7 @@ export interface TaskCreatePayload {
   webhook?: string;
   webhook_ids?: string[];
   event_config?: string[];
+  model_config_id?: string;
   status?: string;
   user_id?: string;
 }
@@ -73,6 +75,7 @@ export interface TaskUpdatePayload {
   webhook?: string;
   webhook_ids?: string[];
   event_config?: string[];
+  model_config_id?: string;
   status?: string;
   user_id?: string;
 }
@@ -109,10 +112,10 @@ export async function verifyWebhook(webhookUrl: string, taskName: string): Promi
   return data;
 }
 
-export async function validateSchedule(scheduleDesc: string): Promise<{ valid: boolean; crontab: string; next_run: string }> {
-  const { data } = await taskClient.post<{ valid: boolean; crontab: string; next_run: string }>('/tasks/validate-schedule', {
-    schedule_desc: scheduleDesc || '',
-  });
+export async function validateSchedule(scheduleDesc: string, modelConfigId?: string): Promise<{ valid: boolean; crontab: string; next_run: string }> {
+  const payload: Record<string, string> = { schedule_desc: scheduleDesc || '' };
+  if (modelConfigId) payload.model_config_id = modelConfigId;
+  const { data } = await taskClient.post<{ valid: boolean; crontab: string; next_run: string }>('/tasks/validate-schedule', payload);
   return data;
 }
 

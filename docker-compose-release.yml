@@ -45,7 +45,7 @@ services:
     volumes:
     - ./ScienceClaw/websearch/config/settings.yml:/etc/searxng/settings.yml
     ports:
-    - 8080:8080
+    - 26080:8080
     restart: unless-stopped
   websearch:
     image: swr.cn-north-4.myhuaweicloud.com/claw/scienceclaw-websearch:release-v0.0.3

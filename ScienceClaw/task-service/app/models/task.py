@@ -15,6 +15,7 @@ class TaskCreate(BaseModel):
     webhook: Optional[str] = Field(None, description="Legacy single Feishu webhook URL")
     webhook_ids: Optional[List[str]] = Field(default_factory=list, description="Managed webhook IDs")
     event_config: Optional[List[str]] = Field(default_factory=list, description="Events to notify")
+    model_config_id: Optional[str] = Field(None, description="Model config ID for this task")
     status: str = Field(default="enabled", description="enabled | disabled")
     user_id: Optional[str] = Field(None, description="Owner user_id so task-run sessions appear in their Chats")
 
@@ -27,6 +28,7 @@ class TaskUpdate(BaseModel):
     webhook: Optional[str] = None
     webhook_ids: Optional[List[str]] = None
     event_config: Optional[List[str]] = None
+    model_config_id: Optional[str] = None
     status: Optional[str] = None
     user_id: Optional[str] = None
 
@@ -40,6 +42,7 @@ class TaskOut(BaseModel):
     webhook: Optional[str] = None
     webhook_ids: List[str] = Field(default_factory=list)
     event_config: List[str] = Field(default_factory=list)
+    model_config_id: Optional[str] = None
     status: str
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -89,6 +92,7 @@ def task_doc_to_out(doc: Dict[str, Any]) -> TaskOut:
         webhook=doc.get("webhook"),
         webhook_ids=doc.get("webhook_ids") or [],
         event_config=doc.get("event_config") or [],
+        model_config_id=doc.get("model_config_id"),
         status=doc.get("status", "enabled"),
         created_at=doc.get("created_at"),
         updated_at=doc.get("updated_at"),

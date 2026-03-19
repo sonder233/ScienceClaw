@@ -45,12 +45,14 @@ def _get_sync_db():
     return client[settings.mongodb_db_name]
 
 
-def _run_chat_sync(task_id: str, prompt: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+def _run_chat_sync(task_id: str, prompt: str, user_id: Optional[str] = None, model_config_id: Optional[str] = None) -> Dict[str, Any]:
     """Sync HTTP call to Chat Service. user_id: owner so the session appears in their Chats."""
     url = f"{settings.chat_service_url.rstrip('/')}/api/v1/chat"
     payload = {"input": prompt, "source": "task", "task_id": task_id}
     if user_id:
         payload["user_id"] = user_id
+    if model_config_id:
+        payload["model_config_id"] = model_config_id
     headers = {"Content-Type": "application/json"}
     if settings.chat_service_api_key:
         headers["X-API-Key"] = settings.chat_service_api_key
@@ -164,6 +166,7 @@ def run_task(self, task_id: str) -> None:
     webhook = doc.get("webhook") or ""
     webhook_ids = doc.get("webhook_ids") or []
     event_config = doc.get("event_config") or []
+    model_config_id = (doc.get("model_config_id") or "").strip() or None
     notify_start = "notify_on_start" in event_config
     user_id = (doc.get("user_id") or "").strip() or None
     start_time = datetime.now(timezone.utc)
@@ -186,7 +189,7 @@ def run_task(self, task_id: str) -> None:
         if notify_start:
             _notify_start_sync(webhook, webhook_ids, db, name, start_time)
 
-        result = _run_chat_sync(task_id, prompt, user_id=user_id)
+        result = _run_chat_sync(task_id, prompt, user_id=user_id, model_config_id=model_config_id)
         end_time = datetime.now(timezone.utc)
         if "error" in result:
             db.task_runs.update_one(

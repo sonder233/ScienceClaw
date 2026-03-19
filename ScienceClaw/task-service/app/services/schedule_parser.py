@@ -22,7 +22,7 @@ class ScheduleParseError(Exception):
         super().__init__(message)
 
 
-async def parse_schedule_to_crontab(schedule_desc: str) -> Optional[str]:
+async def parse_schedule_to_crontab(schedule_desc: str, model_config_id: Optional[str] = None) -> Optional[str]:
     """
     调用主服务（Chat Service）的「定时描述转 crontab」接口，使用系统配置的大模型。
     若主服务返回 400 且提示未配置大模型，抛出 ScheduleParseError，由 API 层返回给用户。
@@ -37,9 +37,13 @@ async def parse_schedule_to_crontab(schedule_desc: str) -> Optional[str]:
     if settings.chat_service_api_key:
         headers["X-API-Key"] = settings.chat_service_api_key
 
+    payload: dict = {"schedule_desc": desc}
+    if model_config_id:
+        payload["model_config_id"] = model_config_id
+
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(url, json={"schedule_desc": desc}, headers=headers)
+            resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code == 200:
                 data = resp.json()
                 crontab = (data.get("crontab") or "").strip()

@@ -33,6 +33,49 @@
             />
           </div>
 
+          <!-- Model selector -->
+          <div class="rounded-2xl bg-white dark:bg-[#1e1e1e] border border-gray-100 dark:border-gray-800 p-5" ref="modelDropdownRef">
+            <label class="block text-sm font-medium text-[var(--text-primary)] mb-2">{{ t('Model') }}</label>
+            <div class="relative">
+              <button type="button" @click="modelDropdownOpen = !modelDropdownOpen"
+                class="w-full flex items-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-700 bg-[#f8f9fb] dark:bg-[#111] text-[var(--text-primary)] hover:border-teal-400 focus:ring-2 focus:ring-teal-500/30 focus:border-teal-500 transition-colors">
+                <template v-if="selectedModel">
+                  <ProviderIcon :provider="selectedModel.provider" class="size-5 flex-shrink-0" />
+                  <span class="flex-1 text-left truncate text-sm">{{ modelDisplayName(selectedModel) }}</span>
+                  <span class="text-[10px] text-[var(--text-tertiary)]">{{ selectedModel.provider }}</span>
+                </template>
+                <template v-else>
+                  <span class="flex-1 text-left text-sm text-[var(--text-tertiary)]">{{ t('Select model') }}</span>
+                </template>
+                <ChevronDown :size="14" class="flex-shrink-0 text-[var(--text-tertiary)]" />
+              </button>
+              <Transition name="slide-fade">
+                <div v-if="modelDropdownOpen"
+                  class="absolute z-20 left-0 right-0 mt-1 bg-white dark:bg-[#1e1e1e] border border-gray-200 dark:border-gray-700 rounded-xl shadow-lg overflow-hidden">
+                  <div class="bg-[#f8f9fb] dark:bg-[#111] px-3 py-2 border-b border-gray-100 dark:border-gray-800">
+                    <span class="text-xs font-medium text-[var(--text-tertiary)]">Select Model</span>
+                  </div>
+                  <div class="flex flex-col max-h-[300px] overflow-y-auto p-1">
+                    <button v-for="model in models" :key="model.id" type="button"
+                      @click="selectTaskModel(model.id)"
+                      class="flex items-center gap-2.5 w-full px-3 py-2.5 rounded-lg text-left transition-colors"
+                      :class="form.model_config_id === model.id ? 'bg-teal-50 dark:bg-teal-900/20' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'">
+                      <ProviderIcon :provider="model.provider" class="size-5 flex-shrink-0" />
+                      <div class="flex-1 min-w-0">
+                        <span class="text-sm font-medium text-[var(--text-primary)] truncate block">{{ modelDisplayName(model) }}</span>
+                        <span class="text-[10px] text-[var(--text-tertiary)] truncate block">{{ model.provider }}</span>
+                      </div>
+                      <CheckCircle2 v-if="form.model_config_id === model.id" :size="16" class="flex-shrink-0 text-teal-500" />
+                    </button>
+                    <div v-if="models.length === 0" class="px-4 py-6 text-center text-xs text-[var(--text-tertiary)]">
+                      {{ t('No models configured') }}
+                    </div>
+                  </div>
+                </div>
+              </Transition>
+            </div>
+          </div>
+
           <!-- Schedule -->
           <div class="rounded-2xl bg-white dark:bg-[#1e1e1e] border border-gray-100 dark:border-gray-800 p-5" ref="scheduleComboRef">
             <label class="block text-sm font-medium text-[var(--text-primary)] mb-2">{{ t('Schedule') }}</label>
@@ -231,13 +274,16 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
-import { CalendarClock, Clock, CheckCircle2, AlertCircle, Plus, X, Settings2 } from 'lucide-vue-next';
+import { CalendarClock, Clock, CheckCircle2, AlertCircle, Plus, X, Settings2, ChevronDown } from 'lucide-vue-next';
 import { getTask, createTask, updateTask, validateSchedule } from '@/api/tasks';
 import { listWebhooks } from '@/api/webhooks';
+import { listModels } from '@/api/models';
+import type { ModelConfig } from '@/api/models';
 import type { Webhook } from '@/api/webhooks';
 import { getAuthStatus } from '@/api/auth';
 import { useSettingsDialog } from '@/composables/useSettingsDialog';
 import { showSuccessToast, showErrorToast } from '@/utils/toast';
+import ProviderIcon from '@/components/icons/ProviderIcon.vue';
 
 const { t } = useI18n();
 const route = useRoute();
@@ -253,10 +299,24 @@ const form = ref({
   schedule_desc: '',
   webhook: '',
   webhook_ids: [] as string[],
+  model_config_id: '',
   status: 'enabled',
 });
 const loading = ref(true);
 const saving = ref(false);
+
+// ---- Model selector ----
+const models = ref<ModelConfig[]>([]);
+const modelDropdownOpen = ref(false);
+const modelDropdownRef = ref<HTMLElement | null>(null);
+const selectedModel = computed(() => models.value.find(m => m.id === form.value.model_config_id) ?? null);
+function selectTaskModel(modelId: string) {
+  form.value.model_config_id = modelId;
+  modelDropdownOpen.value = false;
+}
+function modelDisplayName(m: ModelConfig) {
+  return m.name.toLowerCase() === 'system' ? m.model_name : m.name;
+}
 
 // Webhook multi-select
 const allWebhooks = ref<Webhook[]>([]);
@@ -308,6 +368,9 @@ function onClickOutside(e: MouseEvent) {
   if (scheduleComboRef.value && !scheduleComboRef.value.contains(e.target as Node)) {
     scheduleDropdownOpen.value = false;
   }
+  if (modelDropdownRef.value && !modelDropdownRef.value.contains(e.target as Node)) {
+    modelDropdownOpen.value = false;
+  }
   onClickOutsideWebhook(e);
 }
 onMounted(() => document.addEventListener('mousedown', onClickOutside));
@@ -317,7 +380,11 @@ const loadTask = async () => {
   try {
     allWebhooks.value = await listWebhooks();
   } catch { allWebhooks.value = []; }
+  try {
+    models.value = await listModels();
+  } catch { models.value = []; }
   if (!isEdit.value) {
+    if (models.value.length > 0) form.value.model_config_id = models.value[0].id;
     loading.value = false;
     return;
   }
@@ -329,6 +396,7 @@ const loadTask = async () => {
       schedule_desc: task.schedule_desc,
       webhook: task.webhook || '',
       webhook_ids: task.webhook_ids || [],
+      model_config_id: task.model_config_id || '',
       status: task.status,
     };
   } catch (e) {
@@ -396,7 +464,7 @@ const verifyScheduleClick = async () => {
   scheduleVerified.value = false;
   scheduleDropdownOpen.value = false;
   try {
-    const res = await validateSchedule(desc);
+    const res = await validateSchedule(desc, form.value.model_config_id || undefined);
     if (res.valid && res.next_run) {
       scheduleVerifyNextRun.value = res.next_run;
       scheduleVerified.value = true;
@@ -422,6 +490,7 @@ const submit = async () => {
       schedule_desc: form.value.schedule_desc,
       webhook: form.value.webhook || undefined,
       webhook_ids: form.value.webhook_ids,
+      model_config_id: form.value.model_config_id || undefined,
       status: form.value.status,
       user_id: userId,
     };

@@ -166,6 +166,49 @@
                 :placeholder="t('e.g. Daily AI News')" />
             </div>
 
+            <!-- Model selector -->
+            <div ref="modelDropdownRef">
+              <label class="block text-[11px] font-medium text-[var(--text-tertiary)] mb-1">{{ t('Model') }}</label>
+              <div class="relative">
+                <button type="button" @click="modelDropdownOpen = !modelDropdownOpen"
+                  class="w-full flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#1e1e1e] text-sm text-[var(--text-primary)] hover:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-400/30 focus:border-sky-400 transition-colors">
+                  <template v-if="selectedModel">
+                    <ProviderIcon :provider="selectedModel.provider" class="size-4 flex-shrink-0" />
+                    <span class="flex-1 text-left truncate">{{ modelDisplayName(selectedModel) }}</span>
+                    <span class="text-[10px] text-[var(--text-tertiary)]">{{ selectedModel.provider }}</span>
+                  </template>
+                  <template v-else>
+                    <span class="flex-1 text-left text-[var(--text-tertiary)]">{{ t('Select model') }}</span>
+                  </template>
+                  <ChevronDown :size="14" class="flex-shrink-0 text-[var(--text-tertiary)]" />
+                </button>
+                <Transition name="slide-fade">
+                  <div v-if="modelDropdownOpen"
+                    class="absolute z-20 left-0 right-0 mt-1 bg-white dark:bg-[#1e1e1e] border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg overflow-hidden">
+                    <div class="bg-[#f8f9fb] dark:bg-[#111] px-3 py-1.5 border-b border-gray-100 dark:border-gray-800">
+                      <span class="text-[10px] font-medium text-[var(--text-tertiary)]">Select Model</span>
+                    </div>
+                    <div class="flex flex-col max-h-[240px] overflow-y-auto p-1">
+                      <button v-for="model in models" :key="model.id" type="button"
+                        @click="selectTaskModel(model.id)"
+                        class="flex items-center gap-2.5 w-full px-2.5 py-2 rounded-md text-left transition-colors"
+                        :class="form.model_config_id === model.id ? 'bg-sky-50 dark:bg-sky-900/20' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'">
+                        <ProviderIcon :provider="model.provider" class="size-4 flex-shrink-0" />
+                        <div class="flex-1 min-w-0">
+                          <span class="text-xs font-medium text-[var(--text-primary)] truncate block">{{ modelDisplayName(model) }}</span>
+                          <span class="text-[10px] text-[var(--text-tertiary)] truncate block">{{ model.provider }}</span>
+                        </div>
+                        <CheckCircle2 v-if="form.model_config_id === model.id" :size="14" class="flex-shrink-0 text-sky-500" />
+                      </button>
+                      <div v-if="models.length === 0" class="px-3 py-4 text-center text-[11px] text-[var(--text-tertiary)]">
+                        {{ t('No models configured') }}
+                      </div>
+                    </div>
+                  </div>
+                </Transition>
+              </div>
+            </div>
+
             <div ref="scheduleComboRef">
               <label class="block text-[11px] font-medium text-[var(--text-tertiary)] mb-1">{{ t('Schedule') }}</label>
               <div class="relative">
@@ -425,15 +468,18 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { CalendarClock, Plus, AlertCircle, Clock, CheckCircle2, X, Settings2, Activity, Share2, RefreshCw, MoreVertical, Search } from 'lucide-vue-next';
+import { CalendarClock, Plus, AlertCircle, Clock, CheckCircle2, X, Settings2, Activity, Share2, RefreshCw, MoreVertical, Search, ChevronDown } from 'lucide-vue-next';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { listTasks, getTask, createTask, updateTask, deleteTask, validateSchedule, listTaskRuns, listTaskRunsByOffset } from '@/api/tasks';
 import { listWebhooks } from '@/api/webhooks';
+import { listModels } from '@/api/models';
+import type { ModelConfig } from '@/api/models';
 import type { Task, TaskRun } from '@/api/tasks';
 import type { Webhook } from '@/api/webhooks';
 import { getAuthStatus } from '@/api/auth';
 import { useSettingsDialog } from '@/composables/useSettingsDialog';
 import { showSuccessToast, showErrorToast } from '@/utils/toast';
+import ProviderIcon from '@/components/icons/ProviderIcon.vue';
 
 const { t } = useI18n();
 const { openSettingsDialog } = useSettingsDialog();
@@ -495,18 +541,31 @@ async function confirmAndDelete() {
 }
 
 // ---- Config form state ----
-const form = ref({ name: '', prompt: '', schedule_desc: '', webhook: '', webhook_ids: [] as string[], event_config: [] as string[], status: 'enabled' });
+const form = ref({ name: '', prompt: '', schedule_desc: '', webhook: '', webhook_ids: [] as string[], event_config: [] as string[], model_config_id: '', status: 'enabled' });
 const savedSnapshot = ref('');
 const configLoading = ref(false);
 const saving = ref(false);
 
 const formDirty = computed(() => {
   if (isCreating.value) return true;
-  return JSON.stringify({ name: form.value.name, prompt: form.value.prompt, schedule_desc: form.value.schedule_desc, webhook_ids: form.value.webhook_ids, event_config: form.value.event_config, status: form.value.status }) !== savedSnapshot.value;
+  return JSON.stringify({ name: form.value.name, prompt: form.value.prompt, schedule_desc: form.value.schedule_desc, webhook_ids: form.value.webhook_ids, event_config: form.value.event_config, model_config_id: form.value.model_config_id, status: form.value.status }) !== savedSnapshot.value;
 });
 
 function snapshotForm() {
-  savedSnapshot.value = JSON.stringify({ name: form.value.name, prompt: form.value.prompt, schedule_desc: form.value.schedule_desc, webhook_ids: form.value.webhook_ids, event_config: form.value.event_config, status: form.value.status });
+  savedSnapshot.value = JSON.stringify({ name: form.value.name, prompt: form.value.prompt, schedule_desc: form.value.schedule_desc, webhook_ids: form.value.webhook_ids, event_config: form.value.event_config, model_config_id: form.value.model_config_id, status: form.value.status });
+}
+
+// ---- Model selector ----
+const models = ref<ModelConfig[]>([]);
+const modelDropdownOpen = ref(false);
+const modelDropdownRef = ref<HTMLElement | null>(null);
+const selectedModel = computed(() => models.value.find(m => m.id === form.value.model_config_id) ?? null);
+function selectTaskModel(modelId: string) {
+  form.value.model_config_id = modelId;
+  modelDropdownOpen.value = false;
+}
+function modelDisplayName(m: ModelConfig) {
+  return m.name.toLowerCase() === 'system' ? m.model_name : m.name;
 }
 
 // Schedule combo
@@ -571,7 +630,7 @@ function cancelCreate() {
 
 // ========== Config actions ==========
 function resetForm() {
-  form.value = { name: '', prompt: '', schedule_desc: '', webhook: '', webhook_ids: [], event_config: [], status: 'enabled' };
+  form.value = { name: '', prompt: '', schedule_desc: '', webhook: '', webhook_ids: [], event_config: [], model_config_id: models.value.length > 0 ? models.value[0].id : '', status: 'enabled' };
   savedSnapshot.value = '';
   scheduleError.value = '';
   scheduleSuggestions.value = [];
@@ -591,6 +650,7 @@ async function loadTaskConfig(taskId: string) {
       webhook: task.webhook || '',
       webhook_ids: task.webhook_ids || [],
       event_config: task.event_config || [],
+      model_config_id: task.model_config_id || '',
       status: task.status,
     };
     snapshotForm();
@@ -615,6 +675,7 @@ async function submit() {
       webhook: form.value.webhook || undefined,
       webhook_ids: form.value.webhook_ids,
       event_config: form.value.event_config,
+      model_config_id: form.value.model_config_id || undefined,
       status: form.value.status,
       user_id: userId,
     };
@@ -704,7 +765,7 @@ async function verifyScheduleClick() {
   scheduleVerified.value = false;
   scheduleDropdownOpen.value = false;
   try {
-    const res = await validateSchedule(desc);
+    const res = await validateSchedule(desc, form.value.model_config_id || undefined);
     if (res.valid && res.next_run) {
       scheduleVerifyNextRun.value = res.next_run;
       scheduleVerified.value = true;
@@ -917,6 +978,7 @@ function viewRunResult(run: TaskRun) { resultDialogContent.value = run.result ||
 function onClickOutside(e: MouseEvent) {
   if (scheduleComboRef.value && !scheduleComboRef.value.contains(e.target as Node)) scheduleDropdownOpen.value = false;
   if (webhookDropdownRef.value && !webhookDropdownRef.value.contains(e.target as Node)) webhookDropdownOpen.value = false;
+  if (modelDropdownRef.value && !modelDropdownRef.value.contains(e.target as Node)) modelDropdownOpen.value = false;
   if (taskMenuOpenId.value) {
     const menuEl = menuRefs.get(taskMenuOpenId.value);
     if (menuEl && !menuEl.contains(e.target as Node)) taskMenuOpenId.value = null;
@@ -927,6 +989,7 @@ function onClickOutside(e: MouseEvent) {
 onMounted(async () => {
   document.addEventListener('mousedown', onClickOutside);
   try { allWebhooks.value = await listWebhooks(); } catch { allWebhooks.value = []; }
+  try { models.value = await listModels(); } catch { models.value = []; }
   await loadTasks();
   if (tasks.value.length > 0 && !selectedTaskId.value) {
     selectTask(tasks.value[0]);
