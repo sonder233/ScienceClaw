@@ -14,9 +14,62 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 from langchain_openai import ChatOpenAI
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage
 
 from backend.config import settings
+
+
+# ─── Monkey-patch langchain-openai to preserve reasoning_content ─────────────
+# MiniMax, Kimi, and other thinking-enabled models require reasoning_content
+# in assistant messages for multi-turn tool-calling flows.
+# langchain-openai drops this field in both directions by default.
+# See: https://github.com/langchain-ai/langchain/issues/34706
+try:
+    from langchain_openai.chat_models import base as _lc_oai_base
+
+    _orig_convert_dict_to_message = _lc_oai_base._convert_dict_to_message
+
+    def _patched_convert_dict_to_message(_dict, *args, **kwargs):
+        msg = _orig_convert_dict_to_message(_dict, *args, **kwargs)
+        if isinstance(msg, AIMessage) and isinstance(_dict, dict):
+            rc = _dict.get("reasoning_content")
+            if rc is not None and "reasoning_content" not in (msg.additional_kwargs or {}):
+                msg.additional_kwargs["reasoning_content"] = rc
+        return msg
+
+    _lc_oai_base._convert_dict_to_message = _patched_convert_dict_to_message
+
+    _orig_convert_message_to_dict = _lc_oai_base._convert_message_to_dict
+
+    def _patched_convert_message_to_dict(message, *args, **kwargs):
+        result = _orig_convert_message_to_dict(message, *args, **kwargs)
+        if (
+            result.get("role") == "assistant"
+            and hasattr(message, "additional_kwargs")
+            and isinstance(message.additional_kwargs, dict)
+        ):
+            rc = message.additional_kwargs.get("reasoning_content")
+            if rc is not None and "reasoning_content" not in result:
+                result["reasoning_content"] = rc
+        return result
+
+    _lc_oai_base._convert_message_to_dict = _patched_convert_message_to_dict
+
+    _orig_convert_delta = _lc_oai_base._convert_delta_to_message_chunk
+
+    def _patched_convert_delta_to_message_chunk(_dict, default_class):
+        chunk = _orig_convert_delta(_dict, default_class)
+        if hasattr(chunk, "additional_kwargs") and isinstance(_dict, dict):
+            rc = _dict.get("reasoning_content")
+            if rc is not None and "reasoning_content" not in chunk.additional_kwargs:
+                chunk.additional_kwargs["reasoning_content"] = rc
+        return chunk
+
+    _lc_oai_base._convert_delta_to_message_chunk = _patched_convert_delta_to_message_chunk
+
+    logger.info("[Engine] Patched langchain-openai for reasoning_content round-trip support")
+except Exception as e:
+    logger.warning(f"[Engine] Failed to patch langchain-openai for reasoning_content: {e}")
 
 # model_name 子串 → context window (tokens)
 # 匹配顺序：从上到下，先匹配先生效（更具体的模式放前面）
@@ -198,22 +251,58 @@ def _flatten_content(msg: BaseMessage) -> BaseMessage:
     return msg.copy(update={"content": "\n".join(parts) or "(empty)"})
 
 
+_THINKING_MODEL_PATTERNS = ("minimax", "kimi", "moonshot")
+
+
 class _SafeChatOpenAI(ChatOpenAI):
-    """ChatOpenAI subclass that sanitises list-type message content before
-    every API call, preventing ``invalid type: sequence`` errors on
-    OpenAI-compatible providers that only accept string content."""
+    """ChatOpenAI subclass with two compatibility layers:
+
+    1. Content flattening — prevents ``invalid type: sequence`` errors on
+       providers that only accept string content.
+    2. reasoning_content injection — ensures thinking-enabled models
+       (MiniMax, Kimi, etc.) receive reasoning_content in all assistant
+       messages, which they require for multi-turn tool-calling flows.
+    """
+
+    @property
+    def _is_thinking_model(self) -> bool:
+        model_lower = (
+            getattr(self, "model_name", None)
+            or getattr(self, "model", "")
+            or ""
+        ).lower()
+        return any(p in model_lower for p in _THINKING_MODEL_PATTERNS)
+
+    def _ensure_reasoning_content(self, messages: List[BaseMessage]) -> List[BaseMessage]:
+        """Inject reasoning_content placeholder into AIMessages for thinking models.
+
+        Thinking-enabled APIs (MiniMax, Kimi) reject assistant messages—especially
+        those with tool_calls—that lack reasoning_content when thinking mode is on.
+        """
+        if not self._is_thinking_model:
+            return messages
+        result = []
+        for msg in messages:
+            if isinstance(msg, AIMessage):
+                kwargs = msg.additional_kwargs or {}
+                if "reasoning_content" not in kwargs:
+                    msg = msg.copy(update={"additional_kwargs": {**kwargs, "reasoning_content": ""}})
+            result.append(msg)
+        return result
 
     def _sanitize_messages(self, args: tuple, kwargs: dict) -> tuple:
-        """Extract messages from args/kwargs, flatten content, return updated args."""
+        """Flatten content and ensure reasoning_content, return updated args."""
         if args:
-            messages = [_flatten_content(m) for m in args[0]]
+            messages = self._ensure_reasoning_content([_flatten_content(m) for m in args[0]])
             return (messages, *args[1:]), kwargs
         if "messages" in kwargs:
-            kwargs["messages"] = [_flatten_content(m) for m in kwargs["messages"]]
+            kwargs["messages"] = self._ensure_reasoning_content(
+                [_flatten_content(m) for m in kwargs["messages"]]
+            )
         return args, kwargs
 
     def _generate(self, messages: List[BaseMessage], stop: Optional[List[str]] = None, run_manager: Any = None, **kwargs: Any):  # type: ignore[override]
-        messages = [_flatten_content(m) for m in messages]
+        messages = self._ensure_reasoning_content([_flatten_content(m) for m in messages])
         try:
             return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
         except ValueError as e:
@@ -230,7 +319,7 @@ class _SafeChatOpenAI(ChatOpenAI):
             raise
 
     async def _agenerate(self, messages: List[BaseMessage], stop: Optional[List[str]] = None, run_manager: Any = None, **kwargs: Any):  # type: ignore[override]
-        messages = [_flatten_content(m) for m in messages]
+        messages = self._ensure_reasoning_content([_flatten_content(m) for m in messages])
         try:
             return await super()._agenerate(messages, stop=stop, run_manager=run_manager, **kwargs)
         except ValueError as e:
@@ -253,7 +342,6 @@ class _SafeChatOpenAI(ChatOpenAI):
 
     async def _astream(self, *args: Any, **kwargs: Any) -> Any:  # type: ignore[override]
         args, kwargs = self._sanitize_messages(args, kwargs)
-        # 确保 stream_options 包含 include_usage
         if "stream_options" not in kwargs:
             kwargs["stream_options"] = {"include_usage": True}
         async for chunk in super()._astream(*args, **kwargs):
