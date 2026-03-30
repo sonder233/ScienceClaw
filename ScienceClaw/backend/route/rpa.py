@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -11,6 +11,8 @@ from backend.rpa.executor import ScriptExecutor
 from backend.rpa.skill_exporter import SkillExporter
 from backend.rpa.assistant import RPAAssistant
 from backend.user.dependencies import get_current_user, User
+from backend.config import settings
+from backend.mongodb.db import db
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,30 @@ class SaveSkillRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+
+
+async def _resolve_user_model_config(user_id: str) -> dict | None:
+    """Resolve the user's model config for the RPA assistant.
+
+    Priority: user's own models → system models → env defaults (None).
+    """
+    # Try user's own active model first, then system models
+    doc = await db.get_collection("models").find_one(
+        {"$or": [{"user_id": user_id}, {"is_system": True}], "is_active": True, "api_key": {"$nin": ["", None]}},
+        sort=[("is_system", 1), ("updated_at", -1)],  # user models first
+    )
+    if doc:
+        return {
+            "model_name": doc.get("model_name"),
+            "base_url": doc.get("base_url"),
+            "api_key": doc.get("api_key"),
+            "context_window": doc.get("context_window"),
+            "provider": doc.get("provider", ""),
+        }
+    # Fall back to env defaults
+    if (getattr(settings, "model_ds_api_key", None) or "").strip():
+        return None  # get_llm_model(config=None) uses env defaults
+    return None
 
 
 @router.post("/session/start")
@@ -156,6 +182,9 @@ async def chat_with_assistant(
     if session.user_id != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not authorized")
 
+    # Resolve user's model config
+    model_config = await _resolve_user_model_config(str(current_user.id))
+
     steps = [step.model_dump() for step in session.steps]
 
     async def event_generator():
@@ -165,6 +194,7 @@ async def chat_with_assistant(
                 sandbox_session_id=session.sandbox_session_id,
                 message=request.message,
                 steps=steps,
+                model_config=model_config,
             ):
                 evt_type = event.get("event", "message")
                 evt_data = event.get("data", {})

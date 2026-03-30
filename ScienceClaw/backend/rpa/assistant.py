@@ -92,6 +92,7 @@ class RPAAssistant:
         sandbox_session_id: str,
         message: str,
         steps: List[Dict[str, Any]],
+        model_config: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Stream AI assistant response. Yields SSE event dicts."""
 
@@ -105,7 +106,7 @@ class RPAAssistant:
 
         # 3. Stream LLM response
         full_response = ""
-        async for chunk_text in self._stream_llm(messages):
+        async for chunk_text in self._stream_llm(messages, model_config):
             full_response += chunk_text
             yield {"event": "message_chunk", "data": {"text": chunk_text}}
 
@@ -133,7 +134,7 @@ class RPAAssistant:
                 {"role": "user", "content": f"执行报错：{result['error']}\n请修正代码重试。"},
             ]
             retry_response = ""
-            async for chunk_text in self._stream_llm(retry_messages):
+            async for chunk_text in self._stream_llm(retry_messages, model_config):
                 retry_response += chunk_text
                 yield {"event": "message_chunk", "data": {"text": chunk_text}}
 
@@ -225,9 +226,9 @@ class RPAAssistant:
         messages.append({"role": "user", "content": context})
         return messages
 
-    async def _stream_llm(self, messages: List[Dict[str, str]]) -> AsyncGenerator[str, None]:
+    async def _stream_llm(self, messages: List[Dict[str, str]], model_config: Optional[Dict[str, Any]] = None) -> AsyncGenerator[str, None]:
         """Stream LLM response chunks."""
-        model = get_llm_model(streaming=True)
+        model = get_llm_model(config=model_config, streaming=True)
         from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
         lc_messages = []
