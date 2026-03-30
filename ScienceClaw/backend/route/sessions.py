@@ -714,7 +714,6 @@ async def get_shared_session(session_id: str) -> ApiResponse:
 
 from backend.mongodb.db import db as _db
 
-_EXTERNAL_SKILLS_DIR = os.environ.get("EXTERNAL_SKILLS_DIR", "/app/Skills")
 _BUILTIN_SKILLS_DIR = os.environ.get("BUILTIN_SKILLS_DIR", "/app/builtin_skills")
 _WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", "/home/scienceclaw")
 
@@ -1647,10 +1646,11 @@ async def _agent_background_worker(
 
         # Auto-detect skills
         try:
-            saved_skills = {
-                d.name for d in _Path(_EXTERNAL_SKILLS_DIR).iterdir()
-                if d.is_dir() and not d.name.startswith(".")
-            } if _Path(_EXTERNAL_SKILLS_DIR).is_dir() else set()
+            col = _db.get_collection("skills")
+            saved_skills = set()
+            async for doc in col.find({"user_id": session.user_id}, {"name": 1}):
+                if doc.get("name"):
+                    saved_skills.add(doc["name"])
             detected_skills: set = set()
             for sub in [".agents/skills", "skills"]:
                 skills_dir = _Path(_WORKSPACE_DIR) / session_id / sub

@@ -8,7 +8,7 @@ agent.py — 组装 DeepAgent：系统提示词 + 模型 + 工具（内置 + 外
     - 通过 Docker 共享卷同步文件
   - CompositeBackend 路由：
     - /builtin-skills/ → FilesystemBackend（内置 skills，只读，始终加载）
-    - /skills/         → FilteredFilesystemBackend（外置 skills，可屏蔽/删除）
+    - /skills/         → MongoSkillBackend（用户外置 skills，MongoDB 多租户隔离）
   - deepagents 内置工具层统一管理所有工具（不再使用 MCP sandbox 工具）
 
 Skills 架构：

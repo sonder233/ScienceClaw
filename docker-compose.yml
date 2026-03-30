@@ -87,7 +87,6 @@ services:
       - ./ScienceClaw/backend:/app/backend
       - ./ScienceClaw/backend/builtin_skills:/app/builtin_skills:ro
       - ./Tools:/app/Tools
-      - ./Skills:/app/Skills
       - ./workspace:/home/scienceclaw
     environment:
       SANDBOX_REST_URL: http://sandbox:8080
