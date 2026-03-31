@@ -8,7 +8,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 from playwright.async_api import Page, BrowserContext
 
-from .cdp_connector import cdp_connector
+from .cdp_connector import get_cdp_connector
 
 logger = logging.getLogger(__name__)
 
@@ -452,7 +452,7 @@ class RPASessionManager:
         )
         self.sessions[session_id] = session
 
-        browser = await cdp_connector.get_browser()
+        browser = await get_cdp_connector().get_browser()
         context = await browser.new_context(no_viewport=True)
         page = await context.new_page()
 
