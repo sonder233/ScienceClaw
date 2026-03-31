@@ -35,9 +35,6 @@ services:
     volumes:
     - scienceclaw_mongo_data:/data/db
     restart: unless-stopped
-  redis:
-    image: swr.cn-north-4.myhuaweicloud.com/claw/scienceclaw-redis:release-v0.0.4
-    restart: unless-stopped
   backend:
     image: swr.cn-north-4.myhuaweicloud.com/claw/scienceclaw-backend:release-v0.0.4
     volumes:
@@ -95,7 +92,6 @@ services:
       MONGODB_DB: ai_agent
       MONGODB_USER: scienceone
       MONGODB_PASSWORD: Yp51Bi1eEjC77sAt
-      REDIS_URL: redis://redis:6379/0
       CHAT_SERVICE_URL: http://backend:8000
       CHAT_SERVICE_API_KEY: ${TASK_SERVICE_API_KEY:-}
       DS_API_KEY: ${API_KEY:-}
@@ -108,47 +104,7 @@ services:
     depends_on:
       mongo:
         condition: service_started
-      redis:
-        condition: service_started
       backend:
-        condition: service_started
-  celery_worker:
-    image: swr.cn-north-4.myhuaweicloud.com/claw/scienceclaw-task-service:release-v0.0.4
-    environment:
-      TZ: Asia/Shanghai
-      MONGODB_HOST: mongo
-      MONGODB_PORT: 27017
-      MONGODB_DB: ai_agent
-      MONGODB_USER: scienceone
-      MONGODB_PASSWORD: Yp51Bi1eEjC77sAt
-      REDIS_URL: redis://redis:6379/0
-      CHAT_SERVICE_URL: http://backend:8000
-      CHAT_SERVICE_API_KEY: ${TASK_SERVICE_API_KEY:-}
-    command: celery -A app.celery_app worker --loglevel=info
-    restart: unless-stopped
-    depends_on:
-      scheduler_api:
-        condition: service_started
-      redis:
-        condition: service_started
-      backend:
-        condition: service_started
-  celery_beat:
-    image: swr.cn-north-4.myhuaweicloud.com/claw/scienceclaw-task-service:release-v0.0.4
-    environment:
-      TZ: Asia/Shanghai
-      MONGODB_HOST: mongo
-      MONGODB_PORT: 27017
-      MONGODB_DB: ai_agent
-      MONGODB_USER: scienceone
-      MONGODB_PASSWORD: Yp51Bi1eEjC77sAt
-      REDIS_URL: redis://redis:6379/0
-    command: celery -A app.celery_app beat --loglevel=info
-    restart: unless-stopped
-    depends_on:
-      scheduler_api:
-        condition: service_started
-      redis:
         condition: service_started
   frontend:
     image: swr.cn-north-4.myhuaweicloud.com/claw/scienceclaw-frontend:release-v0.0.4

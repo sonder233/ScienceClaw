@@ -10,7 +10,8 @@ from app.core.config import settings
 async def run_task_chat(
     task_id: str,
     prompt: str,
-    event_callback_url: Optional[str] = None,
+    user_id: Optional[str] = None,
+    model_config_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     POST to Chat Service /api/v1/chat (task invocation).
@@ -22,8 +23,10 @@ async def run_task_chat(
         "source": "task",
         "task_id": task_id,
     }
-    if event_callback_url:
-        payload["event_callback_url"] = event_callback_url
+    if user_id:
+        payload["user_id"] = user_id
+    if model_config_id:
+        payload["model_config_id"] = model_config_id
     headers = {"Content-Type": "application/json"}
     if settings.chat_service_api_key:
         headers["X-API-Key"] = settings.chat_service_api_key

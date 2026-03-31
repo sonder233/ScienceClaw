@@ -20,9 +20,6 @@ class Settings(BaseSettings):
     mongodb_username: str = os.environ.get("MONGODB_USER", "")
     mongodb_password: str = os.environ.get("MONGODB_PASSWORD", "")
 
-    # Redis (Celery broker)
-    redis_url: str = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-
     # Chat service (main backend) - for task execution
     chat_service_url: str = os.environ.get("CHAT_SERVICE_URL", "http://backend:8000")
     chat_service_api_key: str = os.environ.get("CHAT_SERVICE_API_KEY", "")
