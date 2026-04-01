@@ -44,12 +44,11 @@ class ScreencastService:
             "Page.startScreencast",
             {
                 "format": "jpeg",
-                "quality": 60,
-                "maxWidth": self._viewport_width,
-                "maxHeight": self._viewport_height,
+                "quality": 40,
+                "everyNthFrame": 1,
             },
         )
-        logger.info("[Screencast] started (jpeg q60)")
+        logger.info("[Screencast] started (jpeg q40)")
 
         try:
             await self._recv_loop()

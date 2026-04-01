@@ -18,6 +18,8 @@ const error = ref<string | null>(null);
 const localMode = ref(isLocalMode());
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 let screencastWs: WebSocket | null = null;
+let lastMoveTime = 0;
+const MOVE_THROTTLE = 50; // 50ms 节流
 
 // VNC URL: try direct 6080 first, fallback to 18080 proxy
 const vncUrl = computed(() => {
@@ -135,8 +137,9 @@ const drawFrame = (base64Data: string, metadata: { width: number; height: number
 
   const img = new Image();
   img.onload = () => {
-    if (canvas.width !== metadata.width) canvas.width = metadata.width;
-    if (canvas.height !== metadata.height) canvas.height = metadata.height;
+    // 同步绘图缓冲区尺寸与图片原始尺寸
+    if (canvas.width !== img.naturalWidth) canvas.width = img.naturalWidth;
+    if (canvas.height !== img.naturalHeight) canvas.height = img.naturalHeight;
     ctx.drawImage(img, 0, 0);
   };
   img.src = `data:image/jpeg;base64,${base64Data}`;
@@ -167,7 +170,15 @@ const sendInputEvent = (e: Event) => {
   if (!canvas) return;
 
   if (e instanceof MouseEvent && !(e instanceof WheelEvent)) {
+    if (e.type === 'mousemove') {
+      const now = Date.now();
+      if (now - lastMoveTime < MOVE_THROTTLE) return;
+      lastMoveTime = now;
+    }
+
     const rect = canvas.getBoundingClientRect();
+    // rect.width/height 是 css 显示尺寸，canvas.width/height 是实际缓冲区（图片）尺寸
+    // 归一化坐标应基于 CSS 视口比例
     const x = (e.clientX - rect.left) / rect.width;
     const y = (e.clientY - rect.top) / rect.height;
     const actionMap: Record<string, string> = {
