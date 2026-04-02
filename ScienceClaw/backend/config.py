@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     # 前端可访问的沙盒地址（分离部署时需配置，默认空表示与前端同 host）
     sandbox_public_url: str = os.environ.get("SANDBOX_PUBLIC_URL", "")
 
+    # 后端代理到沙盒/浏览器时附带的额外请求头，JSON 对象格式
+    # 例如: {"Authorization":"Bearer xxx","X-API-Key":"yyy"}
+    sandbox_proxy_headers: str = os.environ.get("SANDBOX_PROXY_HEADERS", "")
+
     # 任务调度服务调用聊天接口时的 API Key（可选）
     task_service_api_key: str = os.environ.get("TASK_SERVICE_API_KEY", "")
 

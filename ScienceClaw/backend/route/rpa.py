@@ -92,6 +92,34 @@ def _get_sandbox_vnc_ws_url() -> str:
     return parsed._replace(scheme=ws_scheme, path="/vnc/websockify", query="", fragment="").geturl()
 
 
+def _get_sandbox_proxy_headers() -> list[tuple[str, str]] | None:
+    """Parse optional proxy request headers from env.
+
+    Expected format:
+      SANDBOX_PROXY_HEADERS={"Authorization":"Bearer xxx","X-API-Key":"yyy"}
+    """
+    raw = (getattr(settings, "sandbox_proxy_headers", "") or "").strip()
+    if not raw:
+        return None
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("Invalid SANDBOX_PROXY_HEADERS JSON; ignoring proxy headers")
+        return None
+
+    if not isinstance(parsed, dict):
+        logger.warning("SANDBOX_PROXY_HEADERS must be a JSON object; ignoring proxy headers")
+        return None
+
+    headers: list[tuple[str, str]] = []
+    for key, value in parsed.items():
+        if value is None:
+            continue
+        headers.append((str(key), str(value)))
+    return headers or None
+
+
 async def _resolve_user_model_config(user_id: str) -> dict | None:
     """Resolve the user's model config for the RPA assistant.
 
@@ -438,6 +466,7 @@ async def vnc_proxy(websocket: WebSocket, session_id: str):
         async with websockets.connect(
             upstream_url,
             subprotocols=requested_protocols or None,
+            extra_headers=_get_sandbox_proxy_headers(),
             ping_interval=20,
             ping_timeout=20,
             max_size=None,
