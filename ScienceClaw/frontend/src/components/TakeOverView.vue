@@ -1,6 +1,6 @@
 <template>
     <div v-if="shouldShow" class="fixed bg-[var(--background-gray-main)] z-50 transition-all w-full h-full inset-0">
-        <div class="w-full h-full">
+        <div v-if="!localMode" class="w-full h-full">
             <VNCViewer 
                 :session-id="sessionId"
                 :enabled="shouldShow"
@@ -9,6 +9,14 @@
                 @disconnected="onVNCDisconnected"
                 @credentials-required="onVNCCredentialsRequired"
             />
+        </div>
+        <div v-else class="w-full h-full flex items-center justify-center px-6">
+            <div class="max-w-lg text-center">
+                <div class="text-[var(--text-primary)] text-lg font-semibold mb-3">本地模式下不支持 Take Over 远程接管</div>
+                <div class="text-[var(--text-tertiary)] text-sm leading-6">
+                    浏览器会直接运行在宿主机窗口中，因此这里不会再打开一个空白的 VNC 视图。
+                </div>
+            </div>
         </div>
         <div class="absolute bottom-4 left-1/2 -translate-x-1/2">
             <button @click="exitTakeOver"
@@ -24,9 +32,11 @@ import { computed, ref, onMounted, onBeforeUnmount } from 'vue';
 import { useRoute } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import VNCViewer from './VNCViewer.vue';
+import { isLocalMode } from '@/utils/sandbox';
 
 const route = useRoute();
 const { t } = useI18n();
+const localMode = computed(() => isLocalMode());
 
 // Takeover state
 const takeOverActive = ref(false);

@@ -29,7 +29,7 @@ import httpx
 import yaml as _yaml
 
 import shortuuid
-from fastapi import APIRouter, HTTPException, Query, Request, Depends, UploadFile, File as FastAPIFile
+from fastapi import APIRouter, HTTPException, Query, Request, Depends, UploadFile, File as FastAPIFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -49,6 +49,8 @@ from backend.deepagent.sessions import (
 from backend.user.dependencies import get_current_user, require_user, User
 from backend.models import get_model_config
 from backend.config import settings
+from backend.browser_preview import browser_preview_registry
+from backend.rpa.screencast import ScreencastService
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -2003,3 +2005,45 @@ async def download_sandbox_file(
     except Exception as exc:
         logger.exception("download_sandbox_file failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.websocket("/{session_id}/browser/screencast")
+async def session_browser_screencast(websocket: WebSocket, session_id: str):
+    """Stream a local-mode chat browser page via CDP screencast."""
+    await websocket.accept()
+
+    if settings.storage_backend != "local":
+        await websocket.close(code=1008, reason="Local mode only")
+        return
+
+    try:
+        await async_get_science_session(session_id)
+    except ScienceSessionNotFoundError:
+        await websocket.close(code=1008, reason="Session not found")
+        return
+
+    page = await browser_preview_registry.wait_for_page(session_id, timeout=8.0)
+    if page is None:
+        await websocket.close(code=1008, reason="No active browser page")
+        return
+
+    try:
+        cdp_session = await page.context.new_cdp_session(page)
+    except Exception as exc:
+        logger.error(f"Failed to create chat preview CDP session: {exc}")
+        await websocket.close(code=1011, reason="CDP session failed")
+        return
+
+    screencast = ScreencastService(cdp_session)
+    try:
+        await screencast.start(websocket)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.error(f"Chat browser screencast error: {exc}")
+    finally:
+        await screencast.stop()
+        try:
+            await cdp_session.detach()
+        except Exception:
+            pass
