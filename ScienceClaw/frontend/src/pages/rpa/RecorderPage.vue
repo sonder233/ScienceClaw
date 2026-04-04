@@ -33,11 +33,21 @@ interface ChatMessage {
   status?: 'streaming' | 'executing' | 'done' | 'error';
   error?: string;
   showCode?: boolean;
+  actions?: Array<{ description: string; code: string; showCode?: boolean }>;  // Track agent actions
 }
 
 const chatMessages = ref<ChatMessage[]>([]);
 const newMessage = ref('');
 const sending = ref(false);
+const agentMode = ref(false);
+const agentRunning = ref(false);
+
+interface PendingConfirm {
+  description: string;
+  risk_reason: string;
+  code: string;
+}
+const pendingConfirm = ref<PendingConfirm | null>(null);
 let pollInterval: any = null;
 
 const cleanupAssistantText = (text: string, script = '') => {
@@ -279,16 +289,27 @@ const deleteStep = async (stepIndex: number) => {
   }
 };
 
+const abortAgent = async () => {
+  if (!sessionId.value) return;
+  await apiClient.post(`/rpa/session/${sessionId.value}/agent/abort`);
+};
+
+const sendConfirm = async (approved: boolean) => {
+  pendingConfirm.value = null;
+  if (!sessionId.value) return;
+  await apiClient.post(`/rpa/session/${sessionId.value}/agent/confirm`, { approved });
+};
+
 const sendMessage = async () => {
   if (!newMessage.value.trim() || !sessionId.value || sending.value) return;
   const userText = newMessage.value.trim();
   newMessage.value = '';
   sending.value = true;
+  if (agentMode.value) agentRunning.value = true;
 
   const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   chatMessages.value.push({ role: 'user', text: userText, time: now });
 
-  // Add assistant placeholder
   const assistantMsg: ChatMessage = { role: 'assistant', text: '', time: now, status: 'streaming' };
   chatMessages.value.push(assistantMsg);
   const msgIdx = chatMessages.value.length - 1;
@@ -300,13 +321,14 @@ const sendMessage = async () => {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
       },
-      body: JSON.stringify({ message: userText }),
+      body: JSON.stringify({ message: userText, mode: agentMode.value ? 'react' : 'chat' }),
     });
 
     if (!resp.ok || !resp.body) {
       chatMessages.value[msgIdx].text = '请求失败，请重试。';
       chatMessages.value[msgIdx].status = 'error';
       sending.value = false;
+      agentRunning.value = false;
       return;
     }
 
@@ -347,9 +369,44 @@ const sendMessage = async () => {
             } else if (eventType === 'result') {
               chatMessages.value[msgIdx].status = data.success ? 'done' : 'error';
               if (data.error) chatMessages.value[msgIdx].error = data.error;
+            } else if (eventType === 'agent_thought') {
+              chatMessages.value[msgIdx].text += (chatMessages.value[msgIdx].text ? '\n' : '') + `💭 ${data.text || ''}`;
+            } else if (eventType === 'agent_action') {
+              const actionIdx = (chatMessages.value[msgIdx].actions?.length || 0);
+              chatMessages.value[msgIdx].text += `\n⚡ ${data.description || ''} [[CODE_${actionIdx}]]`;
+              if (!chatMessages.value[msgIdx].actions) chatMessages.value[msgIdx].actions = [];
+              chatMessages.value[msgIdx].actions!.push({ description: data.description || '', code: data.code || '', showCode: false });
+            } else if (eventType === 'agent_step_done') {
+              if (data.step) {
+                const s = data.step;
+                steps.value.push({
+                  id: String(steps.value.length),
+                  title: s.description || s.action,
+                  description: s.prompt || s.description || 'AI 操作',
+                  status: 'completed',
+                  source: 'ai',
+                });
+              }
+              // Show output if present
+              if (data.output) {
+                chatMessages.value[msgIdx].text += `\n✓ 输出：${data.output}`;
+              }
+            } else if (eventType === 'confirm_required') {
+              pendingConfirm.value = data;
+            } else if (eventType === 'agent_done') {
+              chatMessages.value[msgIdx].status = 'done';
+              chatMessages.value[msgIdx].text += `\n✅ 任务完成，共执行 ${data.total_steps ?? 0} 步`;
+              agentRunning.value = false;
+              pendingConfirm.value = null;
+            } else if (eventType === 'agent_aborted') {
+              chatMessages.value[msgIdx].status = 'error';
+              chatMessages.value[msgIdx].text += `\n⚠️ Agent 已停止：${data.reason || ''}`;
+              agentRunning.value = false;
+              pendingConfirm.value = null;
             } else if (eventType === 'error') {
               chatMessages.value[msgIdx].status = 'error';
               chatMessages.value[msgIdx].error = data.message || '未知错误';
+              agentRunning.value = false;
             }
           } catch { /* ignore parse errors */ }
           eventType = '';
@@ -363,6 +420,7 @@ const sendMessage = async () => {
   } catch (err: any) {
     chatMessages.value[msgIdx].text = `连接失败: ${err.message}`;
     chatMessages.value[msgIdx].status = 'error';
+    agentRunning.value = false;
   } finally {
     sending.value = false;
   }
@@ -495,13 +553,36 @@ const sendMessage = async () => {
       <!-- Right Sidebar: AI Chat -->
       <aside class="w-80 bg-white border-l border-gray-200 flex flex-col shadow-[-10px_0_40px_-10px_rgba(0,0,0,0.03)]">
         <div class="p-6 border-b border-gray-100 bg-gray-50/50">
-          <div class="flex items-center gap-3">
-            <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-[#831bd7] to-[#ac0089] flex items-center justify-center text-white shadow-lg shadow-purple-200">
-              <Wand2 :size="20" />
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-[#831bd7] to-[#ac0089] flex items-center justify-center text-white shadow-lg shadow-purple-200">
+                <Wand2 :size="20" />
+              </div>
+              <div>
+                <h3 class="text-gray-900 font-bold text-sm">AI 录制助手</h3>
+                <p class="text-[10px] font-bold" :class="agentRunning ? 'text-orange-500' : 'text-[#831bd7]'">
+                  {{ agentRunning ? 'Agent 运行中...' : (agentMode ? 'Agent 模式' : '已就绪 · 协助录制中') }}
+                </p>
+              </div>
             </div>
-            <div>
-              <h3 class="text-gray-900 font-bold text-sm">AI 录制助手</h3>
-              <p class="text-[10px] text-[#831bd7] font-bold">已就绪 · 协助录制中</p>
+            <div class="flex items-center gap-2">
+              <button
+                v-if="agentRunning"
+                @click="abortAgent"
+                class="text-[10px] font-bold text-red-500 border border-red-200 px-2 py-1 rounded-lg hover:bg-red-50 transition-colors"
+              >中止</button>
+              <label class="flex items-center gap-1.5 cursor-pointer" :class="agentRunning ? 'opacity-50 pointer-events-none' : ''">
+                <span class="text-[10px] text-gray-500 font-medium">Agent</span>
+                <div
+                  @click="agentMode = !agentMode"
+                  class="w-8 h-4 rounded-full transition-colors relative"
+                  :class="agentMode ? 'bg-[#831bd7]' : 'bg-gray-300'"
+                >
+                  <div class="w-3 h-3 bg-white rounded-full absolute top-0.5 transition-transform shadow-sm"
+                    :class="agentMode ? 'translate-x-4' : 'translate-x-0.5'"
+                  ></div>
+                </div>
+              </label>
             </div>
           </div>
         </div>
@@ -522,8 +603,23 @@ const sendMessage = async () => {
                 ? 'bg-[#831bd7] text-white rounded-tr-none shadow-md shadow-purple-100'
                 : 'bg-[#eff1f2] text-gray-700 rounded-tl-none border border-gray-100'"
             >
-              <div class="whitespace-pre-wrap">{{ msg.text }}</div>
-              <!-- Status indicators -->
+              <!-- Message text with inline code blocks for agent actions -->
+              <div v-if="msg.actions && msg.actions.length > 0">
+                <template v-for="(part, pidx) in msg.text.split(/(\[\[CODE_\d+\]\])/)" :key="pidx">
+                  <span v-if="!part.match(/\[\[CODE_(\d+)\]\]/)">{{ part }}</span>
+                  <div v-else class="inline-block ml-2">
+                    <button
+                      @click="msg.actions[parseInt(part.match(/\[\[CODE_(\d+)\]\]/)[1])].showCode = !msg.actions[parseInt(part.match(/\[\[CODE_(\d+)\]\]/)[1])].showCode"
+                      class="inline-flex items-center gap-1 text-[10px] text-[#831bd7] hover:underline font-medium"
+                    >
+                      <Code :size="10" />
+                      {{ msg.actions[parseInt(part.match(/\[\[CODE_(\d+)\]\]/)[1])].showCode ? '收起' : '查看代码' }}
+                    </button>
+                    <pre v-if="msg.actions[parseInt(part.match(/\[\[CODE_(\d+)\]\]/)[1])].showCode" class="mt-1 bg-gray-900 text-green-300 text-[10px] p-2 rounded-lg overflow-x-auto max-h-32 overflow-y-auto"><code>{{ msg.actions[parseInt(part.match(/\[\[CODE_(\d+)\]\]/)[1])].code }}</code></pre>
+                  </div>
+                </template>
+              </div>
+              <div v-else class="whitespace-pre-wrap">{{ msg.text }}</div>
               <div v-if="msg.status === 'executing'" class="mt-2 flex items-center gap-1.5 text-[10px] text-[#831bd7] font-medium">
                 <div class="w-2 h-2 rounded-full bg-[#831bd7] animate-pulse"></div>
                 正在执行...
@@ -531,10 +627,10 @@ const sendMessage = async () => {
               <div v-if="msg.status === 'error' && msg.error" class="mt-2 text-[10px] text-red-500 bg-red-50 p-2 rounded-lg">
                 {{ msg.error }}
               </div>
-              <div v-if="msg.status === 'done' && msg.role === 'assistant'" class="mt-2 flex items-center gap-1 text-[10px] text-green-600 font-medium">
+              <div v-if="msg.status === 'done' && msg.role === 'assistant' && !agentMode" class="mt-2 flex items-center gap-1 text-[10px] text-green-600 font-medium">
                 <CheckCircle :size="10" /> 执行成功
               </div>
-              <!-- Code block toggle -->
+              <!-- Legacy script toggle (for non-agent mode) -->
               <button
                 v-if="msg.script"
                 @click="msg.showCode = !msg.showCode"
@@ -547,6 +643,17 @@ const sendMessage = async () => {
             </div>
             <span class="text-[9px] text-gray-400 font-medium px-1">{{ msg.time }}</span>
           </div>
+
+          <!-- Inline confirm dialog for high-risk operations -->
+          <div v-if="pendingConfirm" class="bg-orange-50 border border-orange-200 rounded-xl p-4 text-xs">
+            <p class="font-bold text-orange-700 mb-1">⚠️ 高危操作确认</p>
+            <p class="text-gray-700 mb-1">{{ pendingConfirm.description }}</p>
+            <p class="text-orange-600 text-[10px] mb-3">风险：{{ pendingConfirm.risk_reason }}</p>
+            <div class="flex gap-2">
+              <button @click="sendConfirm(true)" class="flex-1 bg-orange-500 text-white rounded-lg py-1.5 font-bold hover:bg-orange-600 transition-colors">确认执行</button>
+              <button @click="sendConfirm(false)" class="flex-1 bg-white border border-gray-200 text-gray-600 rounded-lg py-1.5 font-bold hover:bg-gray-50 transition-colors">跳过</button>
+            </div>
+          </div>
         </div>
 
         <div class="p-4 bg-gray-50 border-t border-gray-100">
@@ -554,14 +661,14 @@ const sendMessage = async () => {
             <input
               v-model="newMessage"
               @keyup.enter="sendMessage"
-              :disabled="sending"
+              :disabled="sending || agentRunning"
               class="w-full bg-white border border-gray-200 rounded-2xl py-3 pl-4 pr-12 text-xs focus:ring-2 focus:ring-[#831bd7] focus:border-transparent shadow-sm placeholder:text-gray-400 outline-none disabled:opacity-50"
-              :placeholder="sending ? 'AI 正在处理...' : '向助手提问...'"
+              :placeholder="agentRunning ? 'Agent 运行中...' : (sending ? 'AI 正在处理...' : (agentMode ? '描述目标任务...' : '向助手提问...'))"
               type="text"
             />
             <button
               @click="sendMessage"
-              :disabled="sending"
+              :disabled="sending || agentRunning"
               class="absolute right-2 top-1/2 -translate-y-1/2 text-[#831bd7] hover:scale-110 transition-transform p-1.5 disabled:opacity-50"
             >
               <Send :size="16" />

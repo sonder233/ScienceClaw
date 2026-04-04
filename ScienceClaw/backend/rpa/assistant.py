@@ -7,6 +7,9 @@ from typing import Dict, List, Any, AsyncGenerator, Optional
 from playwright.async_api import Page
 from backend.deepagent.engine import get_llm_model
 
+# Active ReAct agent instances keyed by session_id
+_active_agents: Dict[str, "RPAReActAgent"] = {}
+
 logger = logging.getLogger(__name__)
 
 ELEMENT_EXTRACTION_TIMEOUT_S = 5.0
@@ -292,52 +295,309 @@ class RPAAssistant:
         return "\n".join(body_lines).strip()
 
     async def _get_page_elements(self, page: Page) -> str:
-        """Extract interactive elements directly from the page."""
-        try:
-            try:
-                await page.wait_for_load_state("domcontentloaded", timeout=2000)
-            except Exception:
-                # Best-effort only. We still try to inspect the current execution context.
-                pass
-
-            result = await asyncio.wait_for(
-                page.evaluate(EXTRACT_ELEMENTS_JS),
-                timeout=ELEMENT_EXTRACTION_TIMEOUT_S,
-            )
-            return result if isinstance(result, str) else json.dumps(result)
-        except Exception as e:
-            logger.warning(f"Failed to extract elements from {page.url!r}: {e}")
-            return "[]"
+        return await _get_page_elements(page)
 
     async def _execute_on_page(self, page: Page, code: str) -> Dict[str, Any]:
-        """Execute AI-generated code directly on the page object."""
-        # Pause event capture during AI script execution
+        return await _execute_on_page(page, code)
+
+
+async def _get_page_elements(page: Page) -> str:
+    """Extract interactive elements directly from the page."""
+    try:
         try:
-            await page.evaluate("window.__rpa_paused = true")
+            await page.wait_for_load_state("domcontentloaded", timeout=2000)
+        except Exception:
+            pass
+        result = await asyncio.wait_for(
+            page.evaluate(EXTRACT_ELEMENTS_JS),
+            timeout=ELEMENT_EXTRACTION_TIMEOUT_S,
+        )
+        return result if isinstance(result, str) else json.dumps(result)
+    except Exception as e:
+        logger.warning(f"Failed to extract elements from {page.url!r}: {e}")
+        return "[]"
+
+
+async def _execute_on_page(page: Page, code: str) -> Dict[str, Any]:
+    """Execute AI-generated code directly on the page object."""
+    try:
+        await page.evaluate("window.__rpa_paused = true")
+    except Exception:
+        pass
+    try:
+        namespace: Dict[str, Any] = {"page": page}
+        exec(compile(code, "<rpa_assistant>", "exec"), namespace)
+        if "run" in namespace and callable(namespace["run"]):
+            ret = await asyncio.wait_for(namespace["run"](page), timeout=EXECUTION_TIMEOUT_S)
+            return {"success": True, "output": str(ret) if ret else "ok", "error": None}
+        else:
+            return {"success": False, "output": "", "error": "No run(page) function defined"}
+    except asyncio.TimeoutError:
+        return {"success": False, "output": "", "error": f"Command execution timed out ({EXECUTION_TIMEOUT_S:.0f}s)"}
+    except Exception:
+        import traceback
+        return {"success": False, "output": "", "error": traceback.format_exc()}
+    finally:
+        try:
+            await page.evaluate("window.__rpa_paused = false")
         except Exception:
             pass
 
-        try:
-            namespace: Dict[str, Any] = {"page": page}
-            exec(compile(code, "<rpa_assistant>", "exec"), namespace)
 
-            if "run" in namespace and callable(namespace["run"]):
-                ret = await asyncio.wait_for(
-                    namespace["run"](page),
-                    timeout=EXECUTION_TIMEOUT_S,
-                )
-                return {"success": True, "output": str(ret) if ret else "ok", "error": None}
-            else:
-                return {"success": False, "output": "", "error": "No run(page) function defined"}
+REACT_SYSTEM_PROMPT = """你是一个 RPA 自动化 Agent。用户给你一个目标任务，你需要通过观察当前页面状态，逐步规划并执行浏览器操作，直到任务完成。
 
-        except asyncio.TimeoutError:
-            return {"success": False, "output": "", "error": f"Command execution timed out ({EXECUTION_TIMEOUT_S:.0f}s)"}
-        except Exception as e:
-            import traceback
-            return {"success": False, "output": "", "error": traceback.format_exc()}
-        finally:
-            # Resume event capture
+每一轮你必须输出一个 JSON 对象（不要包裹在代码块中），格式如下：
+{
+  "thought": "当前状态分析和下一步计划",
+  "action": "execute|done|abort",
+  "code": "单个原子操作的 Playwright 代码（仅 action=execute 时需要）",
+  "description": "这一步操作的简短描述（动词+宾语，如：点击第一个搜索结果）",
+  "risk": "none|high",
+  "risk_reason": "高危原因（仅 risk=high 时需要）"
+}
+
+规则：
+1. action=execute：执行一个原子操作（1-3行代码）
+2. action=done：任务已完成，不再需要操作
+3. action=abort：任务无法完成，在 thought 中说明原因
+4. risk=high：表单提交、删除、支付、授权等不可逆操作必须标记
+5. code 必须是完整可执行的 Python 代码片段（不需要 def run 包装），使用 await page.xxx()
+   - 正确：await page.click("button")
+   - 正确：title = await page.locator("h1").inner_text()  ← 赋值语句，await 在右边
+6. 数据提取任务：如果用户要求"获取"、"读取"、"提取"数据，必须在最后一步执行提取操作并返回
+   - 示例：title = await page.locator("h1").first.inner_text()
+   - 然后在 description 中说明提取到的数据（如"获取到标题：xxx"）
+   - 不要只是"看到了"就 done，要实际执行提取代码
+
+【选择器规则 - 严格遵守】
+- 固定目标（如"打开 GitHub"、"点击 Issues"）：可以用文本/href/属性选择器
+  - 正确：await page.click("text=Issues")
+  - 正确：await page.goto("https://github.com/trending")
+  - 正确：await page.click("a[href*='/issues']")
+
+- 动态位置（如"第N个"、"列表数据"、"排名第一"）：必须用位置/结构选择器
+  - 正确：await page.locator("article").first.click()  ← 第一个
+  - 正确：await page.locator("ul li a").nth(2).click()  ← 第三个
+  - 正确：await page.locator("table tr").all()  ← 列表数据
+  - 错误：await page.click("a[href='/luongnv89/claude-howto']")  ← 硬编码动态内容
+  - 错误：await page.click("text=某个具体标题")  ← 硬编码动态文本
+
+- 数据提取任务：必须显式提取并返回数据
+  - 如果任务是"获取标题"，必须执行 inner_text()/text_content() 并在 code 中包含提取逻辑
+  - 不要只是"看到了"就 done，要实际提取数据
+
+6. 每步操作后会告知你执行结果，据此调整下一步
+7. 如果连续失败，尝试更简单的选择器，不要退化为硬编码值"""
+
+
+class RPAReActAgent:
+    """ReAct-based autonomous agent: Observe → Think → Act loop."""
+
+    MAX_STEPS = 20
+
+    def __init__(self):
+        self._confirm_event: Optional[asyncio.Event] = None
+        self._confirm_approved: bool = False
+        self._aborted: bool = False
+        self._history: List[Dict[str, str]] = []  # persists across turns
+
+    def resolve_confirm(self, approved: bool) -> None:
+        self._confirm_approved = approved
+        if self._confirm_event:
+            self._confirm_event.set()
+
+    def abort(self) -> None:
+        self._aborted = True
+        if self._confirm_event:
+            self._confirm_event.set()
+
+    async def run(
+        self,
+        session_id: str,
+        page: Page,
+        goal: str,
+        existing_steps: List[Dict[str, Any]],
+        model_config: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        self._aborted = False
+        steps_done = 0
+
+        # Append new user goal to persistent history
+        steps_summary = ""
+        if existing_steps:
+            lines = [f"{i+1}. {s.get('description', s.get('action', ''))}" for i, s in enumerate(existing_steps)]
+            steps_summary = "\n已有步骤：\n" + "\n".join(lines) + "\n"
+        self._history.append({"role": "user", "content": f"目标任务：{goal}{steps_summary}"})
+
+        for iteration in range(self.MAX_STEPS):
+            if self._aborted:
+                yield {"event": "agent_aborted", "data": {"reason": "用户中止"}}
+                return
+
+            # Observe
+            elements_json = await _get_page_elements(page)
+            url = page.url
             try:
-                await page.evaluate("window.__rpa_paused = false")
+                title = await page.title()
+            except Exception:
+                title = ""
+
+            obs = self._build_observation(url, title, elements_json, steps_done)
+            self._history.append({"role": "user", "content": obs})
+
+            # Think — stream LLM response
+            full_response = ""
+            async for chunk in self._stream_llm(self._history, model_config):
+                full_response += chunk
+
+            self._history.append({"role": "assistant", "content": full_response})
+
+            # Parse JSON
+            parsed = self._parse_json(full_response)
+            if not parsed:
+                yield {"event": "agent_aborted", "data": {"reason": f"无法解析 Agent 响应: {full_response[:200]}"}}
+                return
+
+            thought = parsed.get("thought", "")
+            action = parsed.get("action", "execute")
+            code = parsed.get("code", "")
+            description = parsed.get("description", "操作")
+            risk = parsed.get("risk", "none")
+            risk_reason = parsed.get("risk_reason", "")
+
+            yield {"event": "agent_thought", "data": {"text": thought}}
+
+            if action == "done":
+                yield {"event": "agent_done", "data": {"total_steps": steps_done}}
+                return
+
+            if action == "abort":
+                yield {"event": "agent_aborted", "data": {"reason": thought}}
+                return
+
+            # Wrap bare code in async def run(page) if needed
+            executable = self._wrap_code(code)
+
+            # High-risk confirmation
+            if risk == "high":
+                self._confirm_event = asyncio.Event()
+                self._confirm_approved = False
+                yield {"event": "confirm_required", "data": {
+                    "description": description,
+                    "risk_reason": risk_reason,
+                    "code": code,
+                }}
+                await self._confirm_event.wait()
+                self._confirm_event = None
+                if self._aborted:
+                    yield {"event": "agent_aborted", "data": {"reason": "用户中止"}}
+                    return
+                if not self._confirm_approved:
+                    self._history.append({"role": "user", "content": "用户跳过了该步骤，请继续下一步或完成任务。"})
+                    continue
+
+            # Act
+            yield {"event": "agent_action", "data": {"description": description, "code": code}}
+            result = await _execute_on_page(page, executable)
+            if result["success"]:
+                steps_done += 1
+                step_data = {
+                    "action": "ai_script",
+                    "source": "ai",
+                    "value": code,
+                    "description": description,
+                    "prompt": goal,
+                }
+                output = result.get("output", "")
+                # If there's meaningful output, append to description for visibility
+                if output and output != "ok" and output != "None":
+                    yield {"event": "agent_step_done", "data": {"step": step_data, "output": output}}
+                    self._history.append({"role": "user", "content": f"执行成功：{description}\n输出：{output}"})
+                else:
+                    yield {"event": "agent_step_done", "data": {"step": step_data}}
+                    self._history.append({"role": "user", "content": f"执行成功：{description}"})
+            else:
+                error_msg = result.get("error", "未知错误")
+                self._history.append({"role": "user", "content": f"执行失败：{error_msg[:500]}\n请分析错误并调整策略。"})
+
+        yield {"event": "agent_done", "data": {"total_steps": steps_done}}
+
+    @staticmethod
+    def _build_observation(url: str, title: str, elements_json: str, steps_done: int) -> str:
+        try:
+            els = json.loads(elements_json) if elements_json else []
+            lines = []
+            for el in els:
+                parts = [f"[{el['index']}]"]
+                if el.get("role"):
+                    parts.append(el["role"])
+                parts.append(el["tag"])
+                if el.get("name"):
+                    parts.append(f'"{el["name"]}"')
+                if el.get("placeholder"):
+                    parts.append(f'placeholder="{el["placeholder"]}"')
+                if el.get("href"):
+                    parts.append(f'href="{el["href"]}"')
+                lines.append(" ".join(parts))
+            elements_text = "\n".join(lines) or "(无可交互元素)"
+        except Exception:
+            elements_text = "(无法获取)"
+
+        return f"""当前页面状态：
+URL: {url}
+标题: {title}
+已完成步骤数: {steps_done}
+
+可交互元素:
+{elements_text}
+
+请输出下一步操作的 JSON。"""
+
+    @staticmethod
+    def _parse_json(text: str) -> Optional[Dict[str, Any]]:
+        # Try raw JSON first
+        text = text.strip()
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+        # Try extracting from code block
+        m = re.search(r"```(?:json)?\s*\n(.*?)```", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(1).strip())
             except Exception:
                 pass
+        # Try finding { ... } block
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                pass
+        return None
+
+    @staticmethod
+    def _wrap_code(code: str) -> str:
+        """Wrap bare code in async def run(page) if not already wrapped."""
+        stripped = code.strip()
+        if stripped.startswith("async def run(") or stripped.startswith("def run("):
+            return stripped
+        indented = "\n".join("    " + line for line in stripped.splitlines())
+        return f"async def run(page):\n{indented}"
+
+    @staticmethod
+    async def _stream_llm(
+        history: List[Dict[str, str]],
+        model_config: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[str, None]:
+        from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+        model = get_llm_model(config=model_config, streaming=False)
+        lc_messages = [SystemMessage(content=REACT_SYSTEM_PROMPT)]
+        for m in history:
+            if m["role"] == "user":
+                lc_messages.append(HumanMessage(content=m["content"]))
+            elif m["role"] == "assistant":
+                lc_messages.append(AIMessage(content=m["content"]))
+        response = await model.ainvoke(lc_messages)
+        yield response.content if hasattr(response, "content") else str(response)

@@ -318,9 +318,14 @@ if __name__ == "__main__":
             if stripped and not stripped.startswith("#") and not stripped.startswith("def "):
                 if _re.search(r'\bpage\.', stripped):
                     if not stripped.startswith("await "):
-                        assign_match = _re.match(r'^(\w[\w\s,]*=\s*)(page\..+)$', stripped)
+                        # Check for assignment: var = page.xxx or var = await page.xxx
+                        assign_match = _re.match(r'^(\w[\w\s,]*=\s*)(await\s+)?(page\..+)$', stripped)
                         if assign_match:
-                            result.append(f"{indent}{assign_match.group(1)}await {assign_match.group(2)}")
+                            # If already has await, keep as-is; otherwise add await
+                            if assign_match.group(2):  # already has await
+                                result.append(line)
+                            else:
+                                result.append(f"{indent}{assign_match.group(1)}await {assign_match.group(3)}")
                             continue
                         result.append(f"{indent}await {stripped}")
                         continue
