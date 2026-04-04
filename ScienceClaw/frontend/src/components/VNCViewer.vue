@@ -1,17 +1,16 @@
 <template>
-  <iframe
-    v-if="enabled && iframeSrc"
-    :src="iframeSrc"
-    class="vnc-frame"
-    frameborder="0"
-    scrolling="no"
-    @load="handleLoad"
-    @error="handleError"
-  />
+  <div
+    ref="vncContainer"
+    class="vnc-container"
+    style="display: flex; width: 100%; height: 100%; overflow: auto; background: rgb(40, 40, 40);">
+  </div>
 </template>
 
 <script setup lang="ts">
-import { computed, watch } from 'vue';
+import { ref, onBeforeUnmount, watch } from 'vue';
+import { getBackendWsUrl } from '@/utils/sandbox';
+// @ts-ignore
+import RFB from '@novnc/novnc/lib/rfb';
 
 const props = defineProps<{
   sessionId: string;
@@ -26,59 +25,79 @@ const emit = defineEmits<{
   credentialsRequired: [];
 }>();
 
-function buildIframeSrc(): string {
-  const viewOnlyParam = props.viewOnly ? 'true' : 'false';
+const vncContainer = ref<HTMLDivElement | null>(null);
+let rfb: RFB | null = null;
 
-  if (props.directWsUrl) {
-    const wsUrl = new URL(props.directWsUrl, window.location.origin);
-    const params = new URLSearchParams({
-      autoconnect: 'true',
-      resize: 'scale',
-      view_only: viewOnlyParam,
-      path: wsUrl.pathname.replace(/^\/+/, ''),
-    });
-    return `/vnc/vnc_lite.html?${params.toString()}`;
+const initVNCConnection = async () => {
+  if (!vncContainer.value || !props.enabled) return;
+
+  if (rfb) {
+    rfb.disconnect();
+    rfb = null;
   }
 
-  const params = new URLSearchParams({
-    autoconnect: 'true',
-    resize: 'scale',
-    view_only: viewOnlyParam,
-    path: `api/v1/runtime/session/${props.sessionId}/http/websockify`,
-  });
-  return `/api/v1/runtime/session/${props.sessionId}/http/vnc/vnc_lite.html?${params.toString()}`;
-}
+  try {
+    const wsUrl = props.directWsUrl
+      ? props.directWsUrl
+      : getBackendWsUrl(`/rpa/vnc/${encodeURIComponent(props.sessionId)}`);
 
-const iframeSrc = computed(() => {
-  if (!props.enabled || !props.sessionId) return '';
-  return buildIframeSrc();
+    rfb = new RFB(vncContainer.value, wsUrl, {
+      credentials: { password: '' },
+      shared: true,
+      repeaterID: '',
+      wsProtocols: ['binary'],
+      scaleViewport: true,
+    });
+
+    rfb.viewOnly = props.viewOnly ?? false;
+    rfb.scaleViewport = true;
+
+    rfb.addEventListener('connect', () => {
+      emit('connected');
+    });
+
+    rfb.addEventListener('disconnect', (e: any) => {
+      emit('disconnected', e);
+    });
+
+    rfb.addEventListener('credentialsrequired', () => {
+      emit('credentialsRequired');
+    });
+  } catch (error) {
+    console.error('Failed to initialize VNC connection:', error);
+  }
+};
+
+const disconnect = () => {
+  if (rfb) {
+    rfb.disconnect();
+    rfb = null;
+  }
+};
+
+watch([() => props.sessionId, () => props.enabled], () => {
+  if (props.enabled && vncContainer.value) {
+    initVNCConnection();
+  } else {
+    disconnect();
+  }
+}, { immediate: true });
+
+watch(vncContainer, () => {
+  if (vncContainer.value && props.enabled) {
+    initVNCConnection();
+  }
 });
 
-const handleLoad = () => {
-  emit('connected');
-};
+onBeforeUnmount(() => {
+  disconnect();
+});
 
-const handleError = (event: Event) => {
-  emit('disconnected', event);
-};
-
-watch(
-  () => props.enabled,
-  (enabled, prev) => {
-    if (prev && !enabled) {
-      emit('disconnected');
-    }
-  }
-);
+defineExpose({
+  disconnect,
+  initConnection: initVNCConnection
+});
 </script>
 
 <style scoped>
-.vnc-frame {
-  display: block;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  background: rgb(40, 40, 40);
-  border: 0;
-}
 </style>

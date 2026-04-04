@@ -3,6 +3,7 @@ import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
+import { getBackendWsUrl } from '@/utils/sandbox';
 
 const router = useRouter();
 const route = useRoute();
@@ -158,8 +159,7 @@ const connectScreencast = (sid: string) => {
     screencastWs.close();
     screencastWs = null;
   }
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${proto}//${window.location.host}/api/v1/rpa/screencast/${sid}`;
+  const wsUrl = getBackendWsUrl(`/rpa/screencast/${sid}`);
   screencastWs = new WebSocket(wsUrl);
 
   screencastWs.onmessage = (ev) => {
