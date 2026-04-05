@@ -20,6 +20,7 @@ class ScriptExecutor:
         timeout: float = 90.0,
         session_id: Optional[str] = None,
         page_registry: Optional[Any] = None,
+        kwargs: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Execute script in a new BrowserContext via CDP.
 
@@ -54,8 +55,9 @@ class ScriptExecutor:
                 return {"success": False, "output": "", "error": "No execute_skill() function in script"}
 
             # Run with timeout
+            skill_kwargs = kwargs or {}
             _result = await asyncio.wait_for(
-                namespace["execute_skill"](page),
+                namespace["execute_skill"](page, **skill_kwargs),
                 timeout=timeout,
             )
 

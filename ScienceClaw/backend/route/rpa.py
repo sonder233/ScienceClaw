@@ -386,12 +386,18 @@ async def test_script(
             await context.close()
     else:
         # Docker 模式：使用原有逻辑
+        docker_kwargs: Dict[str, Any] = {}
+        if request.params:
+            docker_kwargs = await inject_credentials(
+                str(current_user.id), request.params, {}
+            )
         result = await executor.execute(
             browser,
             script,
             on_log=lambda msg: logs.append(msg),
             session_id=session_id,
             page_registry=rpa_manager._pages,
+            kwargs=docker_kwargs,
         )
 
     return {"status": "success", "result": result, "logs": logs, "script": script}
