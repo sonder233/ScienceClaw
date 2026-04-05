@@ -520,5 +520,18 @@ export default {
   'Yesterday': '昨天',
   'Last 7 Days': '过去 7 天',
   'Last 30 Days': '过去 30 天',
-  'Older': '更早'
+  'Older': '更早',
+  // Credentials
+  'Credentials': '凭据',
+  'Credential Management': '凭据管理',
+  'New Credential': '新增凭据',
+  'Edit Credential': '编辑凭据',
+  'Credential Name': '凭据名称',
+  'Username': '用户名',
+  'Password': '密码',
+  'Domain': '域名（可选）',
+  'Select credential...': '选择凭据...',
+  'No credentials yet': '暂无凭据，点击上方按钮新增',
+  'Delete credential confirm': '确定删除此凭据？',
+  'Leave empty to keep': '留空则不修改'
 } 

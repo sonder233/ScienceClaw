@@ -478,5 +478,18 @@ export default {
   'Yesterday': 'Yesterday',
   'Last 7 Days': 'Last 7 Days',
   'Last 30 Days': 'Last 30 Days',
-  'Older': 'Older'
+  'Older': 'Older',
+  // Credentials
+  'Credentials': 'Credentials',
+  'Credential Management': 'Credential Management',
+  'New Credential': 'New Credential',
+  'Edit Credential': 'Edit Credential',
+  'Credential Name': 'Credential Name',
+  'Username': 'Username',
+  'Password': 'Password',
+  'Domain': 'Domain (optional)',
+  'Select credential...': 'Select credential...',
+  'No credentials yet': 'No credentials yet. Click above to add one.',
+  'Delete credential confirm': 'Are you sure you want to delete this credential?',
+  'Leave empty to keep': 'Leave empty to keep current password'
 } 
