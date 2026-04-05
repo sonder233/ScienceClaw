@@ -26,19 +26,38 @@ class SkillExporter:
 
         Returns the skill name on success.
         """
-        # Generate input schema
+        # Generate input schema (exclude auto-injected params)
         input_schema = {
             "type": "object",
             "properties": {},
             "required": [],
         }
+        has_auto_injected = False
         for param_name, param_info in params.items():
-            input_schema["properties"][param_name] = {
+            # Sensitive params with credential_id are auto-injected — exclude from schema
+            if param_info.get("sensitive") and param_info.get("credential_id"):
+                has_auto_injected = True
+                continue
+            prop = {
                 "type": param_info.get("type", "string"),
                 "description": param_info.get("description", ""),
             }
-            if param_info.get("required", False):
+            original = param_info.get("original_value", "")
+            if original and original != "{{credential}}":
+                prop["default"] = original
+                has_auto_injected = True
+            input_schema["properties"][param_name] = prop
+            # Only required if no default value available
+            if param_info.get("required", False) and not original:
                 input_schema["required"].append(param_name)
+
+        auto_inject_note = ""
+        if has_auto_injected:
+            auto_inject_note = (
+                "\nNote: Some parameters (credentials and defaults) are automatically "
+                "injected at runtime. You can run this skill without providing them. "
+                "Pass `--param=value` only to override the pre-configured defaults.\n"
+            )
 
         skill_md = f"""---
 name: {skill_name}
@@ -58,7 +77,7 @@ python3 skill.py
 ```
 
 The skill uses Playwright to automate browser interactions based on the recorded steps.
-
+{auto_inject_note}
 ## Input Schema
 
 ```json

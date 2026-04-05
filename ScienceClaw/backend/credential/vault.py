@@ -138,27 +138,33 @@ class CredentialVault:
 
 
 async def inject_credentials(user_id: str, params: dict, kwargs: dict) -> dict:
-    """Resolve credential_id references in params and inject into kwargs.
+    """Resolve credential and default-value references in params, inject into kwargs.
 
-    Args:
-        user_id: The user who owns the credentials.
-        params: Parameter config dict, e.g. {"password": {"sensitive": true, "credential_id": "cred_xxx"}}.
-        kwargs: The kwargs dict that will be passed to execute_skill.
+    For each param in params (if not already provided in kwargs):
+    - If it has a credential_id: decrypt and inject the credential password.
+    - If it has an original_value (non-sensitive): inject as default.
 
-    Returns:
-        Updated kwargs with decrypted credential values injected.
+    User-provided kwargs always take precedence.
     """
     vault = get_vault()
     result = dict(kwargs)
     for param_name, param_info in params.items():
         if not isinstance(param_info, dict):
             continue
-        cred_id = param_info.get("credential_id")
-        if not cred_id:
+        # User-provided value takes precedence
+        if param_name in result:
             continue
-        plaintext = await vault.decrypt_credential(user_id, cred_id)
-        if plaintext is not None:
-            result[param_name] = plaintext
+        # Credential injection
+        cred_id = param_info.get("credential_id")
+        if cred_id:
+            plaintext = await vault.decrypt_credential(user_id, cred_id)
+            if plaintext is not None:
+                result[param_name] = plaintext
+            continue
+        # Default value injection
+        original = param_info.get("original_value", "")
+        if original and original != "{{credential}}":
+            result[param_name] = original
     return result
 
 
