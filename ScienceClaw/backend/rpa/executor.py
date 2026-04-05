@@ -54,7 +54,7 @@ class ScriptExecutor:
                 return {"success": False, "output": "", "error": "No execute_skill() function in script"}
 
             # Run with timeout
-            await asyncio.wait_for(
+            _result = await asyncio.wait_for(
                 namespace["execute_skill"](page),
                 timeout=timeout,
             )
@@ -62,11 +62,15 @@ class ScriptExecutor:
             # Brief pause so user can see result in VNC
             await page.wait_for_timeout(3000)
 
-            output = "SKILL_SUCCESS"
+            if _result:
+                import json
+                output = "SKILL_DATA:" + json.dumps(_result, ensure_ascii=False, default=str) + "\nSKILL_SUCCESS"
+            else:
+                output = "SKILL_SUCCESS"
             if on_log:
                 on_log("Execution completed successfully")
 
-            return {"success": True, "output": output}
+            return {"success": True, "output": output, "data": _result or {}}
 
         except asyncio.TimeoutError:
             output = f"SKILL_ERROR: Script did not complete within {timeout}s"

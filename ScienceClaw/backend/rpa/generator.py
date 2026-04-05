@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import List, Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,7 @@ class PlaywrightGenerator:
     # Docker mode: connects to sandbox's browser via CDP
     RUNNER_TEMPLATE_DOCKER = '''\
 import asyncio
+import json as _json
 import sys
 import httpx
 from playwright.async_api import async_playwright
@@ -50,7 +52,9 @@ async def main():
     page.set_default_timeout({default_timeout_ms})
     page.set_default_navigation_timeout({navigation_timeout_ms})
     try:
-        await execute_skill(page, **kwargs)
+        _result = await execute_skill(page, **kwargs)
+        if _result:
+            print("SKILL_DATA:" + _json.dumps(_result, ensure_ascii=False, default=str))
         print("SKILL_SUCCESS")
     except Exception as e:
         print(f"SKILL_ERROR: {{e}}", file=sys.stderr)
@@ -67,6 +71,7 @@ if __name__ == "__main__":
     # Local mode: launches local browser directly
     RUNNER_TEMPLATE_LOCAL = '''\
 import asyncio
+import json as _json
 import sys
 from playwright.async_api import async_playwright
 
@@ -88,7 +93,9 @@ async def main():
     page.set_default_timeout({default_timeout_ms})
     page.set_default_navigation_timeout({navigation_timeout_ms})
     try:
-        await execute_skill(page, **kwargs)
+        _result = await execute_skill(page, **kwargs)
+        if _result:
+            print("SKILL_DATA:" + _json.dumps(_result, ensure_ascii=False, default=str))
         print("SKILL_SUCCESS")
     except Exception as e:
         print(f"SKILL_ERROR: {{e}}", file=sys.stderr)
@@ -110,6 +117,7 @@ if __name__ == "__main__":
             "",
             "async def execute_skill(page, **kwargs):",
             '    """Auto-generated skill from RPA recording."""',
+            "    _results = {}",
         ]
 
         # Deduplicate consecutive identical actions
@@ -141,6 +149,7 @@ if __name__ == "__main__":
                 ai_code = step.get("value", "")
                 if ai_code:
                     converted = self._sync_to_async(ai_code)
+                    converted = self._inject_result_capture(converted)
                     for code_line in converted.split("\n"):
                         lines.append(f"    {code_line}" if code_line.strip() else "")
                 lines.append("")
@@ -188,6 +197,8 @@ if __name__ == "__main__":
 
             prev_action = action
             lines.append("")
+
+        lines.append("    return _results")
 
         # Wrap execute_skill function with the runner boilerplate
         execute_skill_func = "\n".join(lines)
@@ -331,3 +342,38 @@ if __name__ == "__main__":
                         continue
             result.append(line)
         return "\n".join(result)
+
+    # Methods whose return value is not data (actions, not queries)
+    _ACTION_METHODS = frozenset({
+        'click', 'dblclick', 'fill', 'press', 'type', 'check', 'uncheck',
+        'select_option', 'set_input_files', 'hover', 'focus', 'blur',
+        'dispatch_event', 'scroll_into_view_if_needed',
+        'goto', 'go_back', 'go_forward', 'reload',
+        'wait_for_timeout', 'wait_for_load_state', 'wait_for_selector',
+        'wait_for_url', 'wait_for_event', 'wait_for_function',
+        'bring_to_front', 'close', 'set_content',
+        'set_default_timeout', 'set_default_navigation_timeout',
+        'add_init_script', 'expose_function', 'route', 'unroute',
+    })
+
+    _ASSIGN_RE = re.compile(r'^(\w+)\s*=\s*(?:await\s+)?page\.')
+
+    @classmethod
+    def _inject_result_capture(cls, code: str) -> str:
+        """After data-extraction assignments, inject _results[var] = var."""
+        lines = code.split('\n')
+        result = []
+        for line in lines:
+            result.append(line)
+            stripped = line.strip()
+            m = cls._ASSIGN_RE.match(stripped)
+            if not m:
+                continue
+            var_name = m.group(1)
+            # Find the last method call in the line
+            last_call = re.search(r'\.(\w+)\([^)]*\)\s*$', stripped)
+            if last_call and last_call.group(1) in cls._ACTION_METHODS:
+                continue
+            indent = line[:len(line) - len(line.lstrip())]
+            result.append(f'{indent}_results["{var_name}"] = {var_name}')
+        return '\n'.join(result)

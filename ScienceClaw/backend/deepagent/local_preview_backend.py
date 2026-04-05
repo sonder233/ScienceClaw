@@ -103,11 +103,15 @@ class LocalPreviewShellBackend(LocalShellBackend):
             await browser_preview_registry.register(self._session_id, page)
 
             await asyncio.sleep(0.5)
-            await asyncio.wait_for(execute_skill(page, **parsed.kwargs), timeout=effective_timeout)
+            _result = await asyncio.wait_for(execute_skill(page, **parsed.kwargs), timeout=effective_timeout)
             await page.wait_for_timeout(3000)
 
+            data_line = ""
+            if _result:
+                import json
+                data_line = "SKILL_DATA:" + json.dumps(_result, ensure_ascii=False, default=str) + "\n"
             return ExecuteResponse(
-                output="SKILL_SUCCESS\n\n[Command succeeded with exit code 0]\n",
+                output=f"{data_line}SKILL_SUCCESS\n\n[Command succeeded with exit code 0]\n",
                 exit_code=0,
                 truncated=False,
             )

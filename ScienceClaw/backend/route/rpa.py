@@ -360,9 +360,13 @@ async def test_script(
             if "execute_skill" not in namespace:
                 result = {"success": False, "output": "", "error": "No execute_skill() function in script"}
             else:
-                await asyncio.wait_for(namespace["execute_skill"](page), timeout=RPA_TEST_TIMEOUT_S)
+                _skill_result = await asyncio.wait_for(namespace["execute_skill"](page), timeout=RPA_TEST_TIMEOUT_S)
                 await page.wait_for_timeout(3000)
-                result = {"success": True, "output": "SKILL_SUCCESS"}
+                if _skill_result:
+                    data_line = "SKILL_DATA:" + json.dumps(_skill_result, ensure_ascii=False, default=str) + "\n"
+                    result = {"success": True, "output": data_line + "SKILL_SUCCESS", "data": _skill_result}
+                else:
+                    result = {"success": True, "output": "SKILL_SUCCESS"}
         except Exception as e:
             result = {"success": False, "output": f"SKILL_ERROR: {e}", "error": str(e)}
         finally:
