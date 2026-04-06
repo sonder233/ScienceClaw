@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-ScienceClaw is a privacy-first personal research assistant powered by LangChain DeepAgents. It provides 1,900+ built-in scientific tools, multi-format document generation, a sandboxed code execution environment, and an RPA skill recording system. All data stays local.
+RpaClaw is a privacy-first personal research assistant powered by LangChain DeepAgents. It provides 1,900+ built-in scientific tools, multi-format document generation, a sandboxed code execution environment, and an RPA skill recording system. All data stays local.
 
 ## Tech Stack
 
@@ -16,12 +16,12 @@ ScienceClaw is a privacy-first personal research assistant powered by LangChain 
 ## Directory Structure
 
 ```
-ScienceClaw/
+RpaClaw/
 ├── docker-compose.yml              # Dev compose (build from source)
 ├── docker-compose-release.yml      # Production compose (pre-built images)
 ├── Skills/                         # User skill packages (mounted to /app/Skills in Docker)
 ├── Tools/                          # Custom user tools (hot-reload)
-└── ScienceClaw/
+└── RpaClaw/
     ├── backend/                    # FastAPI backend
     │   ├── main.py                 # Entry point, registers all routers
     │   ├── config.py               # Pydantic BaseSettings, reads from .env
@@ -67,12 +67,12 @@ docker compose -f docker-compose-release.yml up -d  # Pre-built images
 ### Local development
 ```bash
 # Backend
-cd ScienceClaw/backend
+cd RpaClaw/backend
 cp .env.example .env  # Fill in API keys
 uv run uvicorn main:app --host 0.0.0.0 --port 8000
 
 # Frontend
-cd ScienceClaw/frontend
+cd RpaClaw/frontend
 npm install
 npm run dev
 ```

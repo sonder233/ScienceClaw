@@ -1,6 +1,6 @@
 services:
   sandbox:
-    image: swr.cn-north-4.myhuaweicloud.com/claw/scienceclaw-sandbox:release-v0.0.4
+    image: swr.cn-north-4.myhuaweicloud.com/claw/rpaclaw-sandbox:release-v0.0.4
     security_opt:
     - seccomp:unconfined
     extra_hosts:
@@ -13,8 +13,8 @@ services:
     volumes:
     - ./Skills:/skills:ro
     - ./Tools:/app/Tools:ro
-    - ./ScienceClaw/backend/builtin_skills:/builtin-skills:ro
-    - ./workspace:/home/scienceclaw:rwx
+    - ./RpaClaw/backend/builtin_skills:/builtin-skills:ro
+    - ./workspace:/home/rpaclaw:rwx
     ports:
     - 18080:8080
     restart: unless-stopped
@@ -26,30 +26,30 @@ services:
       timeout: 3s
       retries: 30
   mongo:
-    image: swr.cn-north-4.myhuaweicloud.com/claw/scienceclaw-mongo:release-v0.0.4
+    image: swr.cn-north-4.myhuaweicloud.com/claw/rpaclaw-mongo:release-v0.0.4
     environment:
       MONGO_INITDB_ROOT_USERNAME: scienceone
       MONGO_INITDB_ROOT_PASSWORD: Yp51Bi1eEjC77sAt
     ports:
     - 27014:27017
     volumes:
-    - scienceclaw_mongo_data:/data/db
+    - rpaclaw_mongo_data:/data/db
     restart: unless-stopped
   backend:
-    image: swr.cn-north-4.myhuaweicloud.com/claw/scienceclaw-backend:release-v0.0.4
+    image: swr.cn-north-4.myhuaweicloud.com/claw/rpaclaw-backend:release-v0.0.4
     volumes:
     - ./Tools:/app/Tools
-    - ./workspace:/home/scienceclaw
+    - ./workspace:/home/rpaclaw
     environment:
       SANDBOX_REST_URL: http://sandbox:8080
-      WORKSPACE_DIR: /home/scienceclaw
+      WORKSPACE_DIR: /home/rpaclaw
       DS_API_KEY: ${API_KEY:-}
       DS_URL: ${API_BASE-https://api.deepseek.com/v1}
       DS_MODEL: ${MODEL_NAME-deepseek-chat}
       TEMPERATURE: ${TEMPERATURE-0.7}
       MAX_TOKENS: ${MAX_TOKENS-2000}
       LOG_LEVEL: ${LOG_LEVEL-INFO}
-      FILE_DOWNLOAD_ALLOWED_PREFIXES: /tmp,/app,/home/scienceclaw
+      FILE_DOWNLOAD_ALLOWED_PREFIXES: /tmp,/app,/home/rpaclaw
       TZ: Asia/Shanghai
       AUTH_PROVIDER: local
       BOOTSTRAP_ADMIN_ENABLED: 'true'
@@ -83,7 +83,7 @@ services:
       timeout: 5s
       retries: 30
   scheduler_api:
-    image: swr.cn-north-4.myhuaweicloud.com/claw/scienceclaw-task-service:release-v0.0.4
+    image: swr.cn-north-4.myhuaweicloud.com/claw/rpaclaw-task-service:release-v0.0.4
     environment:
       TZ: Asia/Shanghai
       DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-Asia/Shanghai}
@@ -107,7 +107,7 @@ services:
       backend:
         condition: service_started
   frontend:
-    image: swr.cn-north-4.myhuaweicloud.com/claw/scienceclaw-frontend:release-v0.0.4
+    image: swr.cn-north-4.myhuaweicloud.com/claw/rpaclaw-frontend:release-v0.0.4
     environment:
       BACKEND_URL: http://backend:8000
       TASK_SERVICE_URL: http://scheduler_api:8001
@@ -126,6 +126,6 @@ services:
       scheduler_api:
         condition: service_started
 volumes:
-  scienceclaw_mongo_data: null
-  scienceclaw_frontend_node_modules: null
-  scienceclaw_frontend_npm_cache: null
+  rpaclaw_mongo_data: null
+  rpaclaw_frontend_node_modules: null
+  rpaclaw_frontend_npm_cache: null

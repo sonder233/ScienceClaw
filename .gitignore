@@ -95,5 +95,5 @@ workspace
 sync-to-huawei-swr-docker.sh
 
 # Local project data
-ScienceClaw/data/
-ScienceClaw/Skills/
+RpaClaw/data/
+RpaClaw/Skills/

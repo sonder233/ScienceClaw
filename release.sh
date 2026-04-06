@@ -5,7 +5,7 @@ set -euo pipefail
 export DOCKER_BUILDKIT=1
 VERSION="v0.0.4"
 
-# 构建 ScienceClaw 下所有带 Dockerfile 的子目录镜像
+# 构建 RpaClaw 下所有带 Dockerfile 的子目录镜像
 # 镜像标签 = release-${VERSION}
 # 支持多平台: linux/amd64, linux/arm64
 #
@@ -14,7 +14,7 @@ VERSION="v0.0.4"
 #   ./release.sh backend frontend   # 只构建指定模块
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCIENCECLAW="${SCRIPT_DIR}/ScienceClaw"
+RPACLAW="${SCRIPT_DIR}/RpaClaw"
 PLATFORMS="linux/amd64,linux/arm64"
 
 # 可选: 设置 REGISTRY 后镜像名为 $REGISTRY/目录名:日期，并执行 push
@@ -22,8 +22,8 @@ PLATFORMS="linux/amd64,linux/arm64"
 REGISTRY="${REGISTRY:-swr.cn-north-4.myhuaweicloud.com/claw}"
 COMPOSE_RELEASE="${SCRIPT_DIR}/docker-compose-release.yml"
 
-if [[ ! -d "$SCIENCECLAW" ]]; then
-  echo "Error: ScienceClaw directory not found: $SCIENCECLAW"
+if [[ ! -d "$RPACLAW" ]]; then
+  echo "Error: RpaClaw directory not found: $RPACLAW"
   exit 1
 fi
 
@@ -33,7 +33,7 @@ TARGETS=("$@")
 modules=()
 if [[ ${#TARGETS[@]} -gt 0 ]]; then
   for t in "${TARGETS[@]}"; do
-    dir="${SCIENCECLAW}/${t}"
+    dir="${RPACLAW}/${t}"
     if [[ ! -d "$dir" ]]; then
       echo "Error: module not found: $t"
       exit 1
@@ -41,13 +41,13 @@ if [[ ${#TARGETS[@]} -gt 0 ]]; then
     modules+=("$dir")
   done
 else
-  for dir in "$SCIENCECLAW"/*; do
+  for dir in "$RPACLAW"/*; do
     [[ -d "$dir" ]] && modules+=("$dir")
   done
 fi
 
 for dir in "${modules[@]}"; do
-  name="scienceclaw-$(basename "$dir")"
+  name="rpaclaw-$(basename "$dir")"
   dockerfile="${dir}/Dockerfile"
   if [[ ! -f "$dockerfile" ]]; then
     echo "Skip (no Dockerfile): $name"
@@ -64,12 +64,12 @@ for dir in "${modules[@]}"; do
 
   extra_contexts=""
   if grep -q '\-\-from=websearch' "$dockerfile" 2>/dev/null; then
-    extra_contexts="--build-context websearch=${SCIENCECLAW}/websearch"
+    extra_contexts="--build-context websearch=${RPACLAW}/websearch"
   fi
   cache_repo="${REGISTRY}/${name}:buildcache"
   echo "Building: $image (platforms: $PLATFORMS)"
   docker buildx build \
-    --builder scienceclaw-builder \
+    --builder rpaclaw-builder \
     --platform "$PLATFORMS" \
     --provenance=false \
     --sbom=false \

@@ -1,30 +1,30 @@
 <div align="center">
 
-<h1><img src="images/logo.png" alt="ScienceClaw" width="36" style="vertical-align: middle;" />&nbsp;ScienceClaw</h1>
+<h1><img src="images/logo.png" alt="RpaClaw" width="36" style="vertical-align: middle;" />&nbsp;RpaClaw</h1>
 
 **[English](README.md)** | **[中文](README_zh.md)**
 
 </div>
 
-ScienceClaw is a privacy-first personal assistant with RPA (Robotic Process Automation) capabilities, built on [LangChain DeepAgents](https://github.com/langchain-ai/deepagents) and [AIO Sandbox](https://github.com/agent-infra/sandbox) infrastructure. It offers 1,900+ built-in tools, multi-format document generation, sandboxed code execution, and browser automation recording.
+RpaClaw is a privacy-first personal assistant with RPA (Robotic Process Automation) capabilities, built on [LangChain DeepAgents](https://github.com/langchain-ai/deepagents) and [AIO Sandbox](https://github.com/agent-infra/sandbox) infrastructure. It offers 1,900+ built-in tools, multi-format document generation, sandboxed code execution, and browser automation recording.
 
 <div align="center">
 
 *RPA Recording & Playback · 1,900+ Built-in Tools · Multi-format Generation · Fully Local & Privacy-First*
 
-[![Tools](https://img.shields.io/badge/Tools-e74c3c.svg)](./Tools) [![Skills](https://img.shields.io/badge/Skills-f39c12.svg)](./Skills) [![Frontend](https://img.shields.io/badge/Frontend-2ecc71.svg)](./ScienceClaw/frontend) [![Backend](https://img.shields.io/badge/Backend-3498db.svg)](./ScienceClaw/backend) [![Scheduler](https://img.shields.io/badge/Scheduler-9b59b6.svg)](./ScienceClaw/task-service) [![Sandbox](https://img.shields.io/badge/Sandbox-1abc9c.svg)](./ScienceClaw/sandbox) [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Tools](https://img.shields.io/badge/Tools-e74c3c.svg)](./Tools) [![Skills](https://img.shields.io/badge/Skills-f39c12.svg)](./Skills) [![Frontend](https://img.shields.io/badge/Frontend-2ecc71.svg)](./RpaClaw/frontend) [![Backend](https://img.shields.io/badge/Backend-3498db.svg)](./RpaClaw/backend) [![Scheduler](https://img.shields.io/badge/Scheduler-9b59b6.svg)](./RpaClaw/task-service) [![Sandbox](https://img.shields.io/badge/Sandbox-1abc9c.svg)](./RpaClaw/sandbox) [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
 
-[Why ScienceClaw](#why-scienceclaw) · [Architecture](#architecture) · [News](#news) · [Quick Start](#quick-start) · [Local Setup](#local-setup) · [Free API Credits](#free-api-credits) · [Tools & Skills](#tools-skills) · [Features](#practical-features) · [Project Structure](#project-structure) · [Commands](#commands) · [Community](#community) · [Acknowledgements](#acknowledgements)
+[Why RpaClaw](#why-rpaclaw) · [Architecture](#architecture) · [News](#news) · [Quick Start](#quick-start) · [Local Setup](#local-setup) · [Free API Credits](#free-api-credits) · [Tools & Skills](#tools-skills) · [Features](#practical-features) · [Project Structure](#project-structure) · [Commands](#commands) · [Community](#community) · [Acknowledgements](#acknowledgements)
 
 </div>
 
 ---
 
-<a id="why-scienceclaw"></a>
+<a id="why-rpaclaw"></a>
 
-## ✨ Why ScienceClaw
+## ✨ Why RpaClaw
 
 <table>
 <tr>
@@ -32,7 +32,7 @@ ScienceClaw is a privacy-first personal assistant with RPA (Robotic Process Auto
 
 ### 🤖 RPA Recording & Automation
 
-Record browser interactions and generate **Playwright scripts** automatically. ScienceClaw captures your actions, generates smart locators, and creates reusable automation skills. Supports both Docker sandbox mode and local mode for flexible deployment.
+Record browser interactions and generate **Playwright scripts** automatically. RpaClaw captures your actions, generates smart locators, and creates reusable automation skills. Supports both Docker sandbox mode and local mode for flexible deployment.
 
 </td>
 <td width="32%" valign="top">
@@ -68,7 +68,7 @@ No tedious configuration needed. Launch with **a single command** using pre-buil
 
 ## 📢 News
 
-- **[2026-03-13]** ScienceClaw v0.0.1 is officially released! Visit our website: [scienceclaw.taichuai.cn](https://scienceclaw.taichuai.cn/)
+- **[2026-03-13]** RpaClaw v0.0.1 is officially released! Visit our website: [rpaclaw.taichuai.cn](https://rpaclaw.taichuai.cn/)
 
 ---
 
@@ -88,8 +88,8 @@ No tedious configuration needed. Launch with **a single command** using pre-buil
 **1. Clone the repository**
 
 ```bash
-git clone https://github.com/AgentTeam-TaichuAI/ScienceClaw.git
-cd ScienceClaw
+git clone https://github.com/AgentTeam-TaichuAI/RpaClaw.git
+cd RpaClaw
 ```
 
 **2. Pull pre-built images and start**
@@ -142,7 +142,7 @@ For developers who want to run services locally without Docker:
 **1. Navigate to backend directory**
 
 ```bash
-cd ScienceClaw/backend
+cd RpaClaw/backend
 ```
 
 **2. Create and configure environment**
@@ -193,7 +193,7 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8000
 **1. Navigate to frontend directory**
 
 ```bash
-cd ScienceClaw/frontend
+cd RpaClaw/frontend
 ```
 
 **2. Install dependencies**
@@ -265,7 +265,7 @@ To lower the barrier for new users, a limited batch of LLM API resources:
 
 ### 🧪 1,900+ Built-in Tools
 
-ScienceClaw integrates **ToolUniverse**, providing 1,900+ tools across multiple domains for automation, data processing, and AI-powered workflows.
+RpaClaw integrates **ToolUniverse**, providing 1,900+ tools across multiple domains for automation, data processing, and AI-powered workflows.
 
 ### 🛠️ Four-Layer Tool Architecture
 
@@ -278,7 +278,7 @@ ScienceClaw integrates **ToolUniverse**, providing 1,900+ tools across multiple 
 
 ### 🎨 Custom Tools
 
-ScienceClaw makes it easy to extend with your own tools:
+RpaClaw makes it easy to extend with your own tools:
 
 - **Natural language creation** — Simply describe what you want in chat, and the agent will create, test, and save a new tool for you automatically.
 - **Manual mounting** — Drop any Python file with `@tool` decorated functions into the `Tools/` directory; they are auto-detected and hot-loaded without restart.
@@ -303,7 +303,7 @@ Skills are **structured instruction documents (SKILL.md)** that guide the Agent 
 
 #### Multi-Format Document Generation
 
-ScienceClaw can produce professional documents in **4 formats**:
+RpaClaw can produce professional documents in **4 formats**:
 
 | Format | Features |
 |---|---|
@@ -339,14 +339,14 @@ ScienceClaw can produce professional documents in **4 formats**:
 ## 📂 Project Structure
 
 ```
-ScienceClaw/
+RpaClaw/
 ├── docker-compose.yml              # Development orchestration
 ├── docker-compose-release.yml      # Pre-built image orchestration
 ├── images/                         # Static assets (logo, screenshots)
 ├── Tools/                          # Custom tools (hot-reload)
 ├── Skills/                         # User & community skill packages
 ├── workspace/                      # 🔒 Local workspace (data stays local)
-└── ScienceClaw/
+└── RpaClaw/
     ├── backend/                    # FastAPI backend
     │   ├── deepagent/              # Core AI agent engine (LangGraph)
     │   ├── builtin_skills/         # Built-in skills (pdf, docx, pptx, xlsx, etc.)
@@ -399,7 +399,7 @@ docker compose stop backend
 
 ## 🗑️ Uninstall
 
-ScienceClaw is built entirely on Docker, so uninstalling it is clean and simple — it has **no side effects on your host system**.
+RpaClaw is built entirely on Docker, so uninstalling it is clean and simple — it has **no side effects on your host system**.
 
 ```bash
 # Stop and remove all containers
@@ -412,7 +412,7 @@ docker compose down --rmi all --volumes
 Then simply delete the project folder:
 
 ```bash
-rm -rf /path/to/ScienceClaw
+rm -rf /path/to/RpaClaw
 ```
 
 That's it. No residual files, no registry entries, no system-level changes.
@@ -431,7 +431,7 @@ That's it. No residual files, no registry entries, no system-level changes.
 
 We welcome contributions, feedback, and discussions! Join our community:
 
-- Submit issues and feature requests via [GitHub Issues](https://github.com/AgentTeam-TaichuAI/ScienceClaw/issues)
+- Submit issues and feature requests via [GitHub Issues](https://github.com/AgentTeam-TaichuAI/RpaClaw/issues)
 - Share your custom tools and skills with the community
 
 ---
@@ -446,17 +446,17 @@ We welcome contributions, feedback, and discussions! Join our community:
 
 ## 🙏 Acknowledgements
 
-ScienceClaw is built on the shoulders of excellent open-source projects. We would like to express our sincere gratitude to:
+RpaClaw is built on the shoulders of excellent open-source projects. We would like to express our sincere gratitude to:
 
-- **[LangChain DeepAgents](https://github.com/langchain-ai/deepagents)** — The batteries-included agent harness built on LangChain and LangGraph. ScienceClaw's core agent engine is powered by the DeepAgents architecture, which provides planning, filesystem access, sub-agent delegation, and smart context management out of the box.
+- **[LangChain DeepAgents](https://github.com/langchain-ai/deepagents)** — The batteries-included agent harness built on LangChain and LangGraph. RpaClaw's core agent engine is powered by the DeepAgents architecture, which provides planning, filesystem access, sub-agent delegation, and smart context management out of the box.
 
-- **[AIO Sandbox](https://github.com/agent-infra/sandbox)** — The all-in-one agent sandbox environment that combines Browser, Shell, File, and MCP operations in a single Docker container. ScienceClaw relies on AIO Sandbox to provide secure, isolated code execution with a unified file system.
+- **[AIO Sandbox](https://github.com/agent-infra/sandbox)** — The all-in-one agent sandbox environment that combines Browser, Shell, File, and MCP operations in a single Docker container. RpaClaw relies on AIO Sandbox to provide secure, isolated code execution with a unified file system.
 
-- **[ToolUniverse](https://github.com/ZitnikLab/ToolUniverse)** — A unified ecosystem of 1,900+ scientific tools developed by the Zitnik Lab at Harvard. ToolUniverse powers ScienceClaw's multi-disciplinary research capabilities across drug discovery, genomics, astronomy, earth science, and more.
+- **[ToolUniverse](https://github.com/ZitnikLab/ToolUniverse)** — A unified ecosystem of 1,900+ scientific tools developed by the Zitnik Lab at Harvard. ToolUniverse powers RpaClaw's multi-disciplinary research capabilities across drug discovery, genomics, astronomy, earth science, and more.
 
-- **[SearXNG](https://github.com/searxng/searxng)** — A privacy-respecting, hackable metasearch engine. ScienceClaw uses SearXNG as the backbone of its `web_search` tool, aggregating results from multiple search engines without tracking.
+- **[SearXNG](https://github.com/searxng/searxng)** — A privacy-respecting, hackable metasearch engine. RpaClaw uses SearXNG as the backbone of its `web_search` tool, aggregating results from multiple search engines without tracking.
 
-- **[Crawl4AI](https://github.com/unclecode/crawl4ai)** — An open-source, LLM-friendly web crawler. ScienceClaw's `web_crawl` tool is powered by Crawl4AI, enabling intelligent content extraction from web pages for research and analysis.
+- **[Crawl4AI](https://github.com/unclecode/crawl4ai)** — An open-source, LLM-friendly web crawler. RpaClaw's `web_crawl` tool is powered by Crawl4AI, enabling intelligent content extraction from web pages for research and analysis.
 
 ---
 
@@ -464,7 +464,7 @@ ScienceClaw is built on the shoulders of excellent open-source projects. We woul
 
 <div align="center">
 
-[![Star History Chart](https://api.star-history.com/svg?repos=AgentTeam-TaichuAI/ScienceClaw&type=Date)](https://star-history.com/#AgentTeam-TaichuAI/ScienceClaw&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=AgentTeam-TaichuAI/RpaClaw&type=Date)](https://star-history.com/#AgentTeam-TaichuAI/RpaClaw&Date)
 
 </div>
 

@@ -1,0 +1,8 @@
+#FROM ghcr.io/agent-infra/sandbox:latest
+FROM swr.cn-north-4.myhuaweicloud.com/claw/rpaclaw-sandbox:release-v0.0.3
+COPY requirements.txt /tmp/requirements.txt
+RUN python3 -m pip install -r /tmp/requirements.txt \
+    && rm -f /tmp/requirements.txt 
+
+# ── 3. 项目文件 ────────────────────────────────────────────────────────
+COPY tool_runner.py /app/_tool_runner.py

@@ -3,11 +3,11 @@
 workspace/
 .git/
 .gitignore
-ScienceClaw/frontend/node_modules/
-ScienceClaw/frontend/.npm-cache/
-ScienceClaw/frontend/dist/
-ScienceClaw/websearch/
-!ScienceClaw/websearch/seekr_sdk.py
+RpaClaw/frontend/node_modules/
+RpaClaw/frontend/.npm-cache/
+RpaClaw/frontend/dist/
+RpaClaw/websearch/
+!RpaClaw/websearch/seekr_sdk.py
 *.pyc
 __pycache__/
 .env
