@@ -51,8 +51,8 @@
                     @keydown="handleKeydown"
                     :placeholder="t('Give RpaClaw a task to work on...')"></textarea>
             </div>
-            <footer class="flex flex-row justify-between w-full px-3">
-                <div class="flex gap-2 pr-2 items-center">
+            <footer class="flex flex-col gap-2 w-full px-3 sm:flex-row sm:justify-between sm:items-center">
+                <div class="flex flex-wrap gap-2 pr-0 sm:pr-2 items-center min-w-0">
                     <button @click="uploadFile"
                         class="rounded-full border border-[var(--border-main)] inline-flex items-center justify-center gap-1 clickable cursor-pointer text-xs text-[var(--text-secondary)] hover:bg-[var(--fill-tsp-gray-main)] w-8 h-8 p-0 data-[popover-trigger]:bg-[var(--fill-tsp-gray-main)] shrink-0"
                         aria-expanded="false" aria-haspopup="dialog">
@@ -62,9 +62,9 @@
                     <!-- RpaClaw + Skills Management Popover -->
                     <Popover v-model:open="isPanelOpen">
                         <PopoverTrigger as-child>
-                            <div class="flex items-center gap-2 bg-[var(--background-white-main)] rounded-full px-3 py-1 border border-[var(--border-light)] cursor-pointer hover:border-[var(--border-main)] transition-colors h-8">
+                            <div class="flex items-center gap-2 bg-[var(--background-white-main)] rounded-full px-3 py-1 border border-[var(--border-light)] cursor-pointer hover:border-[var(--border-main)] transition-colors h-8 max-w-full">
                                 <RobotAvatar class="w-4 h-4" />
-                                <span class="text-xs font-medium text-[var(--text-secondary)]">RpaClaw</span>
+                                <span class="text-xs font-medium text-[var(--text-secondary)] truncate">RpaClaw</span>
                             </div>
                         </PopoverTrigger>
                         <PopoverContent class="w-[320px] p-0 overflow-hidden bg-[var(--background-white-main)] border border-[var(--border-light)] shadow-xl rounded-xl" align="start" :side-offset="8">
@@ -153,15 +153,15 @@
 
                     <!-- Model Selection -->
                     <div v-if="!currentModel" @click="emit('open-model-settings')"
-                        class="flex items-center gap-2 bg-[var(--background-white-main)] rounded-full px-3 py-1 border border-[var(--border-light)] cursor-pointer hover:border-[var(--border-main)] transition-colors h-8 ml-2">
-                        <span class="text-xs font-medium text-[var(--text-secondary)]">{{ currentModelName }}</span>
+                        class="flex items-center gap-2 bg-[var(--background-white-main)] rounded-full px-3 py-1 border border-[var(--border-light)] cursor-pointer hover:border-[var(--border-main)] transition-colors h-8 min-w-0 max-w-full sm:ml-2">
+                        <span class="text-xs font-medium text-[var(--text-secondary)] truncate">{{ currentModelName }}</span>
                     </div>
                     <Popover v-else v-model:open="isModelsOpen">
                         <PopoverTrigger as-child>
-                             <div class="flex items-center gap-2 bg-[var(--background-white-main)] rounded-full px-3 py-1 border border-[var(--border-light)] cursor-pointer hover:border-[var(--border-main)] transition-colors h-8 ml-2">
-                                <span class="text-xs font-medium text-[var(--text-secondary)] flex items-center gap-1">
+                             <div class="flex items-center gap-2 bg-[var(--background-white-main)] rounded-full px-3 py-1 border border-[var(--border-light)] cursor-pointer hover:border-[var(--border-main)] transition-colors h-8 min-w-0 max-w-full sm:ml-2">
+                                <span class="text-xs font-medium text-[var(--text-secondary)] flex items-center gap-1 min-w-0">
                                     <ProviderIcon :provider="currentModel.provider" class="size-4 mr-1" />
-                                    {{ currentModelName }}
+                                    <span class="truncate">{{ currentModelName }}</span>
                                 </span>
                             </div>
                         </PopoverTrigger>
@@ -192,7 +192,7 @@
                         </PopoverContent>
                     </Popover>
                 </div>
-                <div class="flex gap-2 items-center">
+                <div class="flex gap-2 items-center justify-end shrink-0">
                     <button 
                         @click="handleOptimize"
                         :disabled="!hasTextInput || isOptimizing || showOptimization"
