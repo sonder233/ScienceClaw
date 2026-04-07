@@ -6,17 +6,17 @@
 
 </div>
 
-RpaClaw is a privacy-first personal assistant with RPA (Robotic Process Automation) capabilities, built on [LangChain DeepAgents](https://github.com/langchain-ai/deepagents) and [AIO Sandbox](https://github.com/agent-infra/sandbox) infrastructure. It offers 1,900+ built-in tools, multi-format document generation, sandboxed code execution, and browser automation recording.
+RpaClaw is a privacy-first personal assistant with RPA (Robotic Process Automation) capabilities, built on [LangChain DeepAgents](https://github.com/langchain-ai/deepagents) and [AIO Sandbox](https://github.com/agent-infra/sandbox) infrastructure. 
 
 <div align="center">
 
-*RPA Recording & Playback · 1,900+ Built-in Tools · Multi-format Generation · Fully Local & Privacy-First*
+*RPA Recording & Playback · Adaptive Execution · Multi-format Generation · Fully Local & Privacy-First*
 
 [![Tools](https://img.shields.io/badge/Tools-e74c3c.svg)](./Tools) [![Skills](https://img.shields.io/badge/Skills-f39c12.svg)](./Skills) [![Frontend](https://img.shields.io/badge/Frontend-2ecc71.svg)](./RpaClaw/frontend) [![Backend](https://img.shields.io/badge/Backend-3498db.svg)](./RpaClaw/backend) [![Scheduler](https://img.shields.io/badge/Scheduler-9b59b6.svg)](./RpaClaw/task-service) [![Sandbox](https://img.shields.io/badge/Sandbox-1abc9c.svg)](./RpaClaw/sandbox) [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
 
-[Why RpaClaw](#why-rpaclaw) · [Architecture](#architecture) · [News](#news) · [Quick Start](#quick-start) · [Local Setup](#local-setup) · [Free API Credits](#free-api-credits) · [Tools & Skills](#tools-skills) · [Features](#practical-features) · [Project Structure](#project-structure) · [Commands](#commands) · [Community](#community) · [Acknowledgements](#acknowledgements)
+[Why RpaClaw](#why-rpaclaw) · [Quick Start](#quick-start) · [Local Setup](#local-setup) · [Tools & Skills](#tools-skills) · [Features](#practical-features) · [Project Structure](#project-structure) · [Commands](#commands) · [Acknowledgements](#acknowledgements)
 
 </div>
 
@@ -46,29 +46,11 @@ Runs entirely in **Docker containers** with isolated sandbox execution. The agen
 
 ### 🚀 Ready Out of the Box
 
-No tedious configuration needed. Launch with **a single command** using pre-built Docker images. 1,900+ tools and skill packages included. Whether you're automating workflows or building AI agents, get started immediately.
+No tedious configuration needed. Launch with **a single command** using pre-built Docker images. Whether you're automating workflows or building AI agents, get started immediately.
 
 </td>
 </tr>
 </table>
-
----
-
-<a id="architecture"></a>
-
-## 🏗️ Architecture
-
-<div align="center">
-<img src="images/structure.png" alt="Architecture" width="100%" />
-</div>
-
----
-
-<a id="news"></a>
-
-## 📢 News
-
-- **[2026-03-13]** RpaClaw v0.0.1 is officially released! Visit our website: [rpaclaw.taichuai.cn](https://rpaclaw.taichuai.cn/)
 
 ---
 
@@ -88,7 +70,6 @@ No tedious configuration needed. Launch with **a single command** using pre-buil
 **1. Clone the repository**
 
 ```bash
-git clone https://github.com/AgentTeam-TaichuAI/RpaClaw.git
 cd RpaClaw
 ```
 
@@ -154,11 +135,6 @@ cp .env.example .env
 **3. Edit `.env` file with your configuration:**
 
 ```bash
-# LLM Configuration
-DS_API_KEY=your_deepseek_api_key
-DS_URL=https://api.deepseek.com
-DS_MODEL=deepseek-chat
-
 # Storage Mode: 'local' or 'docker'
 STORAGE_BACKEND=local
 
@@ -171,10 +147,8 @@ MONGODB_PASSWORD=
 # Sandbox (for Docker mode RPA)
 SANDBOX_MCP_URL=http://localhost:18080/mcp
 
-# Skills and Workspace
-EXTERNAL_SKILLS_DIR=./Skills
-BUILTIN_SKILLS_DIR=./builtin_skills
-WORKSPACE_DIR=./workspace
+# 统一根目录：workspace、external_skills、builtin_skills、data 自动派生为子目录
+RPA_CLAW_HOME=
 ```
 
 **4. Install dependencies and run**
@@ -241,21 +215,6 @@ Set `STORAGE_BACKEND=docker` in `.env`. Requires sandbox container running. RPA 
 **Requirements:**
 - Sandbox container must be running
 - Access to `SANDBOX_MCP_URL`
-
----
-
-<a id="free-api-credits"></a>
-
-## 🎁 Free LLM API Credits for Early Users
-
-To lower the barrier for new users, a limited batch of LLM API resources:
-
-| Offer | Details |
-|---|---|
-| SCNet (National Supercomputing Internet) | **10M free tokens** ([Claim here](https://www.scnet.cn/ui/mall/en)) |
-| Zidong Taichu Cloud | **10M free tokens** ([Claim here](https://gateway.taichuai.cn/modelhub/apply)) |
-
-> Limited availability — first come, first served. We will continue to secure more compute resources for the community.
 
 ---
 
@@ -327,7 +286,6 @@ RpaClaw can produce professional documents in **4 formats**:
 | Feature | Description |
 |---|---|
 | 🤖 **RPA Recording & Playback** | Record browser interactions and generate reusable Playwright automation scripts. Supports both Docker sandbox mode and local mode. |
-| 📨 **Feishu (Lark) Integration** | Configure webhook notifications in settings — receive task results and alerts directly in Feishu group chat. |
 | ⏰ **Scheduled Tasks** | Set up recurring or one-time tasks with cron-like scheduling. Results delivered via Feishu or in-app notifications. |
 | 📁 **File Management** | Built-in file panel for browsing, previewing, and downloading workspace files generated during sessions. |
 | 📊 **Resource Monitoring** | Real-time dashboard showing LLM resource consumption and service health status. |
@@ -358,7 +316,6 @@ RpaClaw/
     ├── frontend/                   # Vue 3 + Tailwind frontend
     ├── sandbox/                    # Isolated code execution environment
     ├── task-service/               # Scheduled task service
-    └── websearch/                  # Search & crawl microservice
 ```
 
 ---
@@ -425,17 +382,6 @@ That's it. No residual files, no registry entries, no system-level changes.
 
 ---
 
-<a id="community"></a>
-
-## 🤝 Community
-
-We welcome contributions, feedback, and discussions! Join our community:
-
-- Submit issues and feature requests via [GitHub Issues](https://github.com/AgentTeam-TaichuAI/RpaClaw/issues)
-- Share your custom tools and skills with the community
-
----
-
 ## 📄 License
 
 [MIT License](LICENSE)
@@ -459,22 +405,4 @@ RpaClaw is built on the shoulders of excellent open-source projects. We would li
 - **[Crawl4AI](https://github.com/unclecode/crawl4ai)** — An open-source, LLM-friendly web crawler. RpaClaw's `web_crawl` tool is powered by Crawl4AI, enabling intelligent content extraction from web pages for research and analysis.
 
 ---
-
-## ⭐ Star History
-
-<div align="center">
-
-[![Star History Chart](https://api.star-history.com/svg?repos=AgentTeam-TaichuAI/RpaClaw&type=Date)](https://star-history.com/#AgentTeam-TaichuAI/RpaClaw&Date)
-
-</div>
-
-## Contributors
-
-- [Zhiyuan Li](https://github.com/Zhiyuan-Li-John)
-- [Guangchuan Guo](https://github.com/meizhuhanxiang)
-- [Shaoling Lin](https://github.com/SharryLin)
-- [Songsong Lei](https://github.com/slei)
-- [Zhidong Zhang](https://github.com/mumudd)
-
-**Technical Support:** NLP Group, Institute of Automation, Chinese Academy of Sciences
 
