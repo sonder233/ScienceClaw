@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X } from 'lucide-vue-next';
+import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import { getBackendWsUrl } from '@/utils/sandbox';
 
@@ -269,6 +269,14 @@ const stopRecording = async () => {
   router.push(`/rpa/configure?sessionId=${sessionId.value}`);
 };
 
+const goToHome = () => {
+  router.push('/chat');
+};
+
+const goToSkills = () => {
+  router.push('/chat/skills');
+};
+
 const deleteStep = async (stepIndex: number) => {
   if (!sessionId.value) return;
   try {
@@ -443,6 +451,20 @@ const sendMessage = async () => {
         </div>
       </div>
       <div class="flex items-center gap-4">
+        <button
+          @click="goToHome"
+          class="flex items-center gap-2 bg-white/10 text-white font-medium px-4 py-2 rounded-full hover:bg-white/20 transition-all text-sm"
+        >
+          <House :size="16" />
+          返回首页
+        </button>
+        <button
+          @click="goToSkills"
+          class="flex items-center gap-2 bg-white/10 text-white font-medium px-4 py-2 rounded-full hover:bg-white/20 transition-all text-sm"
+        >
+          <FolderOpen :size="16" />
+          技能库
+        </button>
         <button
           @click="stopRecording"
           class="bg-white text-[#831bd7] font-bold px-6 py-2 rounded-full hover:bg-white/90 transition-all shadow-md active:scale-95 text-sm"

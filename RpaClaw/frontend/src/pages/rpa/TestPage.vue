@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { Play, Save, CheckCircle, XCircle, Loader2, Terminal, Code, ArrowLeft, RotateCcw } from 'lucide-vue-next';
+import { Play, Save, CheckCircle, XCircle, Loader2, Terminal, Code, ArrowLeft, RotateCcw, House, FolderOpen } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import { getBackendVncPageUrl, getBackendWsUrl, isLocalMode } from '@/utils/sandbox';
 
@@ -22,6 +22,7 @@ const params = computed(() => {
 const vncPageUrl = computed(() => getBackendVncPageUrl(sessionId.value || 'sandbox', false));
 const localMode = ref(isLocalMode());
 const canvasRef = ref<HTMLCanvasElement | null>(null);
+const previewTitle = computed(() => (localMode.value ? '测试执行画面 — 本地实时画面' : '测试执行画面 — VNC 实时串流'));
 let screencastWs: WebSocket | null = null;
 
 const TEST_REQUEST_TIMEOUT_MS = 210000;
@@ -131,6 +132,14 @@ const goBackToRecorder = () => {
   router.push('/rpa/recorder');
 };
 
+const goToHome = () => {
+  router.push('/chat');
+};
+
+const goToSkills = () => {
+  router.push('/chat/skills');
+};
+
 const saveSkill = async () => {
   if (!sessionId.value) return;
   saving.value = true;
@@ -183,6 +192,21 @@ onBeforeUnmount(() => {
       <span class="text-sm text-gray-500 truncate max-w-48">{{ skillName }}</span>
       <div class="flex-1"></div>
 
+      <button
+        @click="goToHome"
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:text-gray-900 hover:bg-gray-50 transition-colors text-sm"
+      >
+        <House :size="15" />
+        返回首页
+      </button>
+      <button
+        @click="goToSkills"
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:text-gray-900 hover:bg-gray-50 transition-colors text-sm"
+      >
+        <FolderOpen :size="15" />
+        技能库
+      </button>
+
       <div v-if="saved" class="flex items-center gap-2 text-green-600 font-bold text-sm">
         <CheckCircle :size="18" />
         技能已保存，正在跳转...
@@ -202,7 +226,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="flex-1 bg-white rounded-md h-6 mx-4 flex items-center px-3 shadow-inner">
               <Terminal class="text-gray-400" :size="12" />
-              <span class="text-[10px] text-gray-600 ml-2 truncate">测试执行画面 — VNC 实时串流</span>
+              <span class="text-[10px] text-gray-600 ml-2 truncate">{{ previewTitle }}</span>
             </div>
           </div>
           <div class="flex-1 relative bg-black overflow-hidden">

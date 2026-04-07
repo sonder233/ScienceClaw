@@ -202,7 +202,7 @@
 
     <!-- Edit/Add Dialog -->
     <Dialog v-model:open="isEditOpen">
-      <DialogContent class="sm:max-w-[780px] p-0 overflow-hidden bg-white/95 dark:bg-gray-900/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-gray-200/60 dark:border-gray-700/40">
+      <DialogContent class="w-[calc(100vw-16px)] max-w-[780px] max-h-[92vh] p-0 overflow-hidden bg-white/95 dark:bg-gray-900/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-gray-200/60 dark:border-gray-700/40 flex flex-col">
         <DialogHeader class="px-6 py-4 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/30 flex flex-row items-center justify-between">
           <DialogTitle class="text-lg font-bold text-gray-800 dark:text-gray-100 flex items-center gap-2">
             <div class="size-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center">
@@ -212,11 +212,12 @@
           </DialogTitle>
         </DialogHeader>
         
-        <div class="px-6 py-6 flex flex-col gap-5">
+        <div class="flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-6">
+          <div class="flex flex-col gap-5">
             <!-- Provider Selection -->
              <div class="grid gap-2">
                 <label class="text-sm font-medium text-[var(--text-secondary)]">{{ t('Provider') }} <span class="text-red-500">*</span></label>
-                <div class="grid grid-cols-3 gap-2">
+                <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
                     <button 
                         v-for="p in ['openai', 'anthropic', 'deepseek', 'gemini', 'glm', 'qwen', 'kimi', 'minimax', 'taichu', 'other']" 
                         :key="p"
@@ -232,7 +233,7 @@
             </div>
 
             <!-- Display Name & Model Name -->
-            <div class="grid grid-cols-[2fr_3fr] gap-4">
+            <div class="grid grid-cols-1 sm:grid-cols-[2fr_3fr] gap-4">
                  <div class="grid gap-2">
                     <label class="text-sm font-medium text-[var(--text-secondary)]">{{ t('Display Name') }} <span class="text-red-500">*</span></label>
                     <input 
@@ -339,19 +340,20 @@
                     </button>
                 </div>
             </div>
+          </div>
         </div>
 
-        <DialogFooter class="px-6 py-4 bg-gray-50/50 dark:bg-gray-800/30 border-t border-gray-100 dark:border-gray-800 flex justify-between items-center">
-          <div class="text-xs text-gray-400" v-if="saving">{{ t('Verifying connection...') }}</div>
-          <div class="flex gap-3 ml-auto">
+        <DialogFooter class="px-4 py-4 sm:px-6 bg-gray-50/50 dark:bg-gray-800/30 border-t border-gray-100 dark:border-gray-800 flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center">
+          <div class="text-xs text-gray-400 min-h-[16px]">{{ saving ? t('Verifying connection...') : '' }}</div>
+          <div class="flex gap-3 sm:ml-auto w-full sm:w-auto">
             <button
-                class="px-5 py-2.5 text-sm font-medium text-gray-600 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-600 transition-all shadow-sm"
+                class="flex-1 sm:flex-none px-5 py-2.5 text-sm font-medium text-gray-600 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-600 transition-all shadow-sm"
                 @click="isEditOpen = false"
             >
                 {{ t('Cancel') }}
             </button>
             <button
-                class="px-5 py-2.5 text-sm font-semibold text-white bg-gradient-to-r from-blue-500 to-indigo-600 rounded-xl shadow-md shadow-blue-500/20 hover:shadow-lg hover:shadow-blue-500/30 active:scale-[0.97] transition-all duration-200 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                class="flex-1 sm:flex-none px-5 py-2.5 text-sm font-semibold text-white bg-gradient-to-r from-blue-500 to-indigo-600 rounded-xl shadow-md shadow-blue-500/20 hover:shadow-lg hover:shadow-blue-500/30 active:scale-[0.97] transition-all duration-200 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                 :disabled="saving"
                 @click="saveModel"
             >

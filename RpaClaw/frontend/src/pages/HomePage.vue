@@ -1,8 +1,8 @@
 <template>
   <SimpleBar>
     <div
-      class="flex flex-col h-full flex-1 min-w-0 mx-auto w-full sm:min-w-[390px] px-5 justify-center items-start gap-2 relative max-w-full sm:max-w-full">
-      <div class="w-full pt-4 pb-4 px-5 bg-[var(--background-gray-main)] sticky top-0 z-10 mx-[-1.25]">
+      class="flex flex-col min-h-full flex-1 min-w-0 mx-auto w-full px-4 sm:px-5 items-start gap-2 relative max-w-full">
+      <div class="w-full pt-4 pb-4 px-4 sm:px-5 bg-[var(--background-gray-main)] sticky top-0 z-10">
         <div class="flex justify-between items-center w-full absolute left-0 right-0">
           <div class="h-8 relative z-20 overflow-hidden flex gap-2 items-center flex-shrink-0">
             <div class="relative flex items-center">
@@ -33,16 +33,16 @@
         </div>
         <div class="h-8"></div>
       </div>
-      <div class="w-full max-w-full sm:max-w-[768px] sm:min-w-[390px] mx-auto mt-[120px] mb-auto">
+      <div class="w-full max-w-[768px] mx-auto mt-6 sm:mt-10 md:mt-14 pb-6 sm:pb-10">
         <!-- Welcome Area -->
-        <div class="welcome-area w-full flex flex-col items-center justify-center pb-6">
-          <div class="size-14 rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/20 mb-4">
+        <div class="welcome-area w-full flex flex-col items-center justify-center pb-4 sm:pb-6">
+          <div class="size-12 sm:size-14 rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/20 mb-3 sm:mb-4">
             <svg class="size-7 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" /></svg>
           </div>
-          <h1 class="text-2xl font-bold text-[var(--text-primary)] text-center">
+          <h1 class="text-xl sm:text-2xl font-bold text-[var(--text-primary)] text-center">
             {{ fullGreeting }}
           </h1>
-          <p class="text-sm text-[var(--text-tertiary)] mt-1 typewriter-line">
+          <p class="text-xs sm:text-sm text-[var(--text-tertiary)] mt-1 typewriter-line text-center">
             <span
               v-for="(char, i) in displayedChars"
               :key="`${typingCycle}-${i}`"
@@ -54,7 +54,7 @@
         </div>
 
         <!-- Quick Prompts -->
-        <div class="grid grid-cols-2 gap-3 mb-5 px-2">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4 sm:mb-5 px-1 sm:px-2">
           <div v-for="(prompt, idx) in quickPrompts" :key="idx"
             class="prompt-card group relative rounded-2xl border border-gray-100 dark:border-gray-800 bg-white dark:bg-[#1e1e1e] cursor-pointer overflow-hidden"
             :style="{ '--delay': `${idx * 80 + 200}ms` }"
