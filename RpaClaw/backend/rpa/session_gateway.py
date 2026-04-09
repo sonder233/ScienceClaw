@@ -31,6 +31,6 @@ class RPASessionGateway:
         return self._mode_config
 
     async def ensure_engine_ready(self) -> EngineHealthResponse:
-        if self._mode_config.mode == "local" and self._supervisor is not None:
+        if self._mode_config.mode in {"local", "node"} and self._supervisor is not None:
             await self._supervisor.ensure_running()
         return await self._client.health()

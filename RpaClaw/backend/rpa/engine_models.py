@@ -23,7 +23,7 @@ class EngineSessionResponse(BaseModel):
 
 
 class EngineModeConfig(BaseModel):
-    mode: Literal["legacy", "remote", "local"] = "legacy"
+    mode: Literal["legacy", "remote", "local", "node"] = "legacy"
     base_url: str
     auth_token: str = ""
     host: str = "127.0.0.1"
