@@ -14,12 +14,41 @@ class EngineSessionRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class EngineSessionResponse(BaseModel):
-    session_id: str
+class EnginePage(BaseModel):
+    alias: str
+    title: str = ""
+    url: str = ""
+    openerPageAlias: str | None = None
+    status: str = "open"
+
+
+class EngineSession(BaseModel):
+    id: str
+    userId: str
     status: str
-    ws_url: str | None = None
-    live_view_url: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    sandboxSessionId: str = ""
+    activePageAlias: str | None = None
+    pages: list[EnginePage] = Field(default_factory=list)
+    actions: list[dict[str, Any]] = Field(default_factory=list)
+    mode: str = "idle"
+
+
+class EngineSessionEnvelope(BaseModel):
+    session: EngineSession
+
+
+class EngineActivateTabRequest(BaseModel):
+    pageAlias: str
+
+
+class EngineNavigateRequest(BaseModel):
+    url: str
+    pageAlias: str | None = None
+
+
+class EngineStartSessionRequest(BaseModel):
+    userId: str
+    sandboxSessionId: str = ""
 
 
 class EngineModeConfig(BaseModel):

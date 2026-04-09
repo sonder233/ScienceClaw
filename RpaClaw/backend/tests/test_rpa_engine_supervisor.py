@@ -69,6 +69,57 @@ def test_gateway_accepts_node_mode_and_starts_supervisor():
     assert result == {"status": "ok"}
 
 
+def test_gateway_exposes_minimal_session_control_methods():
+    client_calls = []
+
+    class _FakeClient:
+        async def health(self):
+            return {"status": "ok"}
+
+        async def get_session(self, session_id):
+            client_calls.append(("get_session", session_id))
+            return {"session": {"id": session_id}}
+
+        async def activate_tab(self, session_id, page_alias):
+            client_calls.append(("activate_tab", session_id, page_alias))
+            return {"session": {"id": session_id, "activePageAlias": page_alias}}
+
+        async def navigate_session(self, session_id, url):
+            client_calls.append(("navigate_session", session_id, url))
+            return {"session": {"id": session_id, "pages": [{"alias": "page-1", "url": url}]}}
+
+        async def stop_session(self, session_id):
+            client_calls.append(("stop_session", session_id))
+            return {"session": {"id": session_id, "status": "stopped"}}
+
+    settings = SimpleNamespace(
+        rpa_engine_mode="node",
+        rpa_engine_base_url="http://127.0.0.1:3310",
+        rpa_engine_auth_token="",
+        rpa_engine_host="127.0.0.1",
+        rpa_engine_port=3310,
+        rpa_engine_start_cmd="npm --prefix RpaClaw/rpa-engine run dev",
+    )
+
+    gateway = RPASessionGateway(settings=settings, client=_FakeClient(), supervisor=None)
+
+    session = asyncio.run(gateway.get_session("session-1"))
+    activated = asyncio.run(gateway.activate_tab("session-1", "page-1"))
+    navigated = asyncio.run(gateway.navigate_session("session-1", "https://docs.example.com"))
+    stopped = asyncio.run(gateway.stop_session("session-1"))
+
+    assert session["session"]["id"] == "session-1"
+    assert activated["session"]["activePageAlias"] == "page-1"
+    assert navigated["session"]["pages"][0]["url"] == "https://docs.example.com"
+    assert stopped["session"]["status"] == "stopped"
+    assert client_calls == [
+        ("get_session", "session-1"),
+        ("activate_tab", "session-1", "page-1"),
+        ("navigate_session", "session-1", "https://docs.example.com"),
+        ("stop_session", "session-1"),
+    ]
+
+
 def test_ensure_running_waits_until_health_check_passes(monkeypatch):
     supervisor = LocalRPAEngineSupervisor(
         engine_root="D:/code/MyScienceClaw/RpaClaw/rpa-engine",

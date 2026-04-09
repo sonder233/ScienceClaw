@@ -19,7 +19,7 @@ describe('engine health endpoint', () => {
     const createResponse = await app.inject({
       method: 'POST',
       url: '/sessions',
-      payload: { userId: 'u1' },
+      payload: { userId: 'u1', sandboxSessionId: 'sandbox-1' },
     });
 
     expect(createResponse.statusCode).toBe(200);
@@ -27,9 +27,19 @@ describe('engine health endpoint', () => {
       id: string;
       userId: string;
       mode: string;
+      status: string;
+      sandboxSessionId: string;
+      activePageAlias: string | null;
+      pages: unknown[];
+      actions: unknown[];
     };
     expect(created.userId).toBe('u1');
     expect(created.mode).toBe('idle');
+    expect(created.status).toBe('idle');
+    expect(created.sandboxSessionId).toBe('sandbox-1');
+    expect(created.activePageAlias).toBeNull();
+    expect(created.pages).toEqual([]);
+    expect(created.actions).toEqual([]);
 
     const getResponse = await app.inject({
       method: 'GET',
@@ -39,6 +49,61 @@ describe('engine health endpoint', () => {
     expect(getResponse.statusCode).toBe(200);
     expect(getResponse.json()).toEqual({
       session: created,
+    });
+  });
+
+  it('activates tabs, navigates, and stops through session control endpoints', async () => {
+    const app = buildApp({ NODE_ENV: 'test', RPA_ENGINE_PORT: 3310 });
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/sessions',
+      payload: { userId: 'u1', sandboxSessionId: 'sandbox-1' },
+    });
+    const created = createResponse.json().session as {
+      id: string;
+      activePageAlias: string | null;
+      pages: Array<{ alias: string; url: string }>;
+      mode: string;
+      status: string;
+    };
+
+    const activateResponse = await app.inject({
+      method: 'POST',
+      url: `/sessions/${created.id}/activate`,
+      payload: { pageAlias: 'page-1' },
+    });
+
+    expect(activateResponse.statusCode).toBe(200);
+    expect(activateResponse.json().session).toMatchObject({
+      id: created.id,
+      activePageAlias: 'page-1',
+      pages: [{ alias: 'page-1', url: '' }],
+    });
+
+    const navigateResponse = await app.inject({
+      method: 'POST',
+      url: `/sessions/${created.id}/navigate`,
+      payload: { url: 'docs.example.com' },
+    });
+
+    expect(navigateResponse.statusCode).toBe(200);
+    expect(navigateResponse.json().session).toMatchObject({
+      id: created.id,
+      activePageAlias: 'page-1',
+      pages: [{ alias: 'page-1', url: 'https://docs.example.com' }],
+    });
+
+    const stopResponse = await app.inject({
+      method: 'POST',
+      url: `/sessions/${created.id}/stop`,
+    });
+
+    expect(stopResponse.statusCode).toBe(200);
+    expect(stopResponse.json().session).toMatchObject({
+      id: created.id,
+      mode: 'stopped',
+      status: 'stopped',
     });
   });
 

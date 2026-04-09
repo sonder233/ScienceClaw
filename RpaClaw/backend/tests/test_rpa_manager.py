@@ -547,15 +547,15 @@ class RPASessionManagerEngineCompatibilityTests(unittest.IsolatedAsyncioTestCase
         ):
             session = await self.manager.start_session("user-1", "sandbox-1")
 
-        self.assertEqual(session["id"], "session-1")
+        self.assertEqual(session.id, "session-1")
         self.assertEqual(gateway_calls, [("user-1", "sandbox-1")])
 
     async def test_get_session_maps_engine_payload_into_legacy_session(self):
-        async def fake_fetch_engine_session(session_id: str):
+        async def fake_gateway_get_session(session_id: str):
             self.assertEqual(session_id, "session-1")
-            return self.engine_session
+            return {"session": copy.deepcopy(self.engine_session)}
 
-        self.manager._fetch_engine_session = fake_fetch_engine_session
+        self.manager._gateway = SimpleNamespace(get_session=fake_gateway_get_session)
 
         with patch.object(
             MANAGER_MODULE,
@@ -573,10 +573,10 @@ class RPASessionManagerEngineCompatibilityTests(unittest.IsolatedAsyncioTestCase
         self.assertEqual(session.steps[0].target_tab_id, "page-2")
 
     async def test_list_tabs_uses_engine_compat_pages(self):
-        async def fake_fetch_engine_session(_session_id: str):
-            return self.engine_session
+        async def fake_gateway_get_session(_session_id: str):
+            return {"session": copy.deepcopy(self.engine_session)}
 
-        self.manager._fetch_engine_session = fake_fetch_engine_session
+        self.manager._gateway = SimpleNamespace(get_session=fake_gateway_get_session)
 
         with patch.object(
             MANAGER_MODULE,
@@ -610,10 +610,10 @@ class RPASessionManagerEngineCompatibilityTests(unittest.IsolatedAsyncioTestCase
         )
 
     async def test_select_step_locator_candidate_promotes_engine_selector(self):
-        async def fake_fetch_engine_session(_session_id: str):
-            return self.engine_session
+        async def fake_gateway_get_session(_session_id: str):
+            return {"session": copy.deepcopy(self.engine_session)}
 
-        self.manager._fetch_engine_session = fake_fetch_engine_session
+        self.manager._gateway = SimpleNamespace(get_session=fake_gateway_get_session)
 
         with patch.object(
             MANAGER_MODULE,
@@ -629,10 +629,10 @@ class RPASessionManagerEngineCompatibilityTests(unittest.IsolatedAsyncioTestCase
         self.assertTrue(updated.locator_candidates[1]["selected"])
 
     async def test_promoted_engine_locator_survives_fresh_get_session_fetch(self):
-        async def fake_fetch_engine_session(_session_id: str):
-            return copy.deepcopy(self.engine_session)
+        async def fake_gateway_get_session(_session_id: str):
+            return {"session": copy.deepcopy(self.engine_session)}
 
-        self.manager._fetch_engine_session = fake_fetch_engine_session
+        self.manager._gateway = SimpleNamespace(get_session=fake_gateway_get_session)
 
         with patch.object(
             MANAGER_MODULE,
@@ -671,10 +671,10 @@ class RPASessionManagerEngineCompatibilityTests(unittest.IsolatedAsyncioTestCase
         }
         engine_responses = [copy.deepcopy(self.engine_session), sparse_engine_session]
 
-        async def fake_fetch_engine_session(_session_id: str):
-            return copy.deepcopy(engine_responses.pop(0))
+        async def fake_gateway_get_session(_session_id: str):
+            return {"session": copy.deepcopy(engine_responses.pop(0))}
 
-        self.manager._fetch_engine_session = fake_fetch_engine_session
+        self.manager._gateway = SimpleNamespace(get_session=fake_gateway_get_session)
 
         with patch.object(
             MANAGER_MODULE,
@@ -711,10 +711,10 @@ class RPASessionManagerEngineCompatibilityTests(unittest.IsolatedAsyncioTestCase
         )
 
     async def test_stop_session_clears_node_mode_compat_caches(self):
-        async def fake_fetch_engine_session(_session_id: str):
-            return copy.deepcopy(self.engine_session)
+        async def fake_gateway_get_session(_session_id: str):
+            return {"session": copy.deepcopy(self.engine_session)}
 
-        self.manager._fetch_engine_session = fake_fetch_engine_session
+        self.manager._gateway = SimpleNamespace(get_session=fake_gateway_get_session)
 
         with patch.object(
             MANAGER_MODULE,
@@ -730,6 +730,59 @@ class RPASessionManagerEngineCompatibilityTests(unittest.IsolatedAsyncioTestCase
         self.assertNotIn("session-1", self.manager._compat_tabs)
         self.assertNotIn("session-1", self.manager._engine_sessions)
         self.assertNotIn("session-1", self.manager._engine_locator_overrides)
+
+    async def test_activate_navigate_and_stop_use_gateway_in_node_mode(self):
+        gateway_calls = []
+        session_payload = copy.deepcopy(self.engine_session)
+
+        async def fake_gateway_activate(session_id: str, page_alias: str):
+            gateway_calls.append(("activate", session_id, page_alias))
+            session_payload["activePageAlias"] = page_alias
+            return {"session": copy.deepcopy(session_payload)}
+
+        async def fake_gateway_navigate(session_id: str, url: str):
+            gateway_calls.append(("navigate", session_id, url))
+            for page in session_payload["pages"]:
+                if page["alias"] == session_payload["activePageAlias"]:
+                    page["url"] = f"https://{url}"
+            return {"session": copy.deepcopy(session_payload)}
+
+        async def fake_gateway_stop(session_id: str):
+            gateway_calls.append(("stop", session_id))
+            session_payload["status"] = "stopped"
+            return {"session": copy.deepcopy(session_payload)}
+
+        async def fake_gateway_get_session(_session_id: str):
+            return {"session": copy.deepcopy(session_payload)}
+
+        self.manager._gateway = SimpleNamespace(
+            get_session=fake_gateway_get_session,
+            activate_tab=fake_gateway_activate,
+            navigate_session=fake_gateway_navigate,
+            stop_session=fake_gateway_stop,
+        )
+
+        with patch.object(
+            MANAGER_MODULE,
+            "settings",
+            SimpleNamespace(rpa_engine_mode="node"),
+            create=True,
+        ):
+            await self.manager.get_session("session-1")
+            activated = await self.manager.activate_tab("session-1", "page-1", source="user")
+            navigated = await self.manager.navigate_active_tab("session-1", "docs.example.com")
+            await self.manager.stop_session("session-1")
+
+        self.assertEqual(activated, {"tab_id": "page-1", "source": "user"})
+        self.assertEqual(navigated, {"tab_id": "page-1", "url": "https://docs.example.com"})
+        self.assertEqual(
+            gateway_calls,
+            [
+                ("activate", "session-1", "page-1"),
+                ("navigate", "session-1", "https://docs.example.com"),
+                ("stop", "session-1"),
+            ],
+        )
 
 
 if __name__ == "__main__":

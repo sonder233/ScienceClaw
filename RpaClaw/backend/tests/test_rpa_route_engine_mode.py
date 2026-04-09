@@ -84,18 +84,52 @@ def _engine_session_payload() -> dict:
     }
 
 
+class _FakeGateway:
+    def __init__(self):
+        self.calls = []
+        self.session = _engine_session_payload()
+
+    async def start_session(self, user_id: str, sandbox_session_id: str):
+        self.calls.append(("start_session", user_id, sandbox_session_id))
+        session = copy.deepcopy(self.session)
+        session["userId"] = user_id
+        session["sandboxSessionId"] = sandbox_session_id
+        return {"session": session}
+
+    async def get_session(self, session_id: str):
+        self.calls.append(("get_session", session_id))
+        assert session_id == self.session["id"]
+        return {"session": copy.deepcopy(self.session)}
+
+    async def activate_tab(self, session_id: str, page_alias: str):
+        self.calls.append(("activate_tab", session_id, page_alias))
+        self.session["activePageAlias"] = page_alias
+        return {"session": copy.deepcopy(self.session)}
+
+    async def navigate_session(self, session_id: str, url: str):
+        self.calls.append(("navigate_session", session_id, url))
+        normalized = url if url.startswith("http") else f"https://{url}"
+        active_alias = self.session["activePageAlias"]
+        for page in self.session["pages"]:
+            if page["alias"] == active_alias:
+                page["url"] = normalized
+        return {"session": copy.deepcopy(self.session)}
+
+    async def stop_session(self, session_id: str):
+        self.calls.append(("stop_session", session_id))
+        self.session["status"] = "stopped"
+        return {"session": copy.deepcopy(self.session)}
+
+
 def test_start_session_uses_engine_mode(monkeypatch):
     manager = RPASessionManager()
+    gateway = _FakeGateway()
     monkeypatch.setattr(rpa_route, "rpa_manager", manager)
     monkeypatch.setattr(rpa_route.settings, "rpa_engine_mode", "node")
-
-    async def fake_start_engine_session(*args, **kwargs):
-        return {"id": "session-1", "steps": [], "status": "recording"}
-
     async def fail_legacy_start_session(*args, **kwargs):
         raise RuntimeError("legacy _start_legacy_session should not be used")
 
-    monkeypatch.setattr(manager, "_start_engine_session", fake_start_engine_session, raising=False)
+    monkeypatch.setattr(manager, "_gateway", gateway)
     monkeypatch.setattr(manager, "_start_legacy_session", fail_legacy_start_session, raising=False)
 
     client = _build_client()
@@ -103,18 +137,15 @@ def test_start_session_uses_engine_mode(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["session"]["id"] == "session-1"
+    assert gateway.calls == [("start_session", "user-1", "sandbox-1")]
 
 
 def test_tabs_route_uses_engine_compat_mapping(monkeypatch):
     manager = RPASessionManager()
+    gateway = _FakeGateway()
     monkeypatch.setattr(rpa_route, "rpa_manager", manager)
     monkeypatch.setattr(rpa_route.settings, "rpa_engine_mode", "node")
-
-    async def fake_fetch_engine_session(session_id: str):
-        assert session_id == "session-1"
-        return _engine_session_payload()
-
-    monkeypatch.setattr(manager, "_fetch_engine_session", fake_fetch_engine_session, raising=False)
+    monkeypatch.setattr(manager, "_gateway", gateway)
 
     client = _build_client()
     response = client.get("/api/v1/rpa/session/session-1/tabs")
@@ -144,14 +175,10 @@ def test_tabs_route_uses_engine_compat_mapping(monkeypatch):
 
 def test_promote_locator_route_uses_engine_compat_step(monkeypatch):
     manager = RPASessionManager()
+    gateway = _FakeGateway()
     monkeypatch.setattr(rpa_route, "rpa_manager", manager)
     monkeypatch.setattr(rpa_route.settings, "rpa_engine_mode", "node")
-
-    async def fake_fetch_engine_session(session_id: str):
-        assert session_id == "session-1"
-        return _engine_session_payload()
-
-    monkeypatch.setattr(manager, "_fetch_engine_session", fake_fetch_engine_session, raising=False)
+    monkeypatch.setattr(manager, "_gateway", gateway)
 
     client = _build_client()
     response = client.post(
@@ -168,16 +195,10 @@ def test_promote_locator_route_uses_engine_compat_step(monkeypatch):
 
 def test_promoted_locator_survives_followup_session_fetch(monkeypatch):
     manager = RPASessionManager()
+    gateway = _FakeGateway()
     monkeypatch.setattr(rpa_route, "rpa_manager", manager)
     monkeypatch.setattr(rpa_route.settings, "rpa_engine_mode", "node")
-
-    engine_session = _engine_session_payload()
-
-    async def fake_fetch_engine_session(session_id: str):
-        assert session_id == "session-1"
-        return copy.deepcopy(engine_session)
-
-    monkeypatch.setattr(manager, "_fetch_engine_session", fake_fetch_engine_session, raising=False)
+    monkeypatch.setattr(manager, "_gateway", gateway)
 
     client = _build_client()
     promote_response = client.post(
@@ -198,16 +219,10 @@ def test_promoted_locator_survives_followup_session_fetch(monkeypatch):
 
 def test_activate_tab_route_uses_node_mode_compat_state(monkeypatch):
     manager = RPASessionManager()
+    gateway = _FakeGateway()
     monkeypatch.setattr(rpa_route, "rpa_manager", manager)
     monkeypatch.setattr(rpa_route.settings, "rpa_engine_mode", "node")
-
-    engine_session = _engine_session_payload()
-
-    async def fake_fetch_engine_session(session_id: str):
-        assert session_id == "session-1"
-        return copy.deepcopy(engine_session)
-
-    monkeypatch.setattr(manager, "_fetch_engine_session", fake_fetch_engine_session, raising=False)
+    monkeypatch.setattr(manager, "_gateway", gateway)
 
     client = _build_client()
     activate_response = client.post("/api/v1/rpa/session/session-1/tabs/page-1/activate")
@@ -224,20 +239,15 @@ def test_activate_tab_route_uses_node_mode_compat_state(monkeypatch):
     assert tabs_response.status_code == 200
     assert tabs_response.json()["active_tab_id"] == "page-1"
     assert tabs_response.json()["tabs"][0]["active"] is True
+    assert ("activate_tab", "session-1", "page-1") in gateway.calls
 
 
 def test_navigate_route_uses_node_mode_compat_state(monkeypatch):
     manager = RPASessionManager()
+    gateway = _FakeGateway()
     monkeypatch.setattr(rpa_route, "rpa_manager", manager)
     monkeypatch.setattr(rpa_route.settings, "rpa_engine_mode", "node")
-
-    engine_session = _engine_session_payload()
-
-    async def fake_fetch_engine_session(session_id: str):
-        assert session_id == "session-1"
-        return copy.deepcopy(engine_session)
-
-    monkeypatch.setattr(manager, "_fetch_engine_session", fake_fetch_engine_session, raising=False)
+    monkeypatch.setattr(manager, "_gateway", gateway)
 
     client = _build_client()
     navigate_response = client.post(
@@ -255,20 +265,15 @@ def test_navigate_route_uses_node_mode_compat_state(monkeypatch):
 
     assert tabs_response.status_code == 200
     assert tabs_response.json()["tabs"][1]["url"] == "https://docs.example.com"
+    assert ("navigate_session", "session-1", "https://docs.example.com") in gateway.calls
 
 
 def test_stop_route_clears_node_mode_compat_state(monkeypatch):
     manager = RPASessionManager()
+    gateway = _FakeGateway()
     monkeypatch.setattr(rpa_route, "rpa_manager", manager)
     monkeypatch.setattr(rpa_route.settings, "rpa_engine_mode", "node")
-
-    engine_session = _engine_session_payload()
-
-    async def fake_fetch_engine_session(session_id: str):
-        assert session_id == "session-1"
-        return copy.deepcopy(engine_session)
-
-    monkeypatch.setattr(manager, "_fetch_engine_session", fake_fetch_engine_session, raising=False)
+    monkeypatch.setattr(manager, "_gateway", gateway)
 
     client = _build_client()
     promote_response = client.post(
@@ -285,3 +290,4 @@ def test_stop_route_clears_node_mode_compat_state(monkeypatch):
     assert "session-1" not in manager._compat_tabs
     assert "session-1" not in manager._engine_sessions
     assert "session-1" not in manager._engine_locator_overrides
+    assert ("stop_session", "session-1") in gateway.calls

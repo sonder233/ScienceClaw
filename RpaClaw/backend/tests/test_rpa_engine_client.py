@@ -38,6 +38,12 @@ class _FakeAsyncClient:
             raise self._response
         return self._response
 
+    async def post(self, url, headers=None, json=None):
+        self.calls.append((url, headers, json))
+        if isinstance(self._response, Exception):
+            raise self._response
+        return self._response
+
 
 def test_health_check_raises_on_503(monkeypatch):
     fake_client = _FakeAsyncClient(_FakeResponse(status_code=503))
@@ -67,4 +73,58 @@ def test_health_check_returns_payload_and_sends_auth_header(monkeypatch):
     assert response.status == "ok"
     assert fake_client.calls == [
         ("http://127.0.0.1:3310/health", {"Authorization": "Bearer secret"})
+    ]
+
+
+def test_get_session_returns_payload(monkeypatch):
+    payload = {
+        "session": {
+            "id": "session-1",
+            "userId": "u1",
+            "status": "idle",
+            "sandboxSessionId": "sandbox-1",
+            "activePageAlias": None,
+            "pages": [],
+            "actions": [],
+        }
+    }
+    fake_client = _FakeAsyncClient(_FakeResponse(status_code=200, payload=payload))
+    monkeypatch.setattr("backend.rpa.engine_client.httpx.AsyncClient", lambda *args, **kwargs: fake_client)
+    client = RPAEngineClient(base_url="http://127.0.0.1:3310", auth_token="")
+
+    response = asyncio.run(client.get_session("session-1"))
+
+    assert response["session"]["sandboxSessionId"] == "sandbox-1"
+    assert fake_client.calls == [
+        ("http://127.0.0.1:3310/sessions/session-1", {})
+    ]
+
+
+def test_session_control_calls_post_expected_payloads(monkeypatch):
+    payload = {
+        "session": {
+            "id": "session-1",
+            "userId": "u1",
+            "status": "recording",
+            "sandboxSessionId": "sandbox-1",
+            "activePageAlias": "page-1",
+            "pages": [{"alias": "page-1", "url": "https://docs.example.com"}],
+            "actions": [],
+        }
+    }
+    fake_client = _FakeAsyncClient(_FakeResponse(status_code=200, payload=payload))
+    monkeypatch.setattr("backend.rpa.engine_client.httpx.AsyncClient", lambda *args, **kwargs: fake_client)
+    client = RPAEngineClient(base_url="http://127.0.0.1:3310", auth_token="")
+
+    activate = asyncio.run(client.activate_tab("session-1", "page-1"))
+    navigate = asyncio.run(client.navigate_session("session-1", "docs.example.com"))
+    stopped = asyncio.run(client.stop_session("session-1"))
+
+    assert activate["session"]["activePageAlias"] == "page-1"
+    assert navigate["session"]["pages"][0]["url"] == "https://docs.example.com"
+    assert stopped["session"]["id"] == "session-1"
+    assert fake_client.calls == [
+        ("http://127.0.0.1:3310/sessions/session-1/activate", {}, {"pageAlias": "page-1"}),
+        ("http://127.0.0.1:3310/sessions/session-1/navigate", {}, {"url": "docs.example.com"}),
+        ("http://127.0.0.1:3310/sessions/session-1/stop", {}, None),
     ]

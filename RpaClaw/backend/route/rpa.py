@@ -342,11 +342,12 @@ async def activate_rpa_tab(
         result = await rpa_manager.activate_tab(session_id, tab_id, source="user")
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    updated_session = rpa_manager.sessions.get(session_id, session)
     return {
         "status": "success",
         "result": result,
         "tabs": rpa_manager.list_tabs(session_id),
-        "active_tab_id": session.active_tab_id,
+        "active_tab_id": updated_session.active_tab_id,
     }
 
 
@@ -365,11 +366,12 @@ async def navigate_rpa_session(
         result = await rpa_manager.navigate_active_tab(session_id, request.url)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    updated_session = rpa_manager.sessions.get(session_id, session)
     return {
         "status": "success",
         "result": result,
         "tabs": rpa_manager.list_tabs(session_id),
-        "active_tab_id": session.active_tab_id,
+        "active_tab_id": updated_session.active_tab_id,
     }
 
 
@@ -383,8 +385,9 @@ async def stop_rpa_session(
         raise HTTPException(status_code=404, detail="Session not found")
     if session.user_id != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not authorized")
+    response_session = session.model_copy(update={"status": "stopped"})
     await rpa_manager.stop_session(session_id)
-    return {"status": "success", "session": session}
+    return {"status": "success", "session": response_session}
 
 
 @router.delete("/session/{session_id}/step/{step_index}")

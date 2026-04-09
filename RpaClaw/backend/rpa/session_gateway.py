@@ -34,3 +34,23 @@ class RPASessionGateway:
         if self._mode_config.mode in {"local", "node"} and self._supervisor is not None:
             await self._supervisor.ensure_running()
         return await self._client.health()
+
+    async def get_session(self, session_id: str) -> dict:
+        await self.ensure_engine_ready()
+        return await self._client.get_session(session_id)
+
+    async def start_session(self, user_id: str, sandbox_session_id: str) -> dict:
+        await self.ensure_engine_ready()
+        return await self._client.start_session(user_id, sandbox_session_id)
+
+    async def activate_tab(self, session_id: str, page_alias: str) -> dict:
+        await self.ensure_engine_ready()
+        return await self._client.activate_tab(session_id, page_alias)
+
+    async def navigate_session(self, session_id: str, url: str) -> dict:
+        await self.ensure_engine_ready()
+        return await self._client.navigate_session(session_id, url)
+
+    async def stop_session(self, session_id: str) -> dict:
+        await self.ensure_engine_ready()
+        return await self._client.stop_session(session_id)

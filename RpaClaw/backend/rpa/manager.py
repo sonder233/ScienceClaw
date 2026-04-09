@@ -753,6 +753,14 @@ class RPASessionManager:
         self._engine_sessions[legacy_session.id] = copy.deepcopy(session_payload)
         return legacy_session
 
+    @staticmethod
+    def _unwrap_engine_session(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if payload is None:
+            return None
+        if "session" in payload and isinstance(payload["session"], dict):
+            return payload["session"]
+        return payload
+
     def _compat_tabs_to_engine_pages(self, session_id: str) -> list[dict[str, Any]]:
         return [
             {
@@ -840,21 +848,28 @@ class RPASessionManager:
         return session_payload
 
     async def _start_engine_session(self, user_id: str, sandbox_session_id: str) -> RPASession:
-        await self._gateway.ensure_engine_ready()
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                f"{self._engine_base_url()}/sessions",
-                json={
-                    "userId": user_id,
-                    "sandboxSessionId": sandbox_session_id,
-                    "metadata": {"sandboxSessionId": sandbox_session_id},
-                },
-                headers=self._engine_headers(),
+        if hasattr(self._gateway, "start_session"):
+            session_payload = self._unwrap_engine_session(
+                await self._gateway.start_session(
+                    user_id=user_id,
+                    sandbox_session_id=sandbox_session_id,
+                )
             )
-        if response.status_code not in {200, 201}:
-            raise RuntimeError("failed to start engine-backed rpa session")
-        payload = response.json()
-        session_payload = payload.get("session", payload)
+        else:
+            await self._gateway.ensure_engine_ready()
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    f"{self._engine_base_url()}/sessions",
+                    json={
+                        "userId": user_id,
+                        "sandboxSessionId": sandbox_session_id,
+                        "metadata": {"sandboxSessionId": sandbox_session_id},
+                    },
+                    headers=self._engine_headers(),
+                )
+            if response.status_code not in {200, 201}:
+                raise RuntimeError("failed to start engine-backed rpa session")
+            session_payload = self._unwrap_engine_session(response.json())
         if not session_payload.get("sandboxSessionId"):
             session_payload["sandboxSessionId"] = sandbox_session_id
         if not session_payload.get("status") and session_payload.get("mode"):
@@ -862,18 +877,22 @@ class RPASessionManager:
         return self._cache_engine_session(session_payload)
 
     async def _fetch_engine_session(self, session_id: str) -> Optional[dict[str, Any]]:
-        await self._gateway.ensure_engine_ready()
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(
-                f"{self._engine_base_url()}/sessions/{session_id}",
-                headers=self._engine_headers(),
-            )
-        if response.status_code == 404:
-            return None
-        if response.status_code != 200:
-            raise RuntimeError("failed to fetch engine-backed rpa session")
-        payload = response.json()
-        session_payload = payload.get("session", payload)
+        if hasattr(self._gateway, "get_session"):
+            session_payload = self._unwrap_engine_session(await self._gateway.get_session(session_id))
+            if session_payload is None:
+                return None
+        else:
+            await self._gateway.ensure_engine_ready()
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    f"{self._engine_base_url()}/sessions/{session_id}",
+                    headers=self._engine_headers(),
+                )
+            if response.status_code == 404:
+                return None
+            if response.status_code != 200:
+                raise RuntimeError("failed to fetch engine-backed rpa session")
+            session_payload = self._unwrap_engine_session(response.json())
         if not session_payload.get("status") and session_payload.get("mode"):
             session_payload["status"] = session_payload["mode"]
         return session_payload
@@ -908,12 +927,6 @@ class RPASessionManager:
 
     async def start_session(self, user_id: str, sandbox_session_id: str) -> RPASession | dict[str, Any]:
         if self._is_engine_mode():
-            gateway_start_session = getattr(self._gateway, "start_session", None)
-            if callable(gateway_start_session):
-                return await gateway_start_session(
-                    user_id=user_id,
-                    sandbox_session_id=sandbox_session_id,
-                )
             return await self._start_engine_session(
                 user_id=user_id,
                 sandbox_session_id=sandbox_session_id,
@@ -1052,25 +1065,14 @@ class RPASessionManager:
                 raise ValueError(f"No active tab for session {session_id}")
 
             normalized_url = self._normalize_url(url)
-            active_tab_id = session.active_tab_id
-            tabs = self._compat_tabs.get(session_id, [])
-            tab = next((item for item in tabs if item["tab_id"] == active_tab_id), None)
-            if tab is None:
-                raise ValueError(f"Tab {active_tab_id} not found for session {session_id}")
-
-            tab["url"] = normalized_url
-            self._engine_tab_overrides.setdefault(session_id, {}).setdefault(active_tab_id, {})["url"] = normalized_url
-            self._engine_session_overrides.setdefault(session_id, {})["activePageAlias"] = active_tab_id
-
-            engine_session = self._engine_sessions.get(session_id)
-            if engine_session:
-                for page in engine_session.get("pages", []):
-                    if (page.get("alias") or page.get("id")) == active_tab_id:
-                        page["url"] = normalized_url
-                        break
-
+            session_payload = self._unwrap_engine_session(
+                await self._gateway.navigate_session(session_id, normalized_url)
+            )
+            if not session_payload:
+                raise ValueError(f"Session {session_id} not found")
+            cached = self._cache_engine_session(session_payload)
             return {
-                "tab_id": active_tab_id,
+                "tab_id": cached.active_tab_id or session.active_tab_id,
                 "url": normalized_url,
             }
 
@@ -1103,18 +1105,12 @@ class RPASessionManager:
         if self._is_engine_mode():
             if session_id not in self.sessions:
                 await self.get_session(session_id)
-            session = self.sessions.get(session_id)
-            if not session:
+            session_payload = self._unwrap_engine_session(
+                await self._gateway.activate_tab(session_id, tab_id)
+            )
+            if not session_payload:
                 raise ValueError(f"Session {session_id} not found")
-
-            tabs = self._compat_tabs.get(session_id, [])
-            if not any(tab["tab_id"] == tab_id for tab in tabs):
-                raise ValueError(f"Tab {tab_id} not found for session {session_id}")
-
-            session.active_tab_id = tab_id
-            self._engine_session_overrides.setdefault(session_id, {})["activePageAlias"] = tab_id
-            for tab in tabs:
-                tab["active"] = tab["tab_id"] == tab_id
+            self._cache_engine_session(session_payload)
             return {"tab_id": tab_id, "source": source}
 
         page = self._tabs.get(session_id, {}).get(tab_id)
@@ -1417,9 +1413,8 @@ class RPASessionManager:
 
     async def stop_session(self, session_id: str):
         if self._is_engine_mode():
-            session = self.sessions.get(session_id)
-            if session:
-                session.status = "stopped"
+            if hasattr(self._gateway, "stop_session"):
+                await self._gateway.stop_session(session_id)
             self._compat_tabs.pop(session_id, None)
             self._engine_sessions.pop(session_id, None)
             self._engine_locator_overrides.pop(session_id, None)
