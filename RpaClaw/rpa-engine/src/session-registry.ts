@@ -4,10 +4,11 @@ export class SessionRegistry {
   #sessions = new Map<string, RuntimeSession>();
 
   set(session: RuntimeSession): void {
-    this.#sessions.set(session.id, session);
+    this.#sessions.set(session.id, { ...session });
   }
 
   get(sessionId: string): RuntimeSession | undefined {
-    return this.#sessions.get(sessionId);
+    const session = this.#sessions.get(sessionId);
+    return session ? { ...session } : undefined;
   }
 }
