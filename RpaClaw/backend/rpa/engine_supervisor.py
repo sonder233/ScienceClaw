@@ -10,7 +10,7 @@ import httpx
 def build_spawn_command(engine_root: str, start_cmd: str | None = None) -> list[str]:
     if start_cmd:
         return shlex.split(start_cmd, posix=os.name != "nt")
-    return ["npm", "--prefix", engine_root, "run", "dev"]
+    return ["npm", "run", "dev"]
 
 
 class LocalRPAEngineSupervisor:
@@ -51,7 +51,11 @@ class LocalRPAEngineSupervisor:
                 *self._spawn_command,
                 cwd=str(self._engine_root),
             )
-        await self._wait_until_ready()
+        try:
+            await self._wait_until_ready()
+        except RuntimeError:
+            await self._cleanup_process()
+            raise
 
     async def _wait_until_ready(self) -> None:
         deadline = time.monotonic() + self._ready_timeout_seconds
@@ -63,3 +67,19 @@ class LocalRPAEngineSupervisor:
             if time.monotonic() >= deadline:
                 raise RuntimeError("rpa engine did not become ready in time")
             await asyncio.sleep(self._poll_interval_seconds)
+
+    async def _cleanup_process(self) -> None:
+        process = self._process
+        self._process = None
+        if process is None or process.returncode is not None:
+            return
+
+        if hasattr(process, "terminate"):
+            process.terminate()
+
+        wait = getattr(process, "wait", None)
+        if wait is not None:
+            try:
+                await wait()
+            except Exception:
+                pass

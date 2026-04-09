@@ -5,12 +5,22 @@ from types import SimpleNamespace
 
 import pytest
 
+from backend.config import Settings
+
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from backend.rpa.engine_supervisor import LocalRPAEngineSupervisor, build_spawn_command
 from backend.rpa.session_gateway import RPASessionGateway
+
+
+def test_settings_default_start_command_matches_engine_root_cwd(monkeypatch):
+    monkeypatch.delenv("RPA_ENGINE_START_CMD", raising=False)
+
+    settings = Settings()
+
+    assert settings.rpa_engine_start_cmd == "npm run dev"
 
 
 def test_build_spawn_command_honors_explicit_start_command():
@@ -25,8 +35,7 @@ def test_build_spawn_command_honors_explicit_start_command():
 def test_build_spawn_command_uses_repo_engine_entrypoint():
     command = build_spawn_command("D:/code/MyScienceClaw/RpaClaw/rpa-engine")
 
-    assert "npm" in command[0].lower()
-    assert "dev" in command[-1]
+    assert command == ["npm", "run", "dev"]
 
 
 def test_gateway_accepts_node_mode_and_starts_supervisor():
@@ -112,3 +121,45 @@ def test_ensure_running_times_out_when_process_never_becomes_ready(monkeypatch):
 
     with pytest.raises(RuntimeError, match="rpa engine did not become ready in time"):
         asyncio.run(supervisor.ensure_running())
+
+
+def test_timeout_resets_bad_process_and_next_call_spawns_again(monkeypatch):
+    supervisor = LocalRPAEngineSupervisor(
+        engine_root="D:/code/MyScienceClaw/RpaClaw/rpa-engine",
+        health_url="http://127.0.0.1:3310/health",
+        ready_timeout_seconds=0.0,
+        poll_interval_seconds=0.01,
+    )
+    spawn_calls = []
+
+    class _FakeProcess:
+        def __init__(self):
+            self.returncode = None
+            self.terminate_calls = 0
+
+        def terminate(self):
+            self.terminate_calls += 1
+            self.returncode = 1
+
+    created_processes = []
+
+    async def fake_create_subprocess_exec(*command, cwd=None):
+        spawn_calls.append((list(command), cwd))
+        process = _FakeProcess()
+        created_processes.append(process)
+        return process
+
+    async def fake_healthcheck():
+        return False
+
+    monkeypatch.setattr("backend.rpa.engine_supervisor.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(supervisor, "healthcheck", fake_healthcheck)
+
+    with pytest.raises(RuntimeError, match="rpa engine did not become ready in time"):
+        asyncio.run(supervisor.ensure_running())
+
+    with pytest.raises(RuntimeError, match="rpa engine did not become ready in time"):
+        asyncio.run(supervisor.ensure_running())
+
+    assert len(spawn_calls) == 2
+    assert created_processes[0].terminate_calls == 1

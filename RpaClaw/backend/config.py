@@ -94,7 +94,7 @@ class Settings(BaseSettings):
     rpa_engine_auth_token: str = os.environ.get("RPA_ENGINE_AUTH_TOKEN", "")
     rpa_engine_host: str = os.environ.get("RPA_ENGINE_HOST", "127.0.0.1")
     rpa_engine_port: int = int(os.environ.get("RPA_ENGINE_PORT", "3310"))
-    rpa_engine_start_cmd: str = os.environ.get("RPA_ENGINE_START_CMD", "npm --prefix RpaClaw/rpa-engine run dev")
+    rpa_engine_start_cmd: str = os.environ.get("RPA_ENGINE_START_CMD", "npm run dev")
 
     # 任务调度服务调用聊天接口时的 API Key（可选）
     task_service_api_key: str = os.environ.get("TASK_SERVICE_API_KEY", "")
