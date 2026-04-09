@@ -28,4 +28,41 @@ describe('buildSelectorRecord', () => {
       'internal:testid=[data-testid="save-button"]',
     );
   });
+
+  it('detaches selector records from caller mutation', () => {
+    const locator = {
+      selector: 'internal:role=button[name="Save"]',
+      locatorAst: { kind: 'role', name: 'Save' },
+    };
+    const alternative = {
+      selector: 'internal:testid=[data-testid="save-button"]',
+      locatorAst: { kind: 'testId', value: 'save-button' },
+      score: 100,
+      matchCount: 1,
+      visibleMatchCount: 1,
+      isSelected: false,
+      engine: 'playwright' as const,
+      reason: 'fallback',
+    };
+
+    const selector = buildSelectorRecord(locator, [alternative]);
+
+    locator.locatorAst.name = 'Changed';
+    alternative.locatorAst.value = 'changed';
+
+    expect(selector.locator).toEqual({
+      selector: 'internal:role=button[name="Save"]',
+      locatorAst: { kind: 'role', name: 'Save' },
+    });
+    expect(selector.locatorAlternatives[0]).toEqual({
+      selector: 'internal:testid=[data-testid="save-button"]',
+      locatorAst: { kind: 'testId', value: 'save-button' },
+      score: 100,
+      matchCount: 1,
+      visibleMatchCount: 1,
+      isSelected: false,
+      engine: 'playwright',
+      reason: 'fallback',
+    });
+  });
 });

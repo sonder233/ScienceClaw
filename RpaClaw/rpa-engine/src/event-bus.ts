@@ -36,7 +36,11 @@ export class EventBus<TEvents extends Record<string, unknown> = EngineEventMap> 
     }
 
     for (const listener of listeners) {
-      listener(payload as TEvents[keyof TEvents]);
+      try {
+        listener(payload as TEvents[keyof TEvents]);
+      } catch {
+        continue;
+      }
     }
   }
 }

@@ -1,4 +1,9 @@
-import type { LocatorCandidate, LocatorDescriptor } from '../action-model.js';
+import {
+  cloneLocatorCandidate,
+  cloneLocatorDescriptor,
+  type LocatorCandidate,
+  type LocatorDescriptor,
+} from '../action-model.js';
 
 export function buildSelectorRecord(
   locator: LocatorDescriptor,
@@ -8,7 +13,7 @@ export function buildSelectorRecord(
   locatorAlternatives: LocatorCandidate[];
 } {
   return {
-    locator,
-    locatorAlternatives: [...locatorAlternatives],
+    locator: cloneLocatorDescriptor(locator),
+    locatorAlternatives: locatorAlternatives.map(candidate => cloneLocatorCandidate(candidate)),
   };
 }
