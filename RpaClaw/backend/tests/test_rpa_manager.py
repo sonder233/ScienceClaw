@@ -3,6 +3,7 @@ import importlib
 import sys
 import unittest
 import json
+import copy
 from types import SimpleNamespace
 from pathlib import Path
 from datetime import datetime
@@ -626,6 +627,26 @@ class RPASessionManagerEngineCompatibilityTests(unittest.IsolatedAsyncioTestCase
         self.assertEqual(updated.target, 'internal:testid=[data-testid="save-button"]')
         self.assertFalse(updated.locator_candidates[0]["selected"])
         self.assertTrue(updated.locator_candidates[1]["selected"])
+
+    async def test_promoted_engine_locator_survives_fresh_get_session_fetch(self):
+        async def fake_fetch_engine_session(_session_id: str):
+            return copy.deepcopy(self.engine_session)
+
+        self.manager._fetch_engine_session = fake_fetch_engine_session
+
+        with patch.object(
+            MANAGER_MODULE,
+            "settings",
+            SimpleNamespace(rpa_engine_mode="node"),
+            create=True,
+        ):
+            await self.manager.get_session("session-1")
+            await self.manager.select_step_locator_candidate("session-1", 0, 1)
+            refreshed = await self.manager.get_session("session-1")
+
+        self.assertEqual(refreshed.steps[0].target, 'internal:testid=[data-testid="save-button"]')
+        self.assertFalse(refreshed.steps[0].locator_candidates[0]["selected"])
+        self.assertTrue(refreshed.steps[0].locator_candidates[1]["selected"])
 
 
 if __name__ == "__main__":

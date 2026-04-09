@@ -1,3 +1,4 @@
+import copy
 import sys
 from pathlib import Path
 
@@ -86,15 +87,16 @@ def _engine_session_payload() -> dict:
 def test_start_session_uses_engine_mode(monkeypatch):
     manager = RPASessionManager()
     monkeypatch.setattr(rpa_route, "rpa_manager", manager)
+    monkeypatch.setattr(rpa_route.settings, "rpa_engine_mode", "node")
 
-    async def fake_start_session(*args, **kwargs):
+    async def fake_start_engine_session(*args, **kwargs):
         return {"id": "session-1", "steps": [], "status": "recording"}
 
-    async def fail_legacy_create_session(*args, **kwargs):
-        raise RuntimeError("legacy create_session should not be used")
+    async def fail_legacy_start_session(*args, **kwargs):
+        raise RuntimeError("legacy _start_legacy_session should not be used")
 
-    monkeypatch.setattr(manager, "start_session", fake_start_session, raising=False)
-    monkeypatch.setattr(manager, "create_session", fail_legacy_create_session)
+    monkeypatch.setattr(manager, "_start_engine_session", fake_start_engine_session, raising=False)
+    monkeypatch.setattr(manager, "_start_legacy_session", fail_legacy_start_session, raising=False)
 
     client = _build_client()
     response = client.post("/api/v1/rpa/session/start", json={"sandbox_session_id": "sandbox-1"})
@@ -159,6 +161,36 @@ def test_promote_locator_route_uses_engine_compat_step(monkeypatch):
 
     assert response.status_code == 200
     step = response.json()["step"]
+    assert step["target"] == 'internal:testid=[data-testid="save-button"]'
+    assert step["locator_candidates"][0]["selected"] is False
+    assert step["locator_candidates"][1]["selected"] is True
+
+
+def test_promoted_locator_survives_followup_session_fetch(monkeypatch):
+    manager = RPASessionManager()
+    monkeypatch.setattr(rpa_route, "rpa_manager", manager)
+    monkeypatch.setattr(rpa_route.settings, "rpa_engine_mode", "node")
+
+    engine_session = _engine_session_payload()
+
+    async def fake_fetch_engine_session(session_id: str):
+        assert session_id == "session-1"
+        return copy.deepcopy(engine_session)
+
+    monkeypatch.setattr(manager, "_fetch_engine_session", fake_fetch_engine_session, raising=False)
+
+    client = _build_client()
+    promote_response = client.post(
+        "/api/v1/rpa/session/session-1/step/0/locator",
+        json={"candidate_index": 1},
+    )
+
+    assert promote_response.status_code == 200
+
+    session_response = client.get("/api/v1/rpa/session/session-1")
+
+    assert session_response.status_code == 200
+    step = session_response.json()["session"]["steps"][0]
     assert step["target"] == 'internal:testid=[data-testid="save-button"]'
     assert step["locator_candidates"][0]["selected"] is False
     assert step["locator_candidates"][1]["selected"] is True

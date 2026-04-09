@@ -729,6 +729,7 @@ class RPASessionManager:
         self._gateway = RPASessionGateway(settings=settings)
         self._compat_tabs: Dict[str, List[Dict[str, Any]]] = {}
         self._engine_sessions: Dict[str, dict[str, Any]] = {}
+        self._engine_locator_overrides: Dict[str, Dict[str, int]] = {}
 
     @staticmethod
     def _is_engine_mode() -> bool:
@@ -742,11 +743,41 @@ class RPASessionManager:
         return dict(getattr(client, "_headers", {}))
 
     def _cache_engine_session(self, session_payload: dict[str, Any]) -> RPASession:
+        session_payload = self._apply_engine_locator_overrides(session_payload)
         legacy_session = RPASession.model_validate(to_legacy_session(session_payload))
         self.sessions[legacy_session.id] = legacy_session
         self._compat_tabs[legacy_session.id] = to_legacy_tabs(session_payload)
         self._engine_sessions[legacy_session.id] = dict(session_payload)
         return legacy_session
+
+    def _apply_engine_locator_overrides(self, session_payload: dict[str, Any]) -> dict[str, Any]:
+        session_id = session_payload.get("id")
+        if not session_id:
+            return session_payload
+
+        overrides = self._engine_locator_overrides.get(session_id, {})
+        if not overrides:
+            return session_payload
+
+        for action in session_payload.get("actions", []):
+            action_id = action.get("id")
+            candidate_index = overrides.get(action_id)
+            if action_id is None or candidate_index is None:
+                continue
+
+            alternatives = action.get("locatorAlternatives", [])
+            if candidate_index < 0 or candidate_index >= len(alternatives):
+                continue
+
+            selected = alternatives[candidate_index]
+            action["locator"] = {
+                "selector": selected.get("selector"),
+                "locatorAst": selected.get("locatorAst", {}),
+            }
+            for index, candidate in enumerate(alternatives):
+                candidate["isSelected"] = index == candidate_index
+
+        return session_payload
 
     async def _start_engine_session(self, user_id: str, sandbox_session_id: str) -> RPASession:
         await self._gateway.ensure_engine_ready()
@@ -1328,6 +1359,7 @@ class RPASessionManager:
             raise ValueError("Locator candidate is missing locator payload")
 
         if self._is_engine_mode():
+            self._engine_locator_overrides.setdefault(session_id, {})[step.id] = candidate_index
             step.target = locator if isinstance(locator, str) else locator.get("selector", "")
             engine_session = self._engine_sessions.get(session_id)
             if engine_session and step_index < len(engine_session.get("actions", [])):
