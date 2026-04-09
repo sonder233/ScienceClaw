@@ -648,6 +648,89 @@ class RPASessionManagerEngineCompatibilityTests(unittest.IsolatedAsyncioTestCase
         self.assertFalse(refreshed.steps[0].locator_candidates[0]["selected"])
         self.assertTrue(refreshed.steps[0].locator_candidates[1]["selected"])
 
+    async def test_sparse_engine_refresh_preserves_legacy_compat_fields(self):
+        sparse_engine_session = {
+            "id": "session-1",
+            "userId": "user-1",
+            "status": "recording",
+            "actions": [
+                {
+                    "id": "action-1",
+                    "kind": "click",
+                    "pageAlias": "page-1",
+                    "framePath": [],
+                    "locator": {
+                        "selector": 'internal:role=button[name="Save"]',
+                        "locatorAst": {"kind": "role", "role": "button", "name": "Save"},
+                    },
+                    "locatorAlternatives": [],
+                    "signals": {},
+                    "validation": {},
+                }
+            ],
+        }
+        engine_responses = [copy.deepcopy(self.engine_session), sparse_engine_session]
+
+        async def fake_fetch_engine_session(_session_id: str):
+            return copy.deepcopy(engine_responses.pop(0))
+
+        self.manager._fetch_engine_session = fake_fetch_engine_session
+
+        with patch.object(
+            MANAGER_MODULE,
+            "settings",
+            SimpleNamespace(rpa_engine_mode="node"),
+            create=True,
+        ):
+            await self.manager.get_session("session-1")
+            refreshed = await self.manager.get_session("session-1")
+            tabs = self.manager.list_tabs("session-1")
+
+        self.assertEqual(refreshed.sandbox_session_id, "sandbox-1")
+        self.assertEqual(refreshed.active_tab_id, "page-2")
+        self.assertEqual(
+            tabs,
+            [
+                {
+                    "tab_id": "page-1",
+                    "title": "Search",
+                    "url": "https://example.com",
+                    "opener_tab_id": None,
+                    "status": "open",
+                    "active": False,
+                },
+                {
+                    "tab_id": "page-2",
+                    "title": "Popup",
+                    "url": "https://example.com/popup",
+                    "opener_tab_id": "page-1",
+                    "status": "open",
+                    "active": True,
+                },
+            ],
+        )
+
+    async def test_stop_session_clears_node_mode_compat_caches(self):
+        async def fake_fetch_engine_session(_session_id: str):
+            return copy.deepcopy(self.engine_session)
+
+        self.manager._fetch_engine_session = fake_fetch_engine_session
+
+        with patch.object(
+            MANAGER_MODULE,
+            "settings",
+            SimpleNamespace(rpa_engine_mode="node"),
+            create=True,
+        ):
+            await self.manager.get_session("session-1")
+            await self.manager.select_step_locator_candidate("session-1", 0, 1)
+            await self.manager.stop_session("session-1")
+
+        self.assertNotIn("session-1", self.manager.sessions)
+        self.assertNotIn("session-1", self.manager._compat_tabs)
+        self.assertNotIn("session-1", self.manager._engine_sessions)
+        self.assertNotIn("session-1", self.manager._engine_locator_overrides)
+
 
 if __name__ == "__main__":
     unittest.main()

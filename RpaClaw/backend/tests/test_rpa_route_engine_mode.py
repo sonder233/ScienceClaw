@@ -194,3 +194,94 @@ def test_promoted_locator_survives_followup_session_fetch(monkeypatch):
     assert step["target"] == 'internal:testid=[data-testid="save-button"]'
     assert step["locator_candidates"][0]["selected"] is False
     assert step["locator_candidates"][1]["selected"] is True
+
+
+def test_activate_tab_route_uses_node_mode_compat_state(monkeypatch):
+    manager = RPASessionManager()
+    monkeypatch.setattr(rpa_route, "rpa_manager", manager)
+    monkeypatch.setattr(rpa_route.settings, "rpa_engine_mode", "node")
+
+    engine_session = _engine_session_payload()
+
+    async def fake_fetch_engine_session(session_id: str):
+        assert session_id == "session-1"
+        return copy.deepcopy(engine_session)
+
+    monkeypatch.setattr(manager, "_fetch_engine_session", fake_fetch_engine_session, raising=False)
+
+    client = _build_client()
+    activate_response = client.post("/api/v1/rpa/session/session-1/tabs/page-1/activate")
+
+    assert activate_response.status_code == 200
+    payload = activate_response.json()
+    assert payload["active_tab_id"] == "page-1"
+    assert payload["result"] == {"tab_id": "page-1", "source": "user"}
+    assert payload["tabs"][0]["active"] is True
+    assert payload["tabs"][1]["active"] is False
+
+    tabs_response = client.get("/api/v1/rpa/session/session-1/tabs")
+
+    assert tabs_response.status_code == 200
+    assert tabs_response.json()["active_tab_id"] == "page-1"
+    assert tabs_response.json()["tabs"][0]["active"] is True
+
+
+def test_navigate_route_uses_node_mode_compat_state(monkeypatch):
+    manager = RPASessionManager()
+    monkeypatch.setattr(rpa_route, "rpa_manager", manager)
+    monkeypatch.setattr(rpa_route.settings, "rpa_engine_mode", "node")
+
+    engine_session = _engine_session_payload()
+
+    async def fake_fetch_engine_session(session_id: str):
+        assert session_id == "session-1"
+        return copy.deepcopy(engine_session)
+
+    monkeypatch.setattr(manager, "_fetch_engine_session", fake_fetch_engine_session, raising=False)
+
+    client = _build_client()
+    navigate_response = client.post(
+        "/api/v1/rpa/session/session-1/navigate",
+        json={"url": "docs.example.com"},
+    )
+
+    assert navigate_response.status_code == 200
+    payload = navigate_response.json()
+    assert payload["result"] == {"tab_id": "page-2", "url": "https://docs.example.com"}
+    assert payload["tabs"][1]["url"] == "https://docs.example.com"
+    assert payload["active_tab_id"] == "page-2"
+
+    tabs_response = client.get("/api/v1/rpa/session/session-1/tabs")
+
+    assert tabs_response.status_code == 200
+    assert tabs_response.json()["tabs"][1]["url"] == "https://docs.example.com"
+
+
+def test_stop_route_clears_node_mode_compat_state(monkeypatch):
+    manager = RPASessionManager()
+    monkeypatch.setattr(rpa_route, "rpa_manager", manager)
+    monkeypatch.setattr(rpa_route.settings, "rpa_engine_mode", "node")
+
+    engine_session = _engine_session_payload()
+
+    async def fake_fetch_engine_session(session_id: str):
+        assert session_id == "session-1"
+        return copy.deepcopy(engine_session)
+
+    monkeypatch.setattr(manager, "_fetch_engine_session", fake_fetch_engine_session, raising=False)
+
+    client = _build_client()
+    promote_response = client.post(
+        "/api/v1/rpa/session/session-1/step/0/locator",
+        json={"candidate_index": 1},
+    )
+    assert promote_response.status_code == 200
+
+    stop_response = client.post("/api/v1/rpa/session/session-1/stop")
+
+    assert stop_response.status_code == 200
+    assert stop_response.json()["session"]["status"] == "stopped"
+    assert "session-1" not in manager.sessions
+    assert "session-1" not in manager._compat_tabs
+    assert "session-1" not in manager._engine_sessions
+    assert "session-1" not in manager._engine_locator_overrides

@@ -114,6 +114,15 @@ class SessionScreencastControllerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RouteScreencastSelectionTests(unittest.TestCase):
+    def test_engine_screencast_url_preserves_base_path_prefix(self):
+        import backend.route.rpa as route_rpa
+
+        with patch.object(route_rpa.settings, "rpa_engine_base_url", "http://127.0.0.1:3310/rpa-engine/api"):
+            self.assertEqual(
+                route_rpa._get_engine_screencast_ws_url("session-1"),
+                "ws://127.0.0.1:3310/rpa-engine/api/sessions/session-1/screencast",
+            )
+
     def test_node_mode_screencast_route_uses_proxy_websocket(self):
         import backend.route.rpa as route_rpa
 

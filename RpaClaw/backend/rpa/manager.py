@@ -2,6 +2,7 @@ import json
 import logging
 import uuid
 import asyncio
+import copy
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from urllib.parse import urlparse
@@ -730,6 +731,8 @@ class RPASessionManager:
         self._compat_tabs: Dict[str, List[Dict[str, Any]]] = {}
         self._engine_sessions: Dict[str, dict[str, Any]] = {}
         self._engine_locator_overrides: Dict[str, Dict[str, int]] = {}
+        self._engine_session_overrides: Dict[str, Dict[str, Any]] = {}
+        self._engine_tab_overrides: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
     @staticmethod
     def _is_engine_mode() -> bool:
@@ -743,12 +746,42 @@ class RPASessionManager:
         return dict(getattr(client, "_headers", {}))
 
     def _cache_engine_session(self, session_payload: dict[str, Any]) -> RPASession:
-        session_payload = self._apply_engine_locator_overrides(session_payload)
+        session_payload = self._merge_engine_session_payload(session_payload)
         legacy_session = RPASession.model_validate(to_legacy_session(session_payload))
         self.sessions[legacy_session.id] = legacy_session
         self._compat_tabs[legacy_session.id] = to_legacy_tabs(session_payload)
-        self._engine_sessions[legacy_session.id] = dict(session_payload)
+        self._engine_sessions[legacy_session.id] = copy.deepcopy(session_payload)
         return legacy_session
+
+    def _compat_tabs_to_engine_pages(self, session_id: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "alias": tab["tab_id"],
+                "title": tab.get("title", ""),
+                "url": tab.get("url", ""),
+                "openerPageAlias": tab.get("opener_tab_id"),
+                "status": tab.get("status", "open"),
+            }
+            for tab in self._compat_tabs.get(session_id, [])
+        ]
+
+    def _merge_engine_session_payload(self, session_payload: dict[str, Any]) -> dict[str, Any]:
+        session_id = session_payload.get("id")
+        merged = copy.deepcopy(self._engine_sessions.get(session_id, {})) if session_id else {}
+        merged.update(copy.deepcopy(session_payload))
+
+        if session_id:
+            previous_session = self.sessions.get(session_id)
+            if not merged.get("sandboxSessionId") and previous_session:
+                merged["sandboxSessionId"] = previous_session.sandbox_session_id
+            if not merged.get("activePageAlias") and previous_session and previous_session.active_tab_id:
+                merged["activePageAlias"] = previous_session.active_tab_id
+            if not merged.get("pages"):
+                compat_pages = self._compat_tabs_to_engine_pages(session_id)
+                if compat_pages:
+                    merged["pages"] = compat_pages
+
+        return self._apply_engine_session_overrides(self._apply_engine_locator_overrides(merged))
 
     def _apply_engine_locator_overrides(self, session_payload: dict[str, Any]) -> dict[str, Any]:
         session_id = session_payload.get("id")
@@ -776,6 +809,33 @@ class RPASessionManager:
             }
             for index, candidate in enumerate(alternatives):
                 candidate["isSelected"] = index == candidate_index
+
+        return session_payload
+
+    def _apply_engine_session_overrides(self, session_payload: dict[str, Any]) -> dict[str, Any]:
+        session_id = session_payload.get("id")
+        if not session_id:
+            return session_payload
+
+        for key, value in self._engine_session_overrides.get(session_id, {}).items():
+            session_payload[key] = value
+
+        pages = session_payload.get("pages", [])
+        page_index = {
+            page.get("alias") or page.get("id"): page
+            for page in pages
+            if page.get("alias") or page.get("id")
+        }
+        for alias, overrides in self._engine_tab_overrides.get(session_id, {}).items():
+            page = page_index.get(alias)
+            if page is None:
+                page = {"alias": alias}
+                pages.append(page)
+                page_index[alias] = page
+            page.update(overrides)
+
+        if pages:
+            session_payload["pages"] = pages
 
         return session_payload
 
@@ -984,6 +1044,36 @@ class RPASessionManager:
         return normalized
 
     async def navigate_active_tab(self, session_id: str, url: str) -> Dict[str, str]:
+        if self._is_engine_mode():
+            if session_id not in self.sessions:
+                await self.get_session(session_id)
+            session = self.sessions.get(session_id)
+            if not session or not session.active_tab_id:
+                raise ValueError(f"No active tab for session {session_id}")
+
+            normalized_url = self._normalize_url(url)
+            active_tab_id = session.active_tab_id
+            tabs = self._compat_tabs.get(session_id, [])
+            tab = next((item for item in tabs if item["tab_id"] == active_tab_id), None)
+            if tab is None:
+                raise ValueError(f"Tab {active_tab_id} not found for session {session_id}")
+
+            tab["url"] = normalized_url
+            self._engine_tab_overrides.setdefault(session_id, {}).setdefault(active_tab_id, {})["url"] = normalized_url
+            self._engine_session_overrides.setdefault(session_id, {})["activePageAlias"] = active_tab_id
+
+            engine_session = self._engine_sessions.get(session_id)
+            if engine_session:
+                for page in engine_session.get("pages", []):
+                    if (page.get("alias") or page.get("id")) == active_tab_id:
+                        page["url"] = normalized_url
+                        break
+
+            return {
+                "tab_id": active_tab_id,
+                "url": normalized_url,
+            }
+
         session = self.sessions.get(session_id)
         if not session or not session.active_tab_id:
             raise ValueError(f"No active tab for session {session_id}")
@@ -1010,6 +1100,23 @@ class RPASessionManager:
         }
 
     async def activate_tab(self, session_id: str, tab_id: str, source: str = "auto"):
+        if self._is_engine_mode():
+            if session_id not in self.sessions:
+                await self.get_session(session_id)
+            session = self.sessions.get(session_id)
+            if not session:
+                raise ValueError(f"Session {session_id} not found")
+
+            tabs = self._compat_tabs.get(session_id, [])
+            if not any(tab["tab_id"] == tab_id for tab in tabs):
+                raise ValueError(f"Tab {tab_id} not found for session {session_id}")
+
+            session.active_tab_id = tab_id
+            self._engine_session_overrides.setdefault(session_id, {})["activePageAlias"] = tab_id
+            for tab in tabs:
+                tab["active"] = tab["tab_id"] == tab_id
+            return {"tab_id": tab_id, "source": source}
+
         page = self._tabs.get(session_id, {}).get(tab_id)
         if page is None:
             raise ValueError(f"Tab {tab_id} not found for session {session_id}")
@@ -1309,6 +1416,24 @@ class RPASessionManager:
             return ""
 
     async def stop_session(self, session_id: str):
+        if self._is_engine_mode():
+            session = self.sessions.get(session_id)
+            if session:
+                session.status = "stopped"
+            self._compat_tabs.pop(session_id, None)
+            self._engine_sessions.pop(session_id, None)
+            self._engine_locator_overrides.pop(session_id, None)
+            self._engine_session_overrides.pop(session_id, None)
+            self._engine_tab_overrides.pop(session_id, None)
+            self.sessions.pop(session_id, None)
+            self._pages.pop(session_id, None)
+            self._tabs.pop(session_id, None)
+            self._tab_meta.pop(session_id, None)
+            self._page_tab_ids.pop(session_id, None)
+            self._bridged_context_ids.pop(session_id, None)
+            logger.info(f"[RPA] Session {session_id} stopped")
+            return
+
         if session_id in self.sessions:
             self.sessions[session_id].status = "stopped"
 

@@ -185,9 +185,11 @@ def _should_proxy_session_screencast() -> bool:
 def _get_engine_screencast_ws_url(session_id: str) -> str:
     parsed = urlparse(settings.rpa_engine_base_url.rstrip("/"))
     ws_scheme = "wss" if parsed.scheme == "https" else "ws"
+    base_path = parsed.path.rstrip("/")
+    upstream_path = f"{base_path}/sessions/{session_id}/screencast" if base_path else f"/sessions/{session_id}/screencast"
     return parsed._replace(
         scheme=ws_scheme,
-        path=f"/sessions/{session_id}/screencast",
+        path=upstream_path,
         query="",
         fragment="",
     ).geturl()
