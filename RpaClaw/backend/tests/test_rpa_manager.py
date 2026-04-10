@@ -870,6 +870,34 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([step.action for step in self.session.steps], ["fill", "press"])
         self.assertEqual(self.session.steps[0].target, self.session.steps[1].target)
 
+    async def test_consecutive_fill_events_collapse_to_latest_value_on_same_target_frame_tab(self):
+        page = _FakePage("https://example.com", "Example")
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+        locator = {"method": "role", "role": "textbox", "name": "Search"}
+        frame_path = ["iframe[name='workspace']"]
+        values = ["t", "te", "tes", "test"]
+
+        for index, value in enumerate(values, start=1):
+            await self.manager._handle_event(
+                self.session.id,
+                {
+                    "action": "fill",
+                    "tab_id": tab_id,
+                    "tag": "INPUT",
+                    "timestamp": 3000 + index,
+                    "sequence": 40 + index,
+                    "value": value,
+                    "frame_path": frame_path,
+                    "locator": locator,
+                },
+            )
+
+        self.assertEqual(len(self.session.steps), 1)
+        self.assertEqual(self.session.steps[0].action, "fill")
+        self.assertEqual(self.session.steps[0].value, "test")
+        self.assertEqual(self.session.steps[0].frame_path, frame_path)
+        self.assertEqual(self.session.steps[0].tab_id, tab_id)
+
     async def test_register_context_page_upgrades_recent_click_to_open_tab_click(self):
         source_page = _FakePage("https://example.com", "Example")
         target_page = _FakePage("https://example.com/new", "Popup", context=source_page.context)

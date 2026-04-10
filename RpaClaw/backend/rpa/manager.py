@@ -1796,7 +1796,7 @@ class RPASessionManager:
         session = self.sessions[session_id]
         step = RPAStep(id=str(uuid.uuid4()), **step_data)
         if step.sequence is None:
-            session.steps.append(step)
+            insert_at = len(session.steps)
         else:
             insert_at = len(session.steps)
             for index, existing_step in enumerate(session.steps):
@@ -1804,10 +1804,48 @@ class RPASessionManager:
                 if existing_sequence is not None and existing_sequence > step.sequence:
                     insert_at = index
                     break
-            session.steps.insert(insert_at, step)
+
+        if step.action == "fill":
+            previous_step = session.steps[insert_at - 1] if insert_at > 0 else None
+            if self._is_same_fill_target(previous_step, step):
+                self._merge_fill_step(previous_step, step)
+                await self._broadcast_step(session_id, previous_step)
+                return previous_step
+
+            next_step = session.steps[insert_at] if insert_at < len(session.steps) else None
+            if self._is_same_fill_target(next_step, step):
+                return next_step
+
+        session.steps.insert(insert_at, step)
 
         await self._broadcast_step(session_id, step)
         return step
+
+    @staticmethod
+    def _is_same_fill_target(existing_step: Optional[RPAStep], incoming_step: RPAStep) -> bool:
+        if existing_step is None:
+            return False
+        return (
+            existing_step.action == "fill"
+            and existing_step.target == incoming_step.target
+            and existing_step.frame_path == incoming_step.frame_path
+            and existing_step.tab_id == incoming_step.tab_id
+        )
+
+    @staticmethod
+    def _merge_fill_step(existing_step: RPAStep, incoming_step: RPAStep) -> None:
+        existing_step.value = incoming_step.value
+        existing_step.description = incoming_step.description
+        existing_step.tag = incoming_step.tag
+        existing_step.url = incoming_step.url
+        existing_step.sensitive = incoming_step.sensitive
+        existing_step.locator_candidates = incoming_step.locator_candidates
+        existing_step.validation = incoming_step.validation
+        existing_step.signals = incoming_step.signals
+        existing_step.element_snapshot = incoming_step.element_snapshot
+        existing_step.sequence = incoming_step.sequence
+        existing_step.event_timestamp_ms = incoming_step.event_timestamp_ms
+        existing_step.timestamp = incoming_step.timestamp
 
     async def _broadcast_step(self, session_id: str, step: RPAStep):
         if session_id in self.ws_connections:

@@ -81,6 +81,59 @@ class SessionScreencastControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.calls, 2)
         self.assertEqual(ws.messages[-1]["type"], "preview_error")
 
+    async def test_dispatch_key_backspace_uses_raw_key_payload_without_text(self):
+        cdp = _FakeCDPSession()
+        controller = SCREencAST_MODULE.SessionScreencastController(
+            page_provider=lambda: None,
+            tabs_provider=lambda: [],
+        )
+        controller._cdp = cdp
+
+        await controller._dispatch_key(
+            {
+                "action": "keyDown",
+                "key": "Backspace",
+                "code": "Backspace",
+                "text": "",
+                "modifiers": 0,
+            }
+        )
+
+        self.assertEqual(len(cdp.sent), 1)
+        method, payload = cdp.sent[0]
+        self.assertEqual(method, "Input.dispatchKeyEvent")
+        self.assertEqual(payload["type"], "rawKeyDown")
+        self.assertEqual(payload["key"], "Backspace")
+        self.assertEqual(payload["code"], "Backspace")
+        self.assertEqual(payload["windowsVirtualKeyCode"], 8)
+        self.assertEqual(payload["nativeVirtualKeyCode"], 8)
+        self.assertNotIn("text", payload)
+
+
+class ScreencastServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dispatch_key_backspace_uses_raw_key_payload_without_text(self):
+        cdp = _FakeCDPSession()
+        service = SCREencAST_MODULE.ScreencastService(cdp)
+
+        await service._dispatch_key(
+            {
+                "action": "keyDown",
+                "key": "Backspace",
+                "code": "Backspace",
+                "text": "",
+                "modifiers": 0,
+            }
+        )
+
+        self.assertEqual(len(cdp.sent), 1)
+        method, payload = cdp.sent[0]
+        self.assertEqual(method, "Input.dispatchKeyEvent")
+        self.assertEqual(payload["type"], "rawKeyDown")
+        self.assertEqual(payload["key"], "Backspace")
+        self.assertEqual(payload["windowsVirtualKeyCode"], 8)
+        self.assertEqual(payload["nativeVirtualKeyCode"], 8)
+        self.assertNotIn("text", payload)
+
 
 if __name__ == "__main__":
     unittest.main()
