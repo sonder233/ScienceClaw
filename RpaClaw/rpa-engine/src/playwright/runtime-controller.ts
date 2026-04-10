@@ -173,6 +173,14 @@ const RECORDER_INIT_SCRIPT = String.raw`
     return element;
   };
 
+  const isUniqueSelector = selector => {
+    try {
+      return document.querySelectorAll(selector).length === 1;
+    } catch {
+      return false;
+    }
+  };
+
   const locatorFromElement = element => {
     const role = getRole(element);
     const name = accessibleName(element);
@@ -194,20 +202,44 @@ const RECORDER_INIT_SCRIPT = String.raw`
       };
     }
 
+    if (element.id) {
+      const idSelector = '#' + cssEscape(element.id);
+      if (isUniqueSelector(idSelector)) {
+        return {
+          method: 'css',
+          value: idSelector,
+          selector: idSelector,
+        };
+      }
+    }
+
     const placeholder = normalize(element.getAttribute('placeholder'));
     if (placeholder) {
-      return {
-        method: 'placeholder',
-        value: placeholder,
-        selector: '[placeholder="' + cssEscape(placeholder) + '"]',
-      };
+      const placeholderSelector = '[placeholder="' + cssEscape(placeholder) + '"]';
+      if (isUniqueSelector(placeholderSelector)) {
+        return {
+          method: 'placeholder',
+          value: placeholder,
+          selector: placeholderSelector,
+        };
+      }
     }
 
     if (element.id) {
+      const idSelector = '#' + cssEscape(element.id);
       return {
         method: 'css',
-        value: '#' + cssEscape(element.id),
-        selector: '#' + cssEscape(element.id),
+        value: idSelector,
+        selector: idSelector,
+      };
+    }
+
+    if (placeholder) {
+      const placeholderSelector = '[placeholder="' + cssEscape(placeholder) + '"]';
+      return {
+        method: 'placeholder',
+        value: placeholder,
+        selector: placeholderSelector,
       };
     }
 

@@ -548,6 +548,146 @@ describe('PlaywrightSessionRuntimeController integration', () => {
     }
   });
 
+  it('records input clicks with a unique id instead of a shared placeholder', async () => {
+    const site = createServer((_, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html>
+        <html>
+          <body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh;gap:24px">
+            <input id="s" placeholder="Search" style="width:240px;height:48px;font-size:24px" />
+            <input placeholder="Search" style="width:240px;height:48px;font-size:24px" />
+          </body>
+        </html>`);
+    });
+    await new Promise<void>(resolve => site.listen(0, '127.0.0.1', resolve));
+    const address = site.address() as AddressInfo;
+    const targetUrl = `http://127.0.0.1:${address.port}`;
+
+    const controller = new PlaywrightSessionRuntimeController();
+    const session: RuntimeSession = createRuntimeSession({ userId: 'u1', sandboxSessionId: 'sandbox-1' });
+
+    try {
+      await controller.startSession(session);
+      await controller.navigate(session, targetUrl, 'page');
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      await controller.dispatchInput(session, {
+        type: 'mouse',
+        action: 'mouseMoved',
+        x: 0.35,
+        y: 0.5,
+        button: 'left',
+        clickCount: 0,
+        modifiers: 0,
+      });
+      await controller.dispatchInput(session, {
+        type: 'mouse',
+        action: 'mousePressed',
+        x: 0.35,
+        y: 0.5,
+        button: 'left',
+        clickCount: 1,
+        modifiers: 0,
+      });
+      await controller.dispatchInput(session, {
+        type: 'mouse',
+        action: 'mouseReleased',
+        x: 0.35,
+        y: 0.5,
+        button: 'left',
+        clickCount: 0,
+        modifiers: 0,
+      });
+      await new Promise(resolve => setTimeout(resolve, 750));
+
+      const clickAction = session.actions.find(action => action.kind === 'click');
+      expect(clickAction).toBeDefined();
+      expect(clickAction).toMatchObject({
+        locator: {
+          selector: '#s',
+          locatorAst: {
+            kind: 'css',
+            value: '#s',
+          },
+        },
+      });
+      expect(clickAction?.locator.selector).not.toContain('placeholder');
+    } finally {
+      await controller.stopSession(session.id);
+      await new Promise(resolve => site.close(resolve));
+    }
+  });
+
+  it('falls back to a unique placeholder when duplicate ids are present', async () => {
+    const site = createServer((_, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html>
+        <html>
+          <body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh;gap:24px">
+            <input id="dup" placeholder="Search" style="width:240px;height:48px;font-size:24px" />
+            <input id="dup" placeholder="Find" style="width:240px;height:48px;font-size:24px" />
+          </body>
+        </html>`);
+    });
+    await new Promise<void>(resolve => site.listen(0, '127.0.0.1', resolve));
+    const address = site.address() as AddressInfo;
+    const targetUrl = `http://127.0.0.1:${address.port}`;
+
+    const controller = new PlaywrightSessionRuntimeController();
+    const session: RuntimeSession = createRuntimeSession({ userId: 'u1', sandboxSessionId: 'sandbox-1' });
+
+    try {
+      await controller.startSession(session);
+      await controller.navigate(session, targetUrl, 'page');
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      await controller.dispatchInput(session, {
+        type: 'mouse',
+        action: 'mouseMoved',
+        x: 0.35,
+        y: 0.5,
+        button: 'left',
+        clickCount: 0,
+        modifiers: 0,
+      });
+      await controller.dispatchInput(session, {
+        type: 'mouse',
+        action: 'mousePressed',
+        x: 0.35,
+        y: 0.5,
+        button: 'left',
+        clickCount: 1,
+        modifiers: 0,
+      });
+      await controller.dispatchInput(session, {
+        type: 'mouse',
+        action: 'mouseReleased',
+        x: 0.35,
+        y: 0.5,
+        button: 'left',
+        clickCount: 0,
+        modifiers: 0,
+      });
+      await new Promise(resolve => setTimeout(resolve, 750));
+
+      const clickAction = session.actions.find(action => action.kind === 'click');
+      expect(clickAction).toBeDefined();
+      expect(clickAction).toMatchObject({
+        locator: {
+          selector: '[placeholder="Search"]',
+          locatorAst: {
+            kind: 'placeholder',
+            value: 'Search',
+          },
+        },
+      });
+      expect(clickAction?.locator.selector).not.toBe('#dup');
+    } finally {
+      await controller.stopSession(session.id);
+      await new Promise(resolve => site.close(resolve));
+    }
+  });
+
   it('tracks popup tabs opened during live recording clicks', async () => {
     const site = createServer((_, response) => {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
