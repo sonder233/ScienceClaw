@@ -729,6 +729,45 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("First", self.session.steps[0].description)
         self.assertIn("Second", self.session.steps[1].description)
 
+    async def test_handle_event_prefers_event_timestamp_over_cross_tab_sequence_reset(self):
+        first_page = _FakePage("https://example.com", "Example")
+        first_tab_id = await self.manager.register_page(self.session.id, first_page, make_active=True)
+        second_page = _FakePage("https://example.com/results", "Results", context=first_page.context)
+        second_tab_id = await self.manager.register_context_page(
+            self.session.id,
+            second_page,
+            make_active=True,
+        )
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "fill",
+                "tab_id": second_tab_id,
+                "tag": "INPUT",
+                "timestamp": 2000,
+                "sequence": 1,
+                "value": "fa",
+                "locator": {"method": "placeholder", "value": "搜索教程、文档..."},
+            },
+        )
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "fill",
+                "tab_id": first_tab_id,
+                "tag": "INPUT",
+                "timestamp": 1000,
+                "sequence": 10,
+                "value": "test",
+                "locator": {"method": "placeholder", "value": "搜索教程..."},
+            },
+        )
+
+        self.assertEqual(len(self.session.steps), 2)
+        self.assertEqual([step.value for step in self.session.steps], ["test", "fa"])
+        self.assertEqual([step.tab_id for step in self.session.steps], [first_tab_id, second_tab_id])
+
     async def test_navigation_after_press_upgrades_step_to_navigate_press(self):
         page = _FakePage("https://example.com", "Example")
         tab_id = await self.manager.register_page(self.session.id, page, make_active=True)

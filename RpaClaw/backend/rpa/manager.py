@@ -1814,15 +1814,13 @@ class RPASessionManager:
 
         session = self.sessions[session_id]
         step = RPAStep(id=str(uuid.uuid4()), **step_data)
-        if step.sequence is None:
-            insert_at = len(session.steps)
-        else:
-            insert_at = len(session.steps)
-            for index, existing_step in enumerate(session.steps):
-                existing_sequence = existing_step.sequence
-                if existing_sequence is not None and existing_sequence > step.sequence:
-                    insert_at = index
-                    break
+        insert_at = len(session.steps)
+        for index, existing_step in enumerate(session.steps):
+            if existing_step.source != step.source:
+                continue
+            if self._step_sorts_before(step, existing_step):
+                insert_at = index
+                break
 
         if step.action == "fill" and step.source == "record":
             previous_step = session.steps[insert_at - 1] if insert_at > 0 else None
@@ -1839,6 +1837,31 @@ class RPASessionManager:
 
         await self._broadcast_step(session_id, step)
         return step
+
+    @staticmethod
+    def _step_event_ts_ms(step: RPAStep) -> int:
+        if step.event_timestamp_ms is not None:
+            return step.event_timestamp_ms
+        return int(step.timestamp.timestamp() * 1000)
+
+    @classmethod
+    def _step_sorts_before(cls, incoming_step: RPAStep, existing_step: RPAStep) -> bool:
+        incoming_ts = cls._step_event_ts_ms(incoming_step)
+        existing_ts = cls._step_event_ts_ms(existing_step)
+        if incoming_ts != existing_ts:
+            return incoming_ts < existing_ts
+
+        incoming_sequence = incoming_step.sequence
+        existing_sequence = existing_step.sequence
+        if (
+            incoming_step.tab_id == existing_step.tab_id
+            and incoming_sequence is not None
+            and existing_sequence is not None
+            and incoming_sequence != existing_sequence
+        ):
+            return incoming_sequence < existing_sequence
+
+        return False
 
     @staticmethod
     def _is_same_fill_target(existing_step: Optional[RPAStep], incoming_step: RPAStep) -> bool:
