@@ -255,7 +255,7 @@ const RECORDER_INIT_SCRIPT = String.raw`
     }
   };
 
-  const emitClickLikeAction = event => {
+  document.addEventListener('click', event => {
     const target = retarget(event.target);
     if (!target) return;
     const locator = locatorFromElement(target);
@@ -269,15 +269,6 @@ const RECORDER_INIT_SCRIPT = String.raw`
       element_snapshot: snapshotFromElement(target),
       timestamp: Date.now(),
     });
-  };
-
-  document.addEventListener('mousedown', event => {
-    if (event.button !== 0) return;
-    emitClickLikeAction(event);
-  }, true);
-
-  document.addEventListener('click', event => {
-    emitClickLikeAction(event);
   }, true);
 
   document.addEventListener('input', event => {
@@ -994,20 +985,6 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
       && JSON.stringify(lastAction.framePath) === JSON.stringify(action.framePath)
     ) {
       lastAction.input = action.input;
-      lastAction.snapshot = action.snapshot;
-      lastAction.timing = action.timing;
-      return;
-    }
-
-    if (
-      lastAction
-      && action.kind === 'click'
-      && lastAction.kind === 'click'
-      && lastAction.pageAlias === action.pageAlias
-      && lastAction.locator.selector === action.locator.selector
-      && JSON.stringify(lastAction.framePath) === JSON.stringify(action.framePath)
-      && Math.abs(Number(lastAction.timing.timestamp ?? 0) - Number(action.timing.timestamp ?? 0)) < 750
-    ) {
       lastAction.snapshot = action.snapshot;
       lastAction.timing = action.timing;
       return;
