@@ -157,6 +157,32 @@ class ScreencastServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["windowsVirtualKeyCode"], 49)
         self.assertEqual(payload["nativeVirtualKeyCode"], 49)
         self.assertEqual(payload["text"], "!")
+        self.assertEqual(payload["unmodifiedText"], "1")
+
+    async def test_dispatch_key_enter_uses_keydown_with_carriage_return_text(self):
+        cdp = _FakeCDPSession()
+        service = SCREencAST_MODULE.ScreencastService(cdp)
+
+        await service._dispatch_key(
+            {
+                "action": "keyDown",
+                "key": "Enter",
+                "code": "Enter",
+                "text": "",
+                "modifiers": 0,
+            }
+        )
+
+        self.assertEqual(len(cdp.sent), 1)
+        method, payload = cdp.sent[0]
+        self.assertEqual(method, "Input.dispatchKeyEvent")
+        self.assertEqual(payload["type"], "keyDown")
+        self.assertEqual(payload["key"], "Enter")
+        self.assertEqual(payload["code"], "Enter")
+        self.assertEqual(payload["windowsVirtualKeyCode"], 13)
+        self.assertEqual(payload["nativeVirtualKeyCode"], 13)
+        self.assertEqual(payload["text"], "\r")
+        self.assertEqual(payload["unmodifiedText"], "\r")
 
 
 if __name__ == "__main__":

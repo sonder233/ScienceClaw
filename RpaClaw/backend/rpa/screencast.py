@@ -38,6 +38,23 @@ _CODE_TO_VIRTUAL_KEY_CODE: Dict[str, int] = {
     "Slash": 191,
 }
 
+_CODE_TO_UNMODIFIED_TEXT: Dict[str, str] = {
+    "Space": " ",
+    "Backquote": "`",
+    "Minus": "-",
+    "Equal": "=",
+    "BracketLeft": "[",
+    "BracketRight": "]",
+    "Backslash": "\\",
+    "Semicolon": ";",
+    "Quote": "'",
+    "Comma": ",",
+    "Period": ".",
+    "Slash": "/",
+    "Enter": "\r",
+    "NumpadEnter": "\r",
+}
+
 
 def _infer_virtual_key_code(key: str, code: str) -> int:
     if code.startswith("Key") and len(code) == 4:
@@ -51,6 +68,18 @@ def _infer_virtual_key_code(key: str, code: str) -> int:
     if len(key) == 1:
         return ord(key.upper())
     return 0
+
+
+def _infer_unmodified_text(key: str, code: str) -> Optional[str]:
+    if code.startswith("Key") and len(code) == 4:
+        return code[-1].lower()
+    if code.startswith("Digit") and len(code) == 6 and code[-1].isdigit():
+        return code[-1]
+    if code in _CODE_TO_UNMODIFIED_TEXT:
+        return _CODE_TO_UNMODIFIED_TEXT[code]
+    if key == "Enter":
+        return "\r"
+    return None
 
 
 def _build_cdp_key_event(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -74,12 +103,25 @@ def _build_cdp_key_event(event: Dict[str, Any]) -> Dict[str, Any]:
         payload["nativeVirtualKeyCode"] = vk_code
 
     if action != "keyUp":
-        has_printable_text = len(key) == 1 and not (modifiers & 0b0111)
-        if has_printable_text:
-            key_text = text if isinstance(text, str) else key
+        has_text = False
+        key_text: Optional[str] = None
+        unmodified_text: Optional[str] = None
+        if not (modifiers & 0b0111):
+            if isinstance(text, str) and text:
+                key_text = text
+                unmodified_text = _infer_unmodified_text(key, code) or key_text
+                has_text = True
+            else:
+                inferred_unmodified = _infer_unmodified_text(key, code)
+                if inferred_unmodified is not None:
+                    key_text = inferred_unmodified
+                    unmodified_text = inferred_unmodified
+                    has_text = True
+
+        if has_text and key_text is not None and unmodified_text is not None:
             payload["type"] = "keyDown"
             payload["text"] = key_text
-            payload["unmodifiedText"] = key_text
+            payload["unmodifiedText"] = unmodified_text
         else:
             payload["type"] = "rawKeyDown"
     return payload
