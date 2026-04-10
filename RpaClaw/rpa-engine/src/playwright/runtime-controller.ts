@@ -59,6 +59,7 @@ type FrameScopeLike = LocatorLike;
 
 type ContextLike = {
   newPage(): Promise<PageLike>;
+  on?(eventName: 'page', listener: (page: PageLike) => void): unknown;
   exposeBinding?(
     name: string,
     callback: (source: { page?: PageLike; frame?: unknown }, payload: string) => Promise<void>,
@@ -372,6 +373,7 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
     this.#runtimes.set(session.id, runtime);
     session.activePageAlias = 'page';
     await this.#syncPageState(session, 'page', page, null);
+    this.#bindContextPages(session, runtime);
   }
 
   async activatePage(session: RuntimeSession, pageAlias: string): Promise<void> {
@@ -633,6 +635,40 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
     runtime.pages.set(pageAlias, page);
     await this.#syncPageState(session, pageAlias, page, null);
     return page;
+  }
+
+  #bindContextPages(session: RuntimeSession, runtime: RuntimeHandles): void {
+    runtime.context.on?.('page', page => {
+      const existingAlias = this.#resolvePageAlias(runtime, page);
+      if (existingAlias) {
+        return;
+      }
+
+      const openerAlias = runtime.activePageAlias ?? session.activePageAlias ?? 'page';
+      const nextAlias = this.#allocatePageAlias(runtime);
+      runtime.pages.set(nextAlias, page);
+      runtime.activePageAlias = nextAlias;
+      session.activePageAlias = nextAlias;
+
+      void (async () => {
+        try {
+          await page.waitForLoadState('domcontentloaded');
+        } catch {
+          // Keep best-effort page registration for popups that close or block loading.
+        }
+        await this.#syncPageState(session, nextAlias, page, openerAlias);
+      })();
+    });
+  }
+
+  #allocatePageAlias(runtime: RuntimeHandles): string {
+    let index = runtime.pages.size + 1;
+    let alias = `page-${index}`;
+    while (runtime.pages.has(alias)) {
+      index += 1;
+      alias = `page-${index}`;
+    }
+    return alias;
   }
 
   async #syncPageState(
