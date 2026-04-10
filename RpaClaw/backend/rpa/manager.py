@@ -1010,6 +1010,17 @@ class RPASessionManager:
             params or {},
         )
 
+    async def capture_engine_snapshot(self, session_id: str) -> dict[str, Any]:
+        if not self._is_engine_mode():
+            raise RuntimeError("engine snapshot is only available in node mode")
+        payload = await self._gateway.capture_snapshot(session_id)
+        return dict(payload.get("snapshot") or {})
+
+    async def execute_engine_assistant_intent(self, session_id: str, intent: Dict[str, Any]) -> dict[str, Any]:
+        if not self._is_engine_mode():
+            raise RuntimeError("engine assistant execution is only available in node mode")
+        return await self._gateway.execute_assistant_intent(session_id, intent)
+
     def attach_context(self, session_id: str, context: BrowserContext):
         self._contexts[session_id] = context
         self._pages.pop(session_id, None)

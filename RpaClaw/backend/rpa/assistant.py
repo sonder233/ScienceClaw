@@ -642,6 +642,55 @@ class RPAAssistant:
         }
         yield {"event": "done", "data": {}}
 
+    async def chat_with_engine(
+        self,
+        session_id: str,
+        message: str,
+        steps: List[Dict[str, Any]],
+        snapshot_provider: Callable[[], Any],
+        intent_executor: Callable[[Dict[str, Any]], Any],
+        model_config: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        yield {"event": "message_chunk", "data": {"text": "正在分析当前页面......\n\n"}}
+        snapshot = await snapshot_provider()
+        history = self._get_history(session_id)
+        messages = self._build_messages(message, steps, snapshot, history)
+
+        full_response = ""
+        async for chunk_text in self._stream_llm(messages, model_config):
+            full_response += chunk_text
+            yield {"event": "message_chunk", "data": {"text": chunk_text}}
+
+        yield {"event": "executing", "data": {}}
+        result, final_response, resolution, retry_notice = await self._execute_engine_with_retry(
+            snapshot_provider=snapshot_provider,
+            intent_executor=intent_executor,
+            snapshot=snapshot,
+            full_response=full_response,
+            messages=messages,
+            model_config=model_config,
+        )
+
+        if retry_notice:
+            yield {"event": "message_chunk", "data": {"text": retry_notice}}
+        if resolution:
+            yield {"event": "resolution", "data": {"intent": resolution}}
+
+        history.append({"role": "user", "content": message})
+        history.append({"role": "assistant", "content": final_response})
+        self._trim_history(session_id)
+
+        yield {
+            "event": "result",
+            "data": {
+                "success": result["success"],
+                "error": result.get("error"),
+                "step": result.get("step"),
+                "output": result.get("output"),
+            },
+        }
+        yield {"event": "done", "data": {}}
+
     async def _execute_with_retry(
         self,
         page: Page,
@@ -704,6 +753,63 @@ class RPAAssistant:
             raise ValueError("Unable to extract structured intent or executable code from assistant response")
         result = await self._execute_on_page(current_page, code)
         return result, code, None
+
+    async def _execute_engine_with_retry(
+        self,
+        snapshot_provider: Callable[[], Any],
+        intent_executor: Callable[[Dict[str, Any]], Any],
+        snapshot: Dict[str, Any],
+        full_response: str,
+        messages: List[Dict[str, str]],
+        model_config: Optional[Dict[str, Any]],
+    ) -> tuple[Dict[str, Any], str, Optional[Dict[str, Any]], str]:
+        try:
+            result, resolution = await self._execute_single_engine_response(
+                snapshot,
+                full_response,
+                intent_executor,
+            )
+            if result["success"]:
+                return result, full_response, resolution, ""
+        except Exception as exc:
+            result = {"success": False, "error": str(exc), "output": ""}
+            resolution = None
+
+        retry_messages = messages + [
+            {"role": "assistant", "content": full_response},
+            {"role": "user", "content": f"Execution error: {result['error']}\nPlease fix it and retry."},
+        ]
+        retry_response = ""
+        async for chunk_text in self._stream_llm(retry_messages, model_config):
+            retry_response += chunk_text
+
+        retry_snapshot = await snapshot_provider()
+        try:
+            retry_result, retry_resolution = await self._execute_single_engine_response(
+                retry_snapshot,
+                retry_response,
+                intent_executor,
+            )
+            return retry_result, retry_response, retry_resolution, "\n\nExecution failed. Retrying.\n\n"
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "output": ""}, retry_response, None, "\n\nExecution failed. Retrying.\n\n"
+
+    async def _execute_single_engine_response(
+        self,
+        snapshot: Dict[str, Any],
+        full_response: str,
+        intent_executor: Callable[[Dict[str, Any]], Any],
+    ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        structured_intent = self._extract_structured_intent(full_response)
+        if not structured_intent:
+            raise ValueError("Unable to extract structured intent from assistant response")
+        resolved_intent = resolve_structured_intent(snapshot, structured_intent)
+        execution_intent = {
+            **structured_intent,
+            "resolved": resolved_intent,
+        }
+        result = await intent_executor(execution_intent)
+        return result, resolved_intent
 
     def _build_messages(
         self,

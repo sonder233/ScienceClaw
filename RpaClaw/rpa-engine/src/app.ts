@@ -7,6 +7,7 @@ import { loadConfig, type EngineConfig } from './config.js';
 import type { SessionRuntimeController } from './contracts.js';
 import { EventBus, type EngineEventMap } from './event-bus.js';
 import { PlaywrightSessionRuntimeController } from './playwright/runtime-controller.js';
+import { registerAssistantRoutes } from './routes/assistant.js';
 import { registerReplayRoutes } from './routes/replay.js';
 import { registerSessionRoutes } from './routes/sessions.js';
 import {
@@ -53,6 +54,7 @@ export function buildApp(
   }));
 
   app.register(registerSessionRoutes);
+  app.register(registerAssistantRoutes);
   app.register(registerReplayRoutes);
   app.server.on('upgrade', (request, socket, head) => {
     handleScreencastUpgrade(app, screencastServer, request, socket, head);

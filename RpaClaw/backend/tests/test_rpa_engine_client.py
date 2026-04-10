@@ -153,3 +153,36 @@ def test_codegen_and_replay_calls_post_expected_payloads(monkeypatch):
     assert codegen["script"].startswith("async def execute_skill")
     assert replay["result"]["success"] is False
     assert clients == []
+
+
+def test_assistant_snapshot_and_execute_calls_expected_payloads(monkeypatch):
+    snapshot_payload = {
+        "snapshot": {
+            "url": "https://example.com",
+            "title": "Example",
+            "frames": [],
+        }
+    }
+    execute_payload = {
+        "success": True,
+        "output": "ok",
+        "step": {"action": "click"},
+    }
+    clients = [
+        _FakeAsyncClient(_FakeResponse(status_code=200, payload=snapshot_payload)),
+        _FakeAsyncClient(_FakeResponse(status_code=200, payload=execute_payload)),
+    ]
+    monkeypatch.setattr("backend.rpa.engine_client.httpx.AsyncClient", lambda *args, **kwargs: clients.pop(0))
+    client = RPAEngineClient(base_url="http://127.0.0.1:3310", auth_token="")
+
+    snapshot = asyncio.run(client.capture_snapshot("session-1"))
+    executed = asyncio.run(
+        client.execute_assistant_intent(
+            "session-1",
+            {"action": "click", "resolved": {"frame_path": [], "locator": {"method": "css", "value": "#target"}}},
+        )
+    )
+
+    assert snapshot["snapshot"]["url"] == "https://example.com"
+    assert executed["success"] is True
+    assert clients == []

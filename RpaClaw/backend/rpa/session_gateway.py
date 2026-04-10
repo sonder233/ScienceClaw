@@ -55,6 +55,14 @@ class RPASessionGateway:
         await self.ensure_engine_ready()
         return await self._client.stop_session(session_id)
 
+    async def capture_snapshot(self, session_id: str) -> dict:
+        await self.ensure_engine_ready()
+        return await self._client.capture_snapshot(session_id)
+
+    async def execute_assistant_intent(self, session_id: str, intent: dict) -> dict:
+        await self.ensure_engine_ready()
+        return await self._client.execute_assistant_intent(session_id, intent)
+
     async def generate_script(self, session_id: str, actions: list[dict], params: dict) -> dict:
         await self.ensure_engine_ready()
         return await self._client.generate_script(session_id, actions, params)

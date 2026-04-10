@@ -56,6 +56,21 @@ class EngineReplayRequest(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class EngineAssistantExecuteRequest(BaseModel):
+    intent: dict[str, Any] = Field(default_factory=dict)
+
+
+class EngineAssistantSnapshotResponse(BaseModel):
+    snapshot: dict[str, Any] = Field(default_factory=dict)
+
+
+class EngineAssistantExecuteResponse(BaseModel):
+    success: bool
+    output: str = ""
+    error: str | None = None
+    step: dict[str, Any] = Field(default_factory=dict)
+
+
 class EngineCodegenResponse(BaseModel):
     script: str
 

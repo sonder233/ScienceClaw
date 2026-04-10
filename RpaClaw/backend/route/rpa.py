@@ -578,10 +578,11 @@ async def chat_with_assistant(
     # Resolve user's model config
     model_config = await _resolve_user_model_config(str(current_user.id))
 
-    # Get the page object for this session
-    page = rpa_manager.get_page(session_id)
-    if not page:
-        raise HTTPException(status_code=400, detail="No active page for this session")
+    page = None
+    if not _is_node_engine_mode():
+        page = rpa_manager.get_page(session_id)
+        if not page:
+            raise HTTPException(status_code=400, detail="No active page for this session")
 
     steps = [step.model_dump() for step in session.steps]
 
@@ -589,7 +590,32 @@ async def chat_with_assistant(
         try:
             rpa_manager.pause_recording(session_id)
 
-            if request.mode == "react":
+            if _is_node_engine_mode():
+                if request.mode == "react":
+                    yield {
+                        "event": "error",
+                        "data": json.dumps({"message": "ReAct mode is not yet supported in node engine mode"}, ensure_ascii=False),
+                    }
+                    yield {"event": "done", "data": "{}"}
+                    return
+
+                async for event in assistant.chat_with_engine(
+                    session_id=session_id,
+                    message=request.message,
+                    steps=steps,
+                    model_config=model_config,
+                    snapshot_provider=lambda: rpa_manager.capture_engine_snapshot(session_id),
+                    intent_executor=lambda intent: rpa_manager.execute_engine_assistant_intent(session_id, intent),
+                ):
+                    evt_type = event.get("event", "message")
+                    evt_data = event.get("data", {})
+                    if evt_type == "result" and evt_data.get("success") and evt_data.get("step"):
+                        await rpa_manager.add_step(session_id, evt_data["step"])
+                    yield {
+                        "event": evt_type,
+                        "data": json.dumps(evt_data, ensure_ascii=False),
+                    }
+            elif request.mode == "react":
                 # Reuse existing agent for this session to preserve history across turns
                 agent = _active_agents.get(session_id)
                 if agent is None:

@@ -41,6 +41,7 @@ type LocatorLike = {
   click(): Promise<unknown>;
   fill(value: string): Promise<unknown>;
   press(value: string): Promise<unknown>;
+  innerText?(): Promise<string>;
   selectOption(value: string): Promise<unknown>;
   check(): Promise<unknown>;
   uncheck(): Promise<unknown>;
@@ -75,6 +76,14 @@ type BrowserLike = {
 
 type DownloadLike = {
   suggestedFilename(): string;
+};
+
+type FrameLike = {
+  url(): string;
+  evaluate?<T>(pageFunction: unknown): Promise<T>;
+  childFrames?(): FrameLike[];
+  frameElement?(): Promise<unknown>;
+  parentFrame?(): FrameLike | null;
 };
 
 const POPUP_TRIGGER_ACTION_KINDS = new Set<RecordedAction['kind']>([
@@ -389,6 +398,136 @@ const RECORDER_INIT_SCRIPT = String.raw`
 })();
 `;
 
+const ASSISTANT_SNAPSHOT_SCRIPT = String.raw`(() => {
+  const INTERACTIVE = 'a,button,input,textarea,select,[role=button],[role=link],[role=menuitem],[role=menuitemradio],[role=tab],[role=checkbox],[role=radio],[contenteditable=true]';
+  const ROLE_MAP = { A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox' };
+  const els = document.querySelectorAll(INTERACTIVE);
+  const results = [];
+  let index = 1;
+  const seen = new Set();
+  function cssEsc(s) {
+    try { return CSS.escape(s); } catch (e) {
+      return String(s || '').replace(/([\\"'\[\](){}|^$.*+?])/g, '\\$1');
+    }
+  }
+  function charType(c) {
+    if (c >= 'a' && c <= 'z') return 1;
+    if (c >= 'A' && c <= 'Z') return 2;
+    if (c >= '0' && c <= '9') return 3;
+    return 4;
+  }
+  function isGuidLike(id) {
+    if (!id) return false;
+    let transitions = 0;
+    for (let i = 1; i < id.length; i++) {
+      if (charType(id[i - 1]) !== charType(id[i])) transitions++;
+    }
+    return transitions >= id.length / 4;
+  }
+  function getRole(el) {
+    return el.getAttribute('role') || ROLE_MAP[el.tagName] || '';
+  }
+  function stableSelector(el) {
+    const tag = el.tagName.toLowerCase();
+    if (el.id && !isGuidLike(el.id)) return tag + '#' + cssEsc(el.id);
+    const classes = Array.from(el.classList || []).filter(cls => cls && !isGuidLike(cls)).slice(0, 2);
+    if (classes.length) return tag + '.' + classes.map(cssEsc).join('.');
+    const role = el.getAttribute('role');
+    if (role) return tag + '[role="' + cssEsc(role) + '"]';
+    return tag;
+  }
+  function selectorIsUnique(sel) {
+    try { return document.querySelectorAll(sel).length === 1; } catch (e) { return false; }
+  }
+  function buildRelativeSelector(ancestor, el) {
+    const parts = [];
+    let current = el;
+    while (current && current !== ancestor) {
+      parts.unshift(stableSelector(current));
+      current = current.parentElement;
+    }
+    if (current !== ancestor) return '';
+    return parts.join(' ');
+  }
+  function countSiblingMatches(el) {
+    if (!el || !el.parentElement) return 0;
+    const sel = stableSelector(el);
+    let count = 0;
+    for (const child of Array.from(el.parentElement.children)) {
+      try {
+        if (child.matches(sel)) count++;
+      } catch (e) {}
+    }
+    return count;
+  }
+  function findUniqueAnchor(start) {
+    let current = start;
+    for (let depth = 0; current && current !== document.body && depth < 4; depth++, current = current.parentElement) {
+      const sel = stableSelector(current);
+      if (selectorIsUnique(sel)) return { node: current, selector: sel };
+    }
+    return null;
+  }
+  function findCollectionContext(el) {
+    let repeatedRoot = null;
+    let current = el.parentElement;
+    for (let depth = 0; current && current !== document.body && depth < 6; depth++, current = current.parentElement) {
+      if (countSiblingMatches(current) >= 2) {
+        repeatedRoot = current;
+        break;
+      }
+    }
+    if (!repeatedRoot) return null;
+    const itemSelector = buildRelativeSelector(repeatedRoot, el);
+    if (!itemSelector) return null;
+    const anchor = findUniqueAnchor(repeatedRoot.parentElement || repeatedRoot);
+    let containerSelector = stableSelector(repeatedRoot);
+    if (anchor && anchor.node !== repeatedRoot) {
+      const relativeContainer = buildRelativeSelector(anchor.node, repeatedRoot);
+      if (relativeContainer) containerSelector = anchor.selector + ' ' + relativeContainer;
+    }
+    return {
+      container_selector: containerSelector,
+      item_selector: itemSelector,
+      item_count: countSiblingMatches(repeatedRoot),
+    };
+  }
+  for (const el of els) {
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) continue;
+    if (el.disabled) continue;
+    const style = getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+    const tag = el.tagName.toLowerCase();
+    const role = getRole(el);
+    const name = (el.getAttribute('aria-label') || el.innerText || '').trim().replace(/\s+/g, ' ').substring(0, 80);
+    const placeholder = el.getAttribute('placeholder') || '';
+    const href = el.getAttribute('href') || '';
+    const value = el.value || '';
+    const type = el.getAttribute('type') || '';
+    const key = tag + role + name + placeholder + href;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const info = { index, tag };
+    if (role) info.role = role;
+    if (name) info.name = name;
+    if (placeholder) info.placeholder = placeholder;
+    if (href) info.href = href.substring(0, 120);
+    if (value && tag !== 'input') info.value = value.substring(0, 80);
+    if (type) info.type = type;
+    const collection = findCollectionContext(el);
+    if (collection) {
+      info.collection_container_selector = collection.container_selector;
+      info.collection_item_selector = collection.item_selector;
+      info.collection_item_count = collection.item_count;
+    }
+    results.push(info);
+    index++;
+    if (results.length >= 80) break;
+  }
+  return results;
+})()`;
+
 export class PlaywrightSessionRuntimeController implements SessionRuntimeController {
   #driver: RuntimeDriver;
   #runtimes = new Map<string, RuntimeHandles>();
@@ -523,6 +662,132 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
     return {
       data: Buffer.from(screenshot).toString('base64'),
       metadata,
+    };
+  }
+
+  async captureSnapshot(session: RuntimeSession): Promise<Record<string, unknown>> {
+    const runtime = this.#requireRuntime(session.id);
+    const alias = runtime.activePageAlias ?? session.activePageAlias ?? 'page';
+    const page = await this.#ensurePage(session, runtime, alias);
+    const mainFrame = (page as unknown as { mainFrame?: () => FrameLike }).mainFrame?.();
+
+    if (!mainFrame) {
+      return {
+        url: page.url(),
+        title: await page.title(),
+        frames: [
+          {
+            frame_path: [],
+            url: page.url(),
+            frame_hint: 'main document',
+            elements: await this.#extractAssistantElements(page as unknown as FrameLike),
+            collections: [],
+          },
+        ],
+      };
+    }
+
+    const frames: Array<Record<string, unknown>> = [];
+    await this.#collectAssistantFrames(mainFrame, frames);
+    return {
+      url: page.url(),
+      title: await page.title(),
+      frames,
+    };
+  }
+
+  async executeAssistantIntent(
+    session: RuntimeSession,
+    intent: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const runtime = this.#requireRuntime(session.id);
+    const action = String(intent.action ?? '');
+    const resolved = asRecord(intent.resolved);
+    const actionAlias = runtime.activePageAlias ?? session.activePageAlias ?? 'page';
+    const page = await this.#ensurePage(session, runtime, actionAlias);
+
+    if (action === 'navigate') {
+      const targetUrl = String(resolved.url ?? intent.value ?? '').trim();
+      await page.goto(normalizeUrl(targetUrl));
+      await page.waitForLoadState('domcontentloaded');
+      await this.#syncPageState(session, actionAlias, page, null);
+      return {
+        success: true,
+        output: 'ok',
+        step: {
+          action: 'navigate',
+          source: 'ai',
+          target: '',
+          url: targetUrl,
+          frame_path: [],
+          locator_candidates: [],
+          validation: { status: 'ok', details: 'assistant structured action' },
+          collection_hint: {},
+          item_hint: {},
+          ordinal: null,
+          assistant_diagnostics: {
+            resolved_frame_path: [],
+            selected_locator_kind: 'navigate',
+            collection_kind: '',
+          },
+          description: String(intent.description ?? action),
+          prompt: intent.prompt ?? null,
+          value: intent.value ?? null,
+        },
+      };
+    }
+
+    const framePath = asStringArray(resolved.frame_path);
+    const scope = this.#buildAssistantScope(page, framePath);
+    const locatorPayload = asRecord(resolved.locator);
+    const locator = buildLocatorFromPayload(scope, locatorPayload);
+    let output = 'ok';
+
+    if (action === 'click') {
+      await locator.click();
+    } else if (action === 'extract_text') {
+      if (!locator.innerText) {
+        throw new Error('locator does not support text extraction');
+      }
+      output = await locator.innerText();
+    } else if (action === 'fill') {
+      await locator.fill(String(intent.value ?? ''));
+    } else if (action === 'press') {
+      await locator.press(String(intent.value ?? 'Enter'));
+    } else {
+      throw new Error(`Unsupported action: ${action}`);
+    }
+
+    await this.#syncPageState(session, actionAlias, page, null);
+    const collectionHint = asRecord(resolved.collection_hint);
+    const itemHint = asRecord(resolved.item_hint);
+    const ordinal = intent.ordinal == null ? null : String(intent.ordinal);
+
+    return {
+      success: true,
+      output,
+      step: {
+        action,
+        source: 'ai',
+        target: JSON.stringify(
+          buildCollectionItemPayload(collectionHint, itemHint, ordinal) ?? locatorPayload,
+        ),
+        frame_path: framePath,
+        locator_candidates: Array.isArray(resolved.locator_candidates) ? resolved.locator_candidates : [],
+        validation: { status: 'ok', details: 'assistant structured action' },
+        collection_hint: collectionHint,
+        item_hint: itemHint,
+        ordinal,
+        assistant_diagnostics: {
+          resolved_frame_path: framePath,
+          selected_locator_kind: String(resolved.selected_locator_kind ?? ''),
+          collection_kind: String(collectionHint.kind ?? ''),
+        },
+        result_key: intent.result_key ?? null,
+        description: String(intent.description ?? action),
+        prompt: intent.prompt ?? null,
+        value: intent.value ?? null,
+      },
     };
   }
 
@@ -841,6 +1106,42 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
 
     if (action === 'press') {
       await page.keyboard.press(key);
+    }
+  }
+
+  #buildAssistantScope(page: PageLike, framePath: string[]): PageLike | FrameScopeLike {
+    let scope: PageLike | FrameScopeLike = page;
+    for (const selector of framePath) {
+      scope = scope.frameLocator(selector);
+    }
+    return scope;
+  }
+
+  async #collectAssistantFrames(frame: FrameLike, target: Array<Record<string, unknown>>): Promise<void> {
+    const framePath = await this.#buildFramePath(frame);
+    const elements = await this.#extractAssistantElements(frame);
+    target.push({
+      frame_path: framePath,
+      url: frame.url(),
+      frame_hint: framePath.length === 0 ? 'main document' : framePath.join(' -> '),
+      elements,
+      collections: detectAssistantCollections(elements, framePath),
+    });
+
+    for (const childFrame of frame.childFrames?.() ?? []) {
+      await this.#collectAssistantFrames(childFrame, target);
+    }
+  }
+
+  async #extractAssistantElements(frame: FrameLike): Promise<Array<Record<string, unknown>>> {
+    if (!frame.evaluate) {
+      return [];
+    }
+    try {
+      const value = await frame.evaluate(ASSISTANT_SNAPSHOT_SCRIPT);
+      return Array.isArray(value) ? value.map(item => asRecord(item)) : [];
+    } catch {
+      return [];
     }
   }
 
@@ -1168,6 +1469,109 @@ function buildLocator(
 
   const cssValue = String(locatorAst.value ?? selector ?? 'body');
   return scope.locator(cssValue);
+}
+
+function buildLocatorFromPayload(
+  scope: PageLike | FrameScopeLike | LocatorLike,
+  payload: Record<string, unknown>,
+): LocatorLike {
+  const method = String(payload.method ?? 'css');
+  if (method === 'role') {
+    const role = String(payload.role ?? 'button');
+    const name = String(payload.name ?? '').trim();
+    return name ? scope.getByRole(role, { name }) : scope.getByRole(role);
+  }
+  if (method === 'text') {
+    return scope.getByText(String(payload.value ?? ''));
+  }
+  if (method === 'placeholder') {
+    return scope.getByPlaceholder(String(payload.value ?? ''));
+  }
+  return scope.locator(String(payload.value ?? ''));
+}
+
+function detectAssistantCollections(
+  elements: Array<Record<string, unknown>>,
+  framePath: string[],
+): Array<Record<string, unknown>> {
+  const grouped = new Map<string, Array<Record<string, unknown>>>();
+  for (const element of elements) {
+    const containerSelector = String(element.collection_container_selector ?? '');
+    const itemSelector = String(element.collection_item_selector ?? '');
+    if (!containerSelector || !itemSelector) {
+      continue;
+    }
+    const key = `${containerSelector}:::${itemSelector}`;
+    const current = grouped.get(key) ?? [];
+    current.push(element);
+    grouped.set(key, current);
+  }
+
+  const collections: Array<Record<string, unknown>> = [];
+  for (const [key, items] of grouped.entries()) {
+    if (items.length < 2) {
+      continue;
+    }
+    const [containerSelector, itemSelector] = key.split(':::');
+    const roles = [...new Set(items.map(item => String(item.role ?? '')).filter(Boolean))];
+    const itemHint: Record<string, unknown> = {
+      locator: { method: 'css', value: itemSelector },
+    };
+    if (roles.length === 1) {
+      itemHint.role = roles[0];
+    }
+    collections.push({
+      kind: 'repeated_items',
+      frame_path: [...framePath],
+      container_hint: { locator: { method: 'css', value: containerSelector } },
+      item_hint: itemHint,
+      item_count: items.length,
+      items: items.slice(0, 25),
+    });
+  }
+
+  const links = elements.filter(element => {
+    const role = String(element.role ?? '');
+    const tag = String(element.tag ?? '');
+    return role === 'link' || tag === 'a';
+  });
+  if (links.length >= 2) {
+    collections.push({
+      kind: 'search_results',
+      frame_path: [...framePath],
+      container_hint: { role: 'list' },
+      item_hint: { role: 'link' },
+      item_count: links.length,
+      items: links.slice(0, 10),
+    });
+  }
+
+  return collections;
+}
+
+function buildCollectionItemPayload(
+  collectionHint: Record<string, unknown>,
+  itemHint: Record<string, unknown>,
+  ordinal: string | null,
+): Record<string, unknown> | null {
+  if (!ordinal) {
+    return null;
+  }
+  const containerLocator = asRecord(asRecord(collectionHint.container_hint).locator);
+  const itemLocator = asRecord(itemHint.locator);
+  if (Object.keys(containerLocator).length === 0 || Object.keys(itemLocator).length === 0) {
+    return null;
+  }
+  return {
+    method: 'collection_item',
+    collection: containerLocator,
+    ordinal,
+    item: itemLocator,
+  };
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(item => String(item)) : [];
 }
 
 function inferKind(selector: string): string {

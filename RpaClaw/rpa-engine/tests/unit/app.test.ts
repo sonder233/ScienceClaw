@@ -42,6 +42,18 @@ function createRuntimeController() {
       }
       session.activePageAlias = alias;
     }),
+    captureSnapshot: vi.fn(async session => ({
+      url: session.pages.find((page: { alias: string }) => page.alias === (session.activePageAlias ?? 'page'))?.url ?? 'about:blank',
+      title: '',
+      frames: [],
+    })),
+    executeAssistantIntent: vi.fn(async (_session, intent) => ({
+      success: true,
+      step: {
+        action: intent.action ?? 'click',
+      },
+      output: 'ok',
+    })),
     replay: vi.fn(async () => ({
       success: false,
       output: 'SKILL_ERROR: missing replay stub',
@@ -300,6 +312,58 @@ describe('engine health endpoint', () => {
     expect(replayResponse.json().result).toMatchObject({
       success: true,
       output: 'executed 1 action(s) with resolved-secret',
+    });
+  });
+
+  it('proxies assistant snapshot and execute requests to the runtime controller', async () => {
+    const runtimeController = createRuntimeController();
+
+    const app = buildApp(
+      { NODE_ENV: 'test', RPA_ENGINE_PORT: 3310 },
+      { runtimeController },
+    );
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/sessions',
+      payload: { userId: 'u1', sandboxSessionId: 'sandbox-1' },
+    });
+    const sessionId = createResponse.json().session.id as string;
+
+    const snapshotResponse = await app.inject({
+      method: 'GET',
+      url: `/sessions/${sessionId}/assistant/snapshot`,
+    });
+
+    expect(snapshotResponse.statusCode).toBe(200);
+    expect(runtimeController.captureSnapshot).toHaveBeenCalledTimes(1);
+    expect(snapshotResponse.json()).toEqual({
+      snapshot: {
+        url: 'about:blank',
+        title: '',
+        frames: [],
+      },
+    });
+
+    const executeResponse = await app.inject({
+      method: 'POST',
+      url: `/sessions/${sessionId}/assistant/execute`,
+      payload: {
+        intent: {
+          action: 'click',
+          resolved: {},
+        },
+      },
+    });
+
+    expect(executeResponse.statusCode).toBe(200);
+    expect(runtimeController.executeAssistantIntent).toHaveBeenCalledTimes(1);
+    expect(executeResponse.json()).toMatchObject({
+      success: true,
+      output: 'ok',
+      step: {
+        action: 'click',
+      },
     });
   });
 });

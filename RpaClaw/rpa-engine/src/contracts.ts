@@ -32,6 +32,11 @@ export interface SessionRuntimeController {
   startSession(session: RuntimeSession): Promise<void>;
   activatePage(session: RuntimeSession, pageAlias: string): Promise<void>;
   navigate(session: RuntimeSession, url: string, pageAlias?: string): Promise<void>;
+  captureSnapshot(session: RuntimeSession): Promise<Record<string, unknown>>;
+  executeAssistantIntent(
+    session: RuntimeSession,
+    intent: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
   replay(
     session: RuntimeSession,
     actions: RuntimeAction[],

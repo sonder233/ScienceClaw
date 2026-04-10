@@ -1,6 +1,9 @@
 import httpx
 
 from backend.rpa.engine_models import (
+    EngineAssistantExecuteRequest,
+    EngineAssistantExecuteResponse,
+    EngineAssistantSnapshotResponse,
     EngineActivateTabRequest,
     EngineCodegenResponse,
     EngineHealthResponse,
@@ -82,6 +85,27 @@ class RPAEngineClient:
         if response.status_code != 200:
             raise RuntimeError("rpa engine session request failed")
         return EngineSessionEnvelope.model_validate(response.json()).model_dump()
+
+    async def capture_snapshot(self, session_id: str) -> dict:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{self._base_url}/sessions/{session_id}/assistant/snapshot",
+                headers=self._headers,
+            )
+        if response.status_code != 200:
+            raise RuntimeError("rpa engine session request failed")
+        return EngineAssistantSnapshotResponse.model_validate(response.json()).model_dump()
+
+    async def execute_assistant_intent(self, session_id: str, intent: dict) -> dict:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{self._base_url}/sessions/{session_id}/assistant/execute",
+                headers=self._headers,
+                json=EngineAssistantExecuteRequest(intent=intent).model_dump(),
+            )
+        if response.status_code != 200:
+            raise RuntimeError("rpa engine session request failed")
+        return EngineAssistantExecuteResponse.model_validate(response.json()).model_dump()
 
     async def generate_script(self, session_id: str, actions: list[dict], params: dict) -> dict:
         async with httpx.AsyncClient(timeout=30.0) as client:
