@@ -2,8 +2,11 @@ import httpx
 
 from backend.rpa.engine_models import (
     EngineActivateTabRequest,
+    EngineCodegenResponse,
     EngineHealthResponse,
     EngineNavigateRequest,
+    EngineReplayRequest,
+    EngineReplayResponse,
     EngineStartSessionRequest,
     EngineSessionEnvelope,
 )
@@ -79,3 +82,25 @@ class RPAEngineClient:
         if response.status_code != 200:
             raise RuntimeError("rpa engine session request failed")
         return EngineSessionEnvelope.model_validate(response.json()).model_dump()
+
+    async def generate_script(self, session_id: str, actions: list[dict], params: dict) -> dict:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{self._base_url}/sessions/{session_id}/codegen",
+                headers=self._headers,
+                json=EngineReplayRequest(actions=actions, params=params).model_dump(),
+            )
+        if response.status_code != 200:
+            raise RuntimeError("rpa engine session request failed")
+        return EngineCodegenResponse.model_validate(response.json()).model_dump()
+
+    async def replay(self, session_id: str, actions: list[dict], params: dict) -> dict:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{self._base_url}/sessions/{session_id}/replay",
+                headers=self._headers,
+                json=EngineReplayRequest(actions=actions, params=params).model_dump(),
+            )
+        if response.status_code != 200:
+            raise RuntimeError("rpa engine session request failed")
+        return EngineReplayResponse.model_validate(response.json()).model_dump()

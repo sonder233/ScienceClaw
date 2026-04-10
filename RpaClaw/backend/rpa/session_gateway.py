@@ -54,3 +54,11 @@ class RPASessionGateway:
     async def stop_session(self, session_id: str) -> dict:
         await self.ensure_engine_ready()
         return await self._client.stop_session(session_id)
+
+    async def generate_script(self, session_id: str, actions: list[dict], params: dict) -> dict:
+        await self.ensure_engine_ready()
+        return await self._client.generate_script(session_id, actions, params)
+
+    async def replay(self, session_id: str, actions: list[dict], params: dict) -> dict:
+        await self.ensure_engine_ready()
+        return await self._client.replay(session_id, actions, params)

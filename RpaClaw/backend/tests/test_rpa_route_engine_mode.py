@@ -1,6 +1,7 @@
 import copy
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -291,3 +292,123 @@ def test_stop_route_clears_node_mode_compat_state(monkeypatch):
     assert "session-1" not in manager._engine_sessions
     assert "session-1" not in manager._engine_locator_overrides
     assert ("stop_session", "session-1") in gateway.calls
+
+
+def test_generate_route_uses_manager_codegen_in_node_mode(monkeypatch):
+    class _FakeManager:
+        def __init__(self):
+            self.calls = []
+
+        async def get_session(self, session_id: str):
+            assert session_id == "session-1"
+            return SimpleNamespace(id=session_id, user_id="user-1", steps=[])
+
+        async def generate_script_with_engine(self, session_id: str, params: dict):
+            self.calls.append(("generate", session_id, params))
+            return "async def execute_skill(page, **kwargs):\n    await page.goto('https://example.com')\n"
+
+    fake_manager = _FakeManager()
+    monkeypatch.setattr(rpa_route, "rpa_manager", fake_manager)
+    monkeypatch.setattr(rpa_route.settings, "rpa_engine_mode", "node")
+    monkeypatch.setattr(
+        rpa_route.generator,
+        "generate_script",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy generator should not be used")),
+    )
+
+    client = _build_client()
+    response = client.post("/api/v1/rpa/session/session-1/generate", json={"params": {"url": {"original_value": "https://example.com"}}})
+
+    assert response.status_code == 200
+    assert response.json()["script"].startswith("async def execute_skill")
+    assert fake_manager.calls == [("generate", "session-1", {"url": {"original_value": "https://example.com"}})]
+
+
+def test_test_route_uses_manager_replay_in_node_mode(monkeypatch):
+    class _FakeManager:
+        def __init__(self):
+            self.calls = []
+
+        async def get_session(self, session_id: str):
+            assert session_id == "session-1"
+            return SimpleNamespace(id=session_id, user_id="user-1", sandbox_session_id="sandbox-1", steps=[])
+
+        async def replay_with_engine(self, session_id: str, params: dict):
+            self.calls.append(("replay", session_id, params))
+            return {
+                "result": {
+                    "success": False,
+                    "output": "SKILL_ERROR: replay execution unavailable",
+                    "error": "replay execution unavailable",
+                    "data": {},
+                },
+                "logs": ["Engine replay cannot execute without a runtime adapter"],
+                "script": "async def execute_skill(page, **kwargs):\n    return {}\n",
+                "plan": [],
+            }
+
+    fake_manager = _FakeManager()
+    monkeypatch.setattr(rpa_route, "rpa_manager", fake_manager)
+    monkeypatch.setattr(rpa_route.settings, "rpa_engine_mode", "node")
+    monkeypatch.setattr(
+        rpa_route.executor,
+        "execute",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy executor should not be used")),
+    )
+
+    client = _build_client()
+    response = client.post("/api/v1/rpa/session/session-1/test", json={"params": {}})
+
+    assert response.status_code == 200
+    assert response.json()["result"]["success"] is False
+    assert fake_manager.calls == [("replay", "session-1", {})]
+
+
+def test_save_route_uses_manager_codegen_in_node_mode(monkeypatch):
+    class _FakeManager:
+        def __init__(self):
+            self.calls = []
+            self.session = SimpleNamespace(id="session-1", user_id="user-1", status="recording", steps=[])
+
+        async def get_session(self, session_id: str):
+            assert session_id == "session-1"
+            return self.session
+
+        async def generate_script_with_engine(self, session_id: str, params: dict):
+            self.calls.append(("generate", session_id, params))
+            return "async def execute_skill(page, **kwargs):\n    await page.goto('https://example.com')\n"
+
+    fake_manager = _FakeManager()
+    exported = {}
+
+    async def fake_export_skill(user_id: str, skill_name: str, description: str, script: str, params: dict):
+        exported.update(
+            {
+                "user_id": user_id,
+                "skill_name": skill_name,
+                "description": description,
+                "script": script,
+                "params": params,
+            }
+        )
+        return skill_name
+
+    monkeypatch.setattr(rpa_route, "rpa_manager", fake_manager)
+    monkeypatch.setattr(rpa_route.settings, "rpa_engine_mode", "node")
+    monkeypatch.setattr(rpa_route.exporter, "export_skill", fake_export_skill)
+    monkeypatch.setattr(
+        rpa_route.generator,
+        "generate_script",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy generator should not be used")),
+    )
+
+    client = _build_client()
+    response = client.post(
+        "/api/v1/rpa/session/session-1/save",
+        json={"skill_name": "engine-skill", "description": "desc", "params": {"url": {"original_value": "https://example.com"}}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["skill_name"] == "engine-skill"
+    assert fake_manager.calls == [("generate", "session-1", {"url": {"original_value": "https://example.com"}})]
+    assert exported["script"].startswith("async def execute_skill")

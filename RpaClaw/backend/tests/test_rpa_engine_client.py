@@ -128,3 +128,28 @@ def test_session_control_calls_post_expected_payloads(monkeypatch):
         ("http://127.0.0.1:3310/sessions/session-1/navigate", {}, {"url": "docs.example.com"}),
         ("http://127.0.0.1:3310/sessions/session-1/stop", {}, None),
     ]
+
+
+def test_codegen_and_replay_calls_post_expected_payloads(monkeypatch):
+    codegen_payload = {"script": "async def execute_skill(page, **kwargs):\n    return {}\n"}
+    replay_payload = {
+        "result": {"success": False, "output": "SKILL_ERROR: unavailable", "error": "unavailable", "data": {}},
+        "logs": ["blocked"],
+        "script": "async def execute_skill(page, **kwargs):\n    return {}\n",
+        "plan": [],
+    }
+    clients = [
+        _FakeAsyncClient(_FakeResponse(status_code=200, payload=codegen_payload)),
+        _FakeAsyncClient(_FakeResponse(status_code=200, payload=replay_payload)),
+    ]
+    monkeypatch.setattr("backend.rpa.engine_client.httpx.AsyncClient", lambda *args, **kwargs: clients.pop(0))
+    client = RPAEngineClient(base_url="http://127.0.0.1:3310", auth_token="")
+    actions = [{"id": "action-1"}]
+    params = {"url": {"original_value": "https://example.com"}}
+
+    codegen = asyncio.run(client.generate_script("session-1", actions, params))
+    replay = asyncio.run(client.replay("session-1", actions, params))
+
+    assert codegen["script"].startswith("async def execute_skill")
+    assert replay["result"]["success"] is False
+    assert clients == []

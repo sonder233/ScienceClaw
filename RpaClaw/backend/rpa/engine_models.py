@@ -51,6 +51,29 @@ class EngineStartSessionRequest(BaseModel):
     sandboxSessionId: str = ""
 
 
+class EngineReplayRequest(BaseModel):
+    actions: list[dict[str, Any]] = Field(default_factory=list)
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class EngineCodegenResponse(BaseModel):
+    script: str
+
+
+class EngineReplayResult(BaseModel):
+    success: bool
+    output: str
+    error: str | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class EngineReplayResponse(BaseModel):
+    result: EngineReplayResult
+    logs: list[str] = Field(default_factory=list)
+    script: str = ""
+    plan: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class EngineModeConfig(BaseModel):
     mode: Literal["legacy", "remote", "local", "node"] = "legacy"
     base_url: str

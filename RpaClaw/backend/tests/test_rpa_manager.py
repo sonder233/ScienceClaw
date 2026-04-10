@@ -784,6 +784,139 @@ class RPASessionManagerEngineCompatibilityTests(unittest.IsolatedAsyncioTestCase
             ],
         )
 
+    async def test_generate_script_with_engine_uses_gateway_codegen(self):
+        gateway_calls = []
+
+        async def fake_gateway_get_session(_session_id: str):
+            return {"session": copy.deepcopy(self.engine_session)}
+
+        async def fake_gateway_generate_script(session_id: str, actions: list[dict], params: dict):
+            gateway_calls.append(("codegen", session_id, actions, params))
+            return {"script": "generated-script"}
+
+        self.manager._gateway = SimpleNamespace(
+            get_session=fake_gateway_get_session,
+            generate_script=fake_gateway_generate_script,
+        )
+
+        with patch.object(
+            MANAGER_MODULE,
+            "settings",
+            SimpleNamespace(rpa_engine_mode="node"),
+            create=True,
+        ):
+            script = await self.manager.generate_script_with_engine("session-1", {"url": {"original_value": "https://example.com"}})
+
+        self.assertEqual(script, "generated-script")
+        self.assertEqual(gateway_calls[0][0], "codegen")
+        self.assertEqual(gateway_calls[0][1], "session-1")
+        self.assertEqual(gateway_calls[0][3], {"url": {"original_value": "https://example.com"}})
+        self.assertEqual(gateway_calls[0][2][0]["id"], "action-1")
+
+    async def test_generate_script_with_engine_backfills_navigation_urls_and_switch_targets_from_legacy_steps(self):
+        gateway_calls = []
+        legacy_session = MANAGER_MODULE.RPASession(
+            id="session-legacy",
+            user_id="user-1",
+            sandbox_session_id="sandbox-1",
+            steps=[
+                MANAGER_MODULE.RPAStep(
+                    id="step-1",
+                    action="goto",
+                    url="https://example.com",
+                    tab_id="page-1",
+                ),
+                MANAGER_MODULE.RPAStep(
+                    id="step-2",
+                    action="switch_tab",
+                    tab_id="page-1",
+                    target_tab_id="page-2",
+                ),
+            ],
+        )
+        self.manager.sessions[legacy_session.id] = legacy_session
+
+        async def fake_gateway_generate_script(session_id: str, actions: list[dict], params: dict):
+            gateway_calls.append(("codegen", session_id, actions, params))
+            return {"script": "generated-script"}
+
+        self.manager._gateway = SimpleNamespace(generate_script=fake_gateway_generate_script)
+
+        with patch.object(
+            MANAGER_MODULE,
+            "settings",
+            SimpleNamespace(rpa_engine_mode="node"),
+            create=True,
+        ):
+            script = await self.manager.generate_script_with_engine("session-legacy", {})
+
+        self.assertEqual(script, "generated-script")
+        self.assertEqual(gateway_calls[0][0], "codegen")
+        self.assertEqual(gateway_calls[0][1], "session-legacy")
+        self.assertEqual(gateway_calls[0][2][0]["kind"], "navigate")
+        self.assertEqual(gateway_calls[0][2][0]["pageAlias"], "page-1")
+        self.assertEqual(gateway_calls[0][2][0]["input"]["url"], "https://example.com")
+        self.assertEqual(gateway_calls[0][2][1]["kind"], "openPage")
+        self.assertEqual(gateway_calls[0][2][1]["pageAlias"], "page-2")
+
+    async def test_replay_with_engine_uses_gateway_replay(self):
+        gateway_calls = []
+
+        async def fake_gateway_get_session(_session_id: str):
+            return {"session": copy.deepcopy(self.engine_session)}
+
+        async def fake_gateway_replay(session_id: str, actions: list[dict], params: dict):
+            gateway_calls.append(("replay", session_id, actions, params))
+            return {"result": {"success": False, "output": "SKILL_ERROR", "error": "blocked", "data": {}}, "logs": []}
+
+        self.manager._gateway = SimpleNamespace(
+            get_session=fake_gateway_get_session,
+            replay=fake_gateway_replay,
+        )
+
+        with patch.object(
+            MANAGER_MODULE,
+            "settings",
+            SimpleNamespace(rpa_engine_mode="node"),
+            create=True,
+        ):
+            result = await self.manager.replay_with_engine("session-1", {"x": {"original_value": "1"}})
+
+        self.assertFalse(result["result"]["success"])
+        self.assertEqual(gateway_calls[0][0], "replay")
+        self.assertEqual(gateway_calls[0][1], "session-1")
+        self.assertEqual(gateway_calls[0][3], {"x": {"original_value": "1"}})
+
+    def test_step_to_engine_action_carries_navigation_url_for_codegen_fallback(self):
+        action = self.manager._step_to_engine_action(
+            "session-1",
+            0,
+            {
+                "action": "goto",
+                "url": "https://example.com/docs",
+                "tab_id": "page-1",
+            },
+        )
+
+        self.assertEqual(action["kind"], "navigate")
+        self.assertEqual(action["pageAlias"], "page-1")
+        self.assertEqual(action["input"]["url"], "https://example.com/docs")
+        self.assertEqual(action["snapshot"]["url"], "https://example.com/docs")
+
+    def test_step_to_engine_action_uses_target_tab_alias_for_switch_tab_fallback(self):
+        action = self.manager._step_to_engine_action(
+            "session-1",
+            1,
+            {
+                "action": "switch_tab",
+                "tab_id": "page-1",
+                "target_tab_id": "page-2",
+            },
+        )
+
+        self.assertEqual(action["kind"], "openPage")
+        self.assertEqual(action["pageAlias"], "page-2")
+
 
 if __name__ == "__main__":
     unittest.main()

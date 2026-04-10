@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { RecordedAction } from '../action-model.js';
 import { generatePythonCode } from '../replay/codegen.js';
-import { buildReplayPlan } from '../replay/replay-runner.js';
+import { runReplay } from '../replay/replay-runner.js';
 
 const recordedActionSchema = z
   .object({
@@ -58,7 +58,7 @@ export async function registerReplayRoutes(app: FastifyInstance) {
 
     const actions = resolveActions(parsedBody.data, session.actions);
     return {
-      script: generatePythonCode(actions),
+      script: generatePythonCode(actions, parsedBody.data.params),
     };
   });
 
@@ -75,20 +75,6 @@ export async function registerReplayRoutes(app: FastifyInstance) {
     }
 
     const actions = resolveActions(parsedBody.data, session.actions);
-    const plan = buildReplayPlan(actions);
-    const script = generatePythonCode(actions);
-
-    return {
-      result: {
-        success: true,
-        output: 'SKILL_SUCCESS',
-        data: {
-          replayPlan: plan,
-        },
-      },
-      logs: [`Engine replay prepared ${plan.length} step(s)`],
-      plan,
-      script,
-    };
+    return runReplay(actions, parsedBody.data.params);
   });
 }

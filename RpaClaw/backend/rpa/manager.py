@@ -773,6 +773,90 @@ class RPASessionManager:
             for tab in self._compat_tabs.get(session_id, [])
         ]
 
+    @staticmethod
+    def _build_engine_locator(target: Any) -> dict[str, Any]:
+        if isinstance(target, dict):
+            selector = str(target.get("selector") or "")
+            return {"selector": selector, "locatorAst": target}
+
+        if isinstance(target, str):
+            stripped = target.strip()
+            if stripped.startswith("{") and stripped.endswith("}"):
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    selector = str(parsed.get("selector") or target)
+                    return {"selector": selector, "locatorAst": parsed}
+            return {"selector": target, "locatorAst": {}}
+
+        return {"selector": str(target or ""), "locatorAst": {}}
+
+    @staticmethod
+    def _map_step_action_to_engine_kind(step_action: str) -> str:
+        action = (step_action or "").strip()
+        return {
+            "goto": "navigate",
+            "navigate_click": "click",
+            "open_tab_click": "click",
+            "download_click": "click",
+            "download": "click",
+            "select": "selectOption",
+            "switch_tab": "openPage",
+            "close_tab": "closePage",
+        }.get(action, action or "click")
+
+    def _step_to_engine_action(self, session_id: str, index: int, step: Dict[str, Any]) -> dict[str, Any]:
+        signals = dict(step.get("signals") or {})
+        step_action = step.get("action", "")
+        page_alias = step.get("tab_id") or "page"
+        input_payload: Dict[str, Any] = {}
+        if step.get("value") is not None:
+            input_payload["value"] = step.get("value")
+        if step_action in {"navigate", "goto"} and step.get("url"):
+            input_payload["url"] = step.get("url")
+        if step_action == "switch_tab":
+            page_alias = step.get("target_tab_id") or page_alias
+        if step_action == "open_tab_click":
+            signals.setdefault("popup", {"targetPageAlias": step.get("target_tab_id") or step.get("tab_id") or "page"})
+        if step_action == "navigate_click":
+            signals.setdefault("navigation", {"url": step.get("url", "")})
+        if step_action in {"download_click", "download"}:
+            signals.setdefault("download", {"suggestedFilename": step.get("value", "")})
+        if step_action == "close_tab" and step.get("target_tab_id"):
+            signals.setdefault("focusPage", {"pageAlias": step.get("target_tab_id")})
+
+        return {
+            "id": step.get("id") or f"{session_id}-{index + 1}",
+            "sessionId": session_id,
+            "seq": index + 1,
+            "kind": self._map_step_action_to_engine_kind(step_action),
+            "pageAlias": page_alias,
+            "framePath": list(step.get("frame_path") or []),
+            "locator": self._build_engine_locator(step.get("target")),
+            "locatorAlternatives": [],
+            "signals": signals,
+            "input": input_payload,
+            "timing": {},
+            "snapshot": {
+                **dict(step.get("element_snapshot") or {}),
+                **({"url": step.get("url")} if step.get("url") else {}),
+            },
+            "status": "recorded",
+        }
+
+    def _resolve_engine_actions(self, session_id: str, session: RPASession) -> list[dict[str, Any]]:
+        cached = self._engine_sessions.get(session_id)
+        if isinstance(cached, dict):
+            merged = self._merge_engine_session_payload(copy.deepcopy(cached))
+            actions = merged.get("actions")
+            if isinstance(actions, list):
+                return actions
+
+        steps = [step.model_dump() for step in session.steps]
+        return [self._step_to_engine_action(session_id, index, step) for index, step in enumerate(steps)]
+
     def _merge_engine_session_payload(self, session_payload: dict[str, Any]) -> dict[str, Any]:
         session_id = session_payload.get("id")
         merged = copy.deepcopy(self._engine_sessions.get(session_id, {})) if session_id else {}
@@ -896,6 +980,35 @@ class RPASessionManager:
         if not session_payload.get("status") and session_payload.get("mode"):
             session_payload["status"] = session_payload["mode"]
         return session_payload
+
+    async def generate_script_with_engine(self, session_id: str, params: Dict[str, Any] | None = None) -> str:
+        if not self._is_engine_mode():
+            raise RuntimeError("engine codegen is only available in node mode")
+        session = self.sessions.get(session_id)
+        if session is None:
+            session = await self.get_session(session_id)
+        if session is None:
+            raise ValueError(f"Session {session_id} not found")
+        payload = await self._gateway.generate_script(
+            session_id,
+            self._resolve_engine_actions(session_id, session),
+            params or {},
+        )
+        return str(payload.get("script", ""))
+
+    async def replay_with_engine(self, session_id: str, params: Dict[str, Any] | None = None) -> dict[str, Any]:
+        if not self._is_engine_mode():
+            raise RuntimeError("engine replay is only available in node mode")
+        session = self.sessions.get(session_id)
+        if session is None:
+            session = await self.get_session(session_id)
+        if session is None:
+            raise ValueError(f"Session {session_id} not found")
+        return await self._gateway.replay(
+            session_id,
+            self._resolve_engine_actions(session_id, session),
+            params or {},
+        )
 
     def attach_context(self, session_id: str, context: BrowserContext):
         self._contexts[session_id] = context
