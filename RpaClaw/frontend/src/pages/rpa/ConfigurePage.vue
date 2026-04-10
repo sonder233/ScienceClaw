@@ -28,6 +28,8 @@ interface ParsedLocator {
   value?: string;
   parent?: ParsedLocator;
   child?: ParsedLocator;
+  base?: ParsedLocator;
+  index?: number;
 }
 
 interface LocatorCandidate {
@@ -113,6 +115,9 @@ const formatLocator = (raw: unknown): string => {
   if (locator.method === 'nested') {
     return `${formatLocator(locator.parent)} >> ${formatLocator(locator.child)}`;
   }
+  if (locator.method === 'nth') {
+    return `${formatLocator(locator.base)} >> nth=${locator.index}`;
+  }
   if (locator.method === 'css') return locator.value || 'css';
   return `${locator.method || 'locator'}:${locator.value || locator.name || ''}`;
 };
@@ -122,24 +127,30 @@ const formatFramePath = (framePath?: string[]) => {
   return framePath.join(' -> ');
 };
 
+const VALIDATION_LABELS: Record<string, string> = {
+  ok: 'Strict match',
+  ambiguous: 'Ambiguous / not unique',
+  fallback: 'Fallback',
+  warning: 'Warning',
+  broken: 'Broken',
+};
+
+const VALIDATION_CLASS_MAP: Record<string, string> = {
+  ok: 'bg-emerald-100 text-emerald-700 ring-1 ring-emerald-200',
+  ambiguous: 'bg-amber-100 text-amber-700 ring-1 ring-amber-200',
+  fallback: 'bg-amber-100 text-amber-700 ring-1 ring-amber-200',
+  warning: 'bg-amber-100 text-amber-700 ring-1 ring-amber-200',
+  broken: 'bg-rose-100 text-rose-700 ring-1 ring-rose-200',
+};
+
 const getValidationLabel = (status?: string) => {
-  const map: Record<string, string> = {
-    ok: '通过',
-    fallback: '回退',
-    warning: '警告',
-    broken: '失效',
-  };
-  return map[status || ''] || (status || '未知');
+  if (!status) return 'Unknown';
+  return VALIDATION_LABELS[status] || status.replace(/_/g, ' ');
 };
 
 const getValidationClass = (status?: string) => {
-  const map: Record<string, string> = {
-    ok: 'bg-emerald-100 text-emerald-700 ring-1 ring-emerald-200',
-    fallback: 'bg-amber-100 text-amber-700 ring-1 ring-amber-200',
-    warning: 'bg-amber-100 text-amber-700 ring-1 ring-amber-200',
-    broken: 'bg-rose-100 text-rose-700 ring-1 ring-rose-200',
-  };
-  return map[status || ''] || 'bg-gray-100 text-gray-700 ring-1 ring-gray-200';
+  if (!status) return 'bg-gray-100 text-gray-700 ring-1 ring-gray-200';
+  return VALIDATION_CLASS_MAP[status] || 'bg-gray-100 text-gray-700 ring-1 ring-gray-200';
 };
 
 const getActionLabel = (action: string) => {
@@ -194,17 +205,39 @@ const getSelectedCandidate = (step: StepItem): LocatorCandidate | null => {
   return candidates.find((candidate) => candidate.selected) || candidates[0] || null;
 };
 
+const formatCandidateMatchText = (candidate: LocatorCandidate): string => {
+  const strictCount = candidate.strict_match_count;
+  const visibleCount = candidate.visible_match_count;
+
+  if (typeof strictCount === 'number' && strictCount > 0) {
+    return strictCount === 1 ? 'strict match' : `${strictCount} strict matches`;
+  }
+
+  if (typeof visibleCount === 'number') {
+    const plural = visibleCount === 1 ? '' : 'es';
+    return `${visibleCount} visible match${plural}`;
+  }
+
+  if (typeof strictCount === 'number') {
+    const plural = strictCount === 1 ? '' : 'es';
+    return `${strictCount} strict match${plural}`;
+  }
+
+  return '';
+};
+
 const getCandidateSummary = (step: StepItem) => {
+  const candidates = step.locator_candidates || [];
+  const total = candidates.length;
+  if (!total) return '';
   const selected = getSelectedCandidate(step);
-  const total = step.locator_candidates?.length || 0;
-  if (!selected && !total) return '';
+  if (!selected) return `${total} candidate${total === 1 ? '' : 's'}`;
 
   const summary: string[] = [];
-  if (selected?.kind) summary.push(`当前 ${selected.kind}`);
-  if (typeof selected?.score === 'number') summary.push(`分数 ${selected.score}`);
-
-  const alternatives = Math.max(total - (selected ? 1 : 0), 0);
-  if (alternatives > 0) summary.push(`另有 ${alternatives} 个备选`);
+  if (selected.kind) summary.push(`Current ${selected.kind}`);
+  const matchText = formatCandidateMatchText(selected);
+  if (matchText) summary.push(matchText);
+  summary.push(`${total} candidate${total === 1 ? '' : 's'}`);
 
   return summary.join(' · ');
 };
