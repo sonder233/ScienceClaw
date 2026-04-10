@@ -418,6 +418,9 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
     actions: RuntimeAction[],
     params: Record<string, unknown>,
   ): Promise<RuntimeReplayResult> {
+    if (!this.#runtimes.has(session.id)) {
+      await this.startSession(session);
+    }
     const runtime = this.#requireRuntime(session.id);
     const typedActions = actions as RecordedAction[];
     const results: Record<string, unknown> = {};

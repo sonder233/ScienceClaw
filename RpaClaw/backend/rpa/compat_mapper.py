@@ -24,6 +24,57 @@ def to_legacy_locator_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _action_target_label(action: dict[str, Any]) -> str:
+    snapshot = action.get("snapshot") or {}
+    locator = action.get("locator") or {}
+    for candidate in (
+        snapshot.get("name"),
+        snapshot.get("label"),
+        snapshot.get("text"),
+        snapshot.get("placeholder"),
+        snapshot.get("title"),
+        locator.get("selector"),
+        snapshot.get("tag"),
+    ):
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return "目标元素"
+
+
+def _action_description(action: dict[str, Any]) -> str | None:
+    existing = action.get("description")
+    if existing:
+        return str(existing)
+
+    kind = str(action.get("kind") or action.get("action") or "").strip()
+    input_payload = action.get("input") or {}
+    snapshot = action.get("snapshot") or {}
+    value = str(input_payload.get("value") or input_payload.get("text") or "").strip()
+    url = str(input_payload.get("url") or snapshot.get("url") or action.get("url") or "").strip()
+    target = _action_target_label(action)
+
+    if kind == "navigate":
+        return f"导航到 {url}" if url else "导航页面"
+    if kind == "click":
+        return f"点击 {target}"
+    if kind == "fill":
+        return f"输入 {value} 到 {target}" if value else f"输入到 {target}"
+    if kind == "press":
+        return f"按下 {value} 于 {target}" if value else f"按键于 {target}"
+    if kind == "selectOption":
+        return f"选择 {value} 于 {target}" if value else f"选择 {target}"
+    if kind == "check":
+        return f"勾选 {target}"
+    if kind == "uncheck":
+        return f"取消勾选 {target}"
+    if kind == "openPage":
+        return f"切换到页面 {action.get('pageAlias') or target}"
+    if kind == "closePage":
+        return f"关闭页面 {action.get('pageAlias') or target}"
+    return None
+
+
 def to_legacy_step(action: dict[str, Any]) -> dict[str, Any]:
     popup = (action.get("signals") or {}).get("popup") or {}
     input_payload = action.get("input") or {}
@@ -42,7 +93,7 @@ def to_legacy_step(action: dict[str, Any]) -> dict[str, Any]:
         "element_snapshot": snapshot,
         "value": input_payload.get("value") or input_payload.get("text"),
         "screenshot_url": snapshot.get("screenshotUrl"),
-        "description": action.get("description"),
+        "description": _action_description(action),
         "tag": snapshot.get("tag"),
         "label": snapshot.get("label"),
         "url": snapshot.get("url") or action.get("url"),

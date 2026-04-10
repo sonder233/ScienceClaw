@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue';
+import { computed, ref, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen, Globe } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
@@ -17,6 +17,12 @@ const loading = ref(true);
 const error = ref<string | null>(null);
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
+const previewViewportRef = ref<HTMLElement | null>(null);
+const previewFrameSize = ref({ width: 1280, height: 720 });
+const previewViewportSize = ref({ width: 0, height: 0 });
+const PREVIEW_TABBAR_HEIGHT = 44;
+const PREVIEW_TOOLBAR_HEIGHT = 40;
+let previewResizeObserver: ResizeObserver | null = null;
 let screencastWs: WebSocket | null = null;
 let lastMoveTime = 0;
 interface BrowserTab {
@@ -69,12 +75,59 @@ const formatFramePath = (framePath?: string[]) => {
   return framePath.join(' -> ');
 };
 
+const getRecordedStepTarget = (step: any): string => {
+  const snapshot = step.element_snapshot || {};
+  const namedTarget = snapshot.name || snapshot.label || snapshot.text || snapshot.placeholder || snapshot.title;
+  if (namedTarget) return String(namedTarget);
+  const locator = formatLocator(step.target || step.label || '');
+  return locator === 'No locator' ? '目标元素' : locator;
+};
+
+const formatRecordedStepTitle = (step: any): string => {
+  if (step.description) return step.description;
+  if (step.action === 'navigate') {
+    const url = step.url || step.element_snapshot?.url;
+    return url ? `导航到 ${url}` : '导航页面';
+  }
+  if (step.action === 'click') {
+    return `点击 ${getRecordedStepTarget(step)}`;
+  }
+  if (step.action === 'fill') {
+    return `输入到 ${getRecordedStepTarget(step)}`;
+  }
+  return step.action || '已记录操作';
+};
+
+const formatRecordedStepDetails = (step: any): string => {
+  if (step.source === 'ai') return step.prompt || step.description || 'AI 操作';
+  if (step.action === 'navigate') {
+    return step.url || step.element_snapshot?.url || '已记录页面导航';
+  }
+  return `目标: ${getRecordedStepTarget(step)}`;
+};
+
 const mapServerSteps = (serverSteps: any[]) => ([
   { id: '0', title: '环境就绪', description: '已成功启动 Playwright 浏览器', status: 'completed' },
   ...serverSteps.map((s: any, i: number) => ({
     id: String(i + 1),
     title: s.description || s.action,
     description: s.source === 'ai' ? (s.prompt || s.description || 'AI 操作') : `${s.action} -> ${formatLocator(s.target || s.label || '')}`,
+    status: 'completed',
+    source: s.source || 'record',
+    sensitive: s.sensitive || false,
+    locatorSummary: formatLocator(s.target),
+    frameSummary: formatFramePath(s.frame_path),
+    validationStatus: s.validation?.status || '',
+    validationDetails: s.validation?.details || '',
+  }))
+]);
+
+const buildRecorderSteps = (serverSteps: any[]) => ([
+  { id: '0', title: '环境就绪', description: '已成功启动 Playwright 浏览器', status: 'completed' },
+  ...serverSteps.map((s: any, i: number) => ({
+    id: String(i + 1),
+    title: formatRecordedStepTitle(s),
+    description: formatRecordedStepDetails(s),
     status: 'completed',
     source: s.source || 'record',
     sensitive: s.sensitive || false,
@@ -139,6 +192,32 @@ const cleanupAssistantText = (text: string, script = '') => {
   return next.trim();
 };
 
+const updatePreviewViewportSize = () => {
+  const element = previewViewportRef.value;
+  previewViewportSize.value = {
+    width: element?.clientWidth || 0,
+    height: element?.clientHeight || 0,
+  };
+};
+
+const previewShellStyle = computed(() => {
+  const chromeHeight = PREVIEW_TABBAR_HEIGHT + PREVIEW_TOOLBAR_HEIGHT;
+  const intrinsicWidth = previewFrameSize.value.width || 1280;
+  const intrinsicHeight = (previewFrameSize.value.height || 720) + chromeHeight;
+  const availableWidth = previewViewportSize.value.width;
+  const availableHeight = previewViewportSize.value.height;
+
+  if (!availableWidth || !availableHeight) {
+    return {};
+  }
+
+  const scale = Math.min(availableWidth / intrinsicWidth, availableHeight / intrinsicHeight);
+  return {
+    width: `${Math.max(1, Math.floor(intrinsicWidth * scale))}px`,
+    height: `${Math.max(1, Math.floor(intrinsicHeight * scale))}px`,
+  };
+});
+
 const initSession = async () => {
   try {
     loading.value = true;
@@ -178,7 +257,7 @@ const startPollingSteps = () => {
       const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
       const serverSteps = resp.data.session?.steps || [];
       if (serverSteps.length > 0) {
-        steps.value = mapServerSteps(serverSteps);
+        steps.value = buildRecorderSteps(serverSteps);
       }
     } catch (err) {
       // Ignore polling errors
@@ -197,6 +276,13 @@ const startTimer = () => {
 };
 
 onMounted(() => {
+  updatePreviewViewportSize();
+  if (typeof ResizeObserver !== 'undefined') {
+    previewResizeObserver = new ResizeObserver(() => updatePreviewViewportSize());
+    if (previewViewportRef.value) {
+      previewResizeObserver.observe(previewViewportRef.value);
+    }
+  }
   initSession();
 });
 
@@ -207,6 +293,8 @@ onBeforeUnmount(() => {
     screencastWs.close();
     screencastWs = null;
   }
+  previewResizeObserver?.disconnect();
+  previewResizeObserver = null;
 });
 
 const getModifiers = (e: MouseEvent | KeyboardEvent | WheelEvent): number => {
@@ -218,7 +306,7 @@ const getModifiers = (e: MouseEvent | KeyboardEvent | WheelEvent): number => {
   return mask;
 };
 
-const drawFrame = (base64Data: string, _metadata: { width: number; height: number }) => {
+const drawFrame = (base64Data: string, metadata: { width: number; height: number }) => {
   const canvas = canvasRef.value;
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
@@ -226,6 +314,10 @@ const drawFrame = (base64Data: string, _metadata: { width: number; height: numbe
 
   const img = new Image();
   img.onload = () => {
+    previewFrameSize.value = {
+      width: metadata?.width || img.naturalWidth || previewFrameSize.value.width,
+      height: metadata?.height || img.naturalHeight || previewFrameSize.value.height,
+    };
     // 同步绘图缓冲区尺寸与图片原始尺寸
     if (canvas.width !== img.naturalWidth) canvas.width = img.naturalWidth;
     if (canvas.height !== img.naturalHeight) canvas.height = img.naturalHeight;
@@ -410,7 +502,7 @@ const deleteStep = async (stepIndex: number) => {
     await apiClient.delete(`/rpa/session/${sessionId.value}/step/${stepIndex}`);
     const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
     const serverSteps = resp.data.session?.steps || [];
-    steps.value = mapServerSteps(serverSteps);
+    steps.value = buildRecorderSteps(serverSteps);
   } catch (err) {
     console.error('Failed to delete step:', err);
   }
@@ -674,8 +766,9 @@ const sendMessage = async () => {
       </aside>
 
       <!-- Center: Screencast Viewport -->
-      <main class="flex-1 bg-[#f5f6f7] p-8 flex flex-col min-w-0">
-        <div class="flex-1 bg-[#1e1e1e] rounded-2xl shadow-2xl relative overflow-hidden flex flex-col border border-gray-800">
+      <main class="flex-1 bg-[#f5f6f7] p-8 flex flex-col min-w-0 overflow-hidden">
+        <div ref="previewViewportRef" class="flex-1 min-h-0 flex items-center justify-center">
+        <div class="bg-[#1e1e1e] rounded-2xl shadow-2xl relative overflow-hidden flex flex-col border border-gray-800 shrink-0" :style="previewShellStyle">
           <div class="h-11 bg-[#cfd3d8] flex items-end px-3 gap-2 flex-shrink-0 overflow-x-auto">
             <button
               v-for="tab in tabs"
@@ -714,7 +807,7 @@ const sendMessage = async () => {
             <canvas
               v-if="sessionId"
               ref="canvasRef"
-              class="w-full h-full object-contain cursor-default"
+              class="block w-full h-full cursor-default"
               tabindex="0"
               @click="focusCanvas"
               @mousedown="sendInputEvent"
@@ -739,6 +832,7 @@ const sendMessage = async () => {
               <span class="text-white text-[10px] font-bold tracking-wider uppercase">实时 CDP 串流</span>
             </div>
           </div>
+        </div>
         </div>
 
         <div class="mt-6 flex justify-center gap-4">

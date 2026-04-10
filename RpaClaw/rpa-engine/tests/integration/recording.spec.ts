@@ -204,11 +204,14 @@ class FakeBrowser {
   async close() {}
 }
 
-function createControllerHarness() {
+function createControllerHarness(pageCount = 1) {
   const interactions: string[] = [];
   const popupPage = new FakePage(interactions, 'Popup', 'https://example.com/popup');
-  const rootPage = new FakePage(interactions, 'Root', 'about:blank', popupPage);
-  const context = new FakeContext([rootPage]);
+  const pages = Array.from({ length: pageCount }, (_, index) =>
+    new FakePage(interactions, `Root ${index + 1}`, 'about:blank', index === 0 ? popupPage : null),
+  );
+  const rootPage = pages[0];
+  const context = new FakeContext(pages);
   const browser = new FakeBrowser(context);
   const controller = new PlaywrightSessionRuntimeController({
     async launchBrowser() {
@@ -439,6 +442,42 @@ describe('PlaywrightSessionRuntimeController integration', () => {
       },
       status: 'recorded',
     });
+  });
+
+  it('reinitializes a stopped runtime before replaying actions', async () => {
+    const { controller, interactions } = createControllerHarness(2);
+    const session: RuntimeSession = createRuntimeSession({ userId: 'u1', sandboxSessionId: 'sandbox-1' });
+
+    await controller.startSession(session);
+    await controller.stopSession(session.id);
+
+    const result = await controller.replay(
+      session,
+      [
+        {
+          id: 'action-1',
+          sessionId: session.id,
+          seq: 1,
+          kind: 'navigate',
+          pageAlias: 'page',
+          framePath: [],
+          locator: {
+            selector: '',
+            locatorAst: { kind: 'url' },
+          },
+          locatorAlternatives: [],
+          signals: {},
+          input: { url: 'https://example.com/replay' },
+          timing: {},
+          snapshot: { url: 'https://example.com/replay' },
+          status: 'recorded',
+        },
+      ],
+      {},
+    );
+
+    expect(result.success).toBe(true);
+    expect(interactions).toContain('goto:https://example.com/replay');
   });
 
   it('records click actions after navigating a live page through dispatched mouse input', async () => {
