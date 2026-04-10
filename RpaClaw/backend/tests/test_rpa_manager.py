@@ -291,6 +291,58 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(updated.locator_candidates[0]["selected"])
         self.assertTrue(updated.locator_candidates[1]["selected"])
 
+    async def test_select_step_locator_candidate_supports_nth_locator_payload(self):
+        await self.manager.add_step(
+            self.session.id,
+            {
+                "action": "click",
+                "target": json.dumps({"method": "role", "role": "button", "name": "Save"}),
+                "frame_path": [],
+                "locator_candidates": [
+                    {
+                        "kind": "role",
+                        "score": 100,
+                        "strict_match_count": 2,
+                        "visible_match_count": 2,
+                        "selected": True,
+                        "locator": {"method": "role", "role": "button", "name": "Save"},
+                        "reason": "strict matches = 2",
+                    },
+                    {
+                        "kind": "role",
+                        "score": 10100,
+                        "strict_match_count": 1,
+                        "visible_match_count": 1,
+                        "selected": False,
+                        "locator": {"method": "role", "role": "button", "name": "Save"},
+                        "nth": 1,
+                        "reason": "strict nth match for current target",
+                    },
+                ],
+                "validation": {"status": "fallback"},
+                "value": "",
+                "label": "",
+                "tag": "BUTTON",
+                "url": "https://example.com",
+                "description": "Click Save",
+                "sensitive": False,
+                "tab_id": "tab-1",
+            },
+        )
+
+        updated = await self.manager.select_step_locator_candidate(self.session.id, 0, 1)
+
+        self.assertEqual(
+            json.loads(updated.target),
+            {
+                "method": "nth",
+                "locator": {"method": "role", "role": "button", "name": "Save"},
+                "index": 1,
+            },
+        )
+        self.assertFalse(updated.locator_candidates[0]["selected"])
+        self.assertTrue(updated.locator_candidates[1]["selected"])
+
     def test_capture_js_includes_frame_path_collection(self):
         self.assertIn("frame_path", MANAGER_MODULE.CAPTURE_JS)
         self.assertIn("window.frameElement", MANAGER_MODULE.CAPTURE_JS)
@@ -315,6 +367,19 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         )[0]
         self.assertIn("var el = rememberActiveTarget(e.target);", input_block)
         self.assertNotIn("resolveActiveTarget(e.target)", input_block)
+
+    def test_capture_js_builds_nth_locator_payload_for_ambiguous_candidates(self):
+        js = MANAGER_MODULE.CAPTURE_JS
+        self.assertIn("function buildNthLocator(c, nthIndex)", js)
+        self.assertIn("method:'nth'", js)
+        self.assertIn("index:nthIndex", js)
+
+    def test_capture_js_fallback_candidate_uses_real_match_count(self):
+        js = MANAGER_MODULE.CAPTURE_JS
+        self.assertIn("var primaryMatchCount = countLocatorMatches(primary);", js)
+        fallback_block = js.split("if (!selectedPayload)", 1)[1].split("candidatePayloads.push", 1)[0]
+        self.assertIn("strict_match_count: primaryMatchCount", fallback_block)
+        self.assertNotIn("strict_match_count: 1", fallback_block)
 
     async def test_register_page_bootstraps_context_recorder_once(self):
         context = _FakeContext()

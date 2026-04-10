@@ -288,6 +288,7 @@ CAPTURE_JS = r"""
     function collectLocatorCandidates(el) {
         el = retarget(el);
         var candidates = [];
+        var candidatePayloads = [];
         var tag = el.tagName;
         var role = getRole(el);
         var name = accessibleName(el);
@@ -351,27 +352,60 @@ CAPTURE_JS = r"""
         }
 
         candidates.sort(function(a,b){ return a.s - b.s; });
-        return candidates.map(function(c) { return buildCandidateMeta(c); });
+        for (var i = 0; i < candidates.length; i++) {
+            var payloads = buildCandidateMeta(candidates[i], el);
+            for (var j = 0; j < payloads.length; j++) {
+                candidatePayloads.push(payloads[j]);
+            }
+        }
+        return candidatePayloads;
     }
 
-    function buildCandidateMeta(c) {
-        var matchCount = countCandidateMatches(c);
-        return {
+    function buildCandidateMeta(c, targetEl) {
+        var matchInfo = collectCandidateMatchInfo(c, targetEl);
+        var payloads = [{
             kind: c.m,
             score: c.s,
-            strict_match_count: matchCount,
-            visible_match_count: matchCount,
+            strict_match_count: matchInfo.count,
+            visible_match_count: matchInfo.count,
             selected: false,
             locator: formatCandidate(c),
-            reason: matchCount === 1 ? 'strict unique match' : ('strict matches = ' + matchCount)
-        };
+            reason: matchInfo.count === 1 ? 'strict unique match' : ('strict matches = ' + matchInfo.count)
+        }];
+
+        if (matchInfo.count > 1 && matchInfo.targetIndex >= 0) {
+            payloads.push({
+                kind: 'nth',
+                score: c.s + S_NTH + matchInfo.targetIndex,
+                strict_match_count: 1,
+                visible_match_count: 1,
+                selected: false,
+                locator: buildNthLocator(c, matchInfo.targetIndex),
+                nth: matchInfo.targetIndex,
+                reason: 'strict nth match (' + (matchInfo.targetIndex + 1) + ' of ' + matchInfo.count + ')'
+            });
+        }
+
+        return payloads;
     }
 
-    function countCandidateMatches(c) {
+    function collectCandidateMatchInfo(c, targetEl) {
+        var all = document.querySelectorAll('*');
+        var count = 0;
+        var targetIndex = -1;
+        for (var i = 0; i < all.length; i++) {
+            if (!matchesCandidate(all[i], c)) continue;
+            if (all[i] === targetEl) targetIndex = count;
+            count++;
+        }
+        return {count: count, targetIndex: targetIndex};
+    }
+
+    function countLocatorMatches(locator) {
         var all = document.querySelectorAll('*');
         var count = 0;
         for (var i = 0; i < all.length; i++) {
-            if (matchesCandidate(all[i], c)) count++;
+            if (matchesLocator(all[i], locator)) count++;
         }
         return count;
     }
@@ -379,6 +413,7 @@ CAPTURE_JS = r"""
     function buildLocatorBundle(el) {
         var primary = generateLocator(el);
         var candidatePayloads = collectLocatorCandidates(el);
+        var primaryMatchCount = countLocatorMatches(primary);
         var primaryJson = JSON.stringify(primary);
         var selectedPayload = null;
 
@@ -394,11 +429,15 @@ CAPTURE_JS = r"""
             selectedPayload = {
                 kind: primary.method || 'css',
                 score: S_FALLBACK,
-                strict_match_count: 1,
-                visible_match_count: 1,
+                strict_match_count: primaryMatchCount,
+                visible_match_count: primaryMatchCount,
                 selected: true,
                 locator: primary,
-                reason: primary.method === 'nested' ? 'scoped parent-child fallback' : 'selected generated locator'
+                reason: primaryMatchCount === 1
+                    ? 'strict unique generated locator'
+                    : (primary.method === 'nested'
+                        ? 'scoped parent-child fallback'
+                        : ('generated locator strict matches = ' + primaryMatchCount))
             };
             candidatePayloads.push(selectedPayload);
         }
@@ -490,6 +529,10 @@ CAPTURE_JS = r"""
         return {method:'css', value:'body'};
     }
 
+    function buildNthLocator(c, nthIndex) {
+        return {method:'nth', locator:formatCandidate(c), index:nthIndex};
+    }
+
     function matchesCandidate(el, c) {
         if (!el || !c) return false;
         if (c.m === 'role' || c.m === 'role_only') {
@@ -508,6 +551,62 @@ CAPTURE_JS = r"""
         if (c.m === 'text') return norm(el.textContent) === c.v && el.children.length === 0;
         if (c.m === 'css' && c.sel) {
             try { return el.matches(c.sel); } catch(e) { return false; }
+        }
+        return false;
+    }
+
+    function matchesLocator(el, locator) {
+        if (!el || !locator || typeof locator !== 'object') return false;
+        var method = locator.method || 'css';
+
+        if (method === 'nested') {
+            var child = locator.child || {};
+            var parent = locator.parent || {};
+            if (!matchesLocator(el, child)) return false;
+            var cur = el.parentElement;
+            while (cur) {
+                if (matchesLocator(cur, parent)) return true;
+                cur = cur.parentElement;
+            }
+            return false;
+        }
+
+        if (method === 'nth') {
+            var base = locator.locator || locator.base;
+            var index = parseInt(locator.index, 10);
+            if (!base || isNaN(index) || index < 0) return false;
+            var all = document.querySelectorAll('*');
+            var matchedIndex = 0;
+            for (var i = 0; i < all.length; i++) {
+                if (!matchesLocator(all[i], base)) continue;
+                if (all[i] === el) return matchedIndex === index;
+                matchedIndex++;
+            }
+            return false;
+        }
+
+        if (method === 'role') {
+            var role = locator.role || '';
+            var name = locator.name || '';
+            if (getRole(el) !== role) return false;
+            if (!name) return true;
+            return accessibleName(el) === name;
+        }
+
+        if (method === 'testid') {
+            var tid = el.getAttribute('data-testid') || el.getAttribute('data-test-id')
+                || el.getAttribute('data-test') || el.getAttribute('data-cy') || '';
+            return norm(tid) === norm(locator.value || '');
+        }
+
+        if (method === 'placeholder') return norm(el.getAttribute('placeholder')) === norm(locator.value || '');
+        if (method === 'label') return accessibleName(el) === norm(locator.value || '');
+        if (method === 'alt') return norm(el.getAttribute('alt')) === norm(locator.value || '');
+        if (method === 'title') return norm(el.getAttribute('title')) === norm(locator.value || '');
+        if (method === 'text') return norm(el.textContent) === norm(locator.value || '') && el.children.length === 0;
+        if (method === 'css') {
+            var selector = locator.value || '';
+            try { return !!selector && el.matches(selector); } catch(e) { return false; }
         }
         return false;
     }
@@ -1259,13 +1358,34 @@ class RPASessionManager:
 
         selected_candidate = step.locator_candidates[candidate_index]
         locator = selected_candidate.get("locator")
-        if not locator:
+        if not isinstance(locator, dict):
             raise ValueError("Locator candidate is missing locator payload")
+
+        nth_value = selected_candidate.get("nth")
+        if nth_value is not None and locator.get("method") != "nth":
+            try:
+                nth_index = int(nth_value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Locator candidate nth index is invalid") from exc
+            if nth_index < 0:
+                raise ValueError("Locator candidate nth index is invalid")
+            locator = {"method": "nth", "locator": locator, "index": nth_index}
+            selected_candidate["locator"] = locator
+        elif locator.get("method") == "nth" and "locator" not in locator and "base" in locator:
+            normalized_locator = dict(locator)
+            normalized_locator["locator"] = normalized_locator.pop("base")
+            locator = normalized_locator
+            selected_candidate["locator"] = locator
 
         step.target = json.dumps(locator)
         if step.validation:
             step.validation["selected_candidate_index"] = candidate_index
             step.validation["selected_candidate_kind"] = selected_candidate.get("kind", "")
+            strict_match_count = selected_candidate.get("strict_match_count")
+            if isinstance(strict_match_count, int):
+                step.validation["status"] = "ok" if strict_match_count == 1 else "fallback"
+            if selected_candidate.get("reason"):
+                step.validation["details"] = selected_candidate["reason"]
         await self._broadcast_step(session_id, step)
         return step
 
