@@ -398,6 +398,13 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
   }
 
   async startSession(session: RuntimeSession): Promise<void> {
+    await this.#initializeRuntime(session, { enableRecorder: true });
+  }
+
+  async #initializeRuntime(
+    session: RuntimeSession,
+    options: { enableRecorder: boolean },
+  ): Promise<void> {
     await this.stopSession(session.id);
     this.#resetSessionPages(session);
     const browser = await this.#driver.launchBrowser();
@@ -408,7 +415,9 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
       pages: new Map(),
       activePageAlias: 'page',
     };
-    await this.#configureRecorder(session, runtime);
+    if (options.enableRecorder) {
+      await this.#configureRecorder(session, runtime);
+    }
     const page = await context.newPage();
     runtime.pages.set('page', page);
     this.#runtimes.set(session.id, runtime);
@@ -461,9 +470,9 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
     actions: RuntimeAction[],
     params: Record<string, unknown>,
   ): Promise<RuntimeReplayResult> {
-    await this.startSession(session);
+    await this.#initializeRuntime(session, { enableRecorder: false });
     const runtime = this.#requireRuntime(session.id);
-    const typedActions = actions as RecordedAction[];
+    const typedActions = [...(actions as RecordedAction[])];
     const results: Record<string, unknown> = {};
 
     try {

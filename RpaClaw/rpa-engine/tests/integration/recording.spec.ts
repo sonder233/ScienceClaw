@@ -598,6 +598,77 @@ describe('PlaywrightSessionRuntimeController integration', () => {
     expect(interactions).toContain('goto:https://example.com/replay');
   });
 
+  it('does not append replayed browser events back into the recorded action list', async () => {
+    const site = createServer((_, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html>
+        <html>
+          <body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh">
+            <button id="target" style="width:240px;height:120px;font-size:32px">Replay me</button>
+          </body>
+        </html>`);
+    });
+    await new Promise<void>(resolve => site.listen(0, '127.0.0.1', resolve));
+    const address = site.address() as AddressInfo;
+    const targetUrl = `http://127.0.0.1:${address.port}`;
+
+    const controller = new PlaywrightSessionRuntimeController();
+    const session: RuntimeSession = createRuntimeSession({ userId: 'u1', sandboxSessionId: 'sandbox-1' });
+
+    try {
+      await controller.startSession(session);
+      await controller.navigate(session, targetUrl, 'page');
+      session.actions = [];
+
+      const scriptedActions = [
+        {
+          id: 'action-0',
+          sessionId: session.id,
+          seq: 1,
+          kind: 'navigate',
+          pageAlias: 'page',
+          framePath: [],
+          locator: {
+            selector: '',
+            locatorAst: { kind: 'url' },
+          },
+          locatorAlternatives: [],
+          signals: {},
+          input: { url: targetUrl },
+          timing: {},
+          snapshot: { url: targetUrl },
+          status: 'recorded',
+        },
+        {
+          id: 'action-1',
+          sessionId: session.id,
+          seq: 2,
+          kind: 'click',
+          pageAlias: 'page',
+          framePath: [],
+          locator: {
+            selector: '#target',
+            locatorAst: { kind: 'css', value: '#target' },
+          },
+          locatorAlternatives: [],
+          signals: {},
+          input: {},
+          timing: {},
+          snapshot: {},
+          status: 'recorded',
+        },
+      ] satisfies RuntimeSession['actions'];
+
+      const result = await controller.replay(session, scriptedActions, {});
+
+      expect(result.success).toBe(true);
+      expect(session.actions).toEqual([]);
+    } finally {
+      await controller.stopSession(session.id);
+      await new Promise(resolve => site.close(resolve));
+    }
+  });
+
   it('records click actions after navigating a live page through dispatched mouse input', async () => {
     const site = createServer((_, response) => {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
