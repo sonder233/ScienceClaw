@@ -419,11 +419,25 @@ CAPTURE_JS = r"""
             var strictCandidate = null;
             for (var si = 0; si < candidatePayloads.length; si++) {
                 var candidate = candidatePayloads[si];
-                if (candidate.strict_match_count === 1) {
-                    if (candidate.locator) {
-                        strictCandidate = candidate;
-                        break;
-                    }
+                if (candidate.strict_match_count !== 1 || !candidate.locator) continue;
+                if (!strictCandidate) {
+                    strictCandidate = candidate;
+                    continue;
+                }
+                var candidateScore = Number(candidate.score);
+                var strictScore = Number(strictCandidate.score);
+                if (!isFinite(candidateScore)) candidateScore = S_FALLBACK;
+                if (!isFinite(strictScore)) strictScore = S_FALLBACK;
+                if (candidateScore < strictScore) {
+                    strictCandidate = candidate;
+                    continue;
+                }
+                if (candidateScore === strictScore) {
+                    var candidateIsNth = candidate.kind === 'nth'
+                        || (candidate.locator && candidate.locator.method === 'nth');
+                    var strictIsNth = strictCandidate.kind === 'nth'
+                        || (strictCandidate.locator && strictCandidate.locator.method === 'nth');
+                    if (strictIsNth && !candidateIsNth) strictCandidate = candidate;
                 }
             }
             if (strictCandidate) {
@@ -1437,6 +1451,127 @@ class RPASessionManager:
 
         return locator
 
+    @staticmethod
+    def _candidate_score(candidate: Dict[str, Any]) -> float:
+        score = candidate.get("score")
+        if isinstance(score, (int, float)):
+            return float(score)
+        return float("inf")
+
+    @classmethod
+    def _candidate_is_nth(cls, candidate: Dict[str, Any], locator: Optional[Dict[str, Any]] = None) -> bool:
+        if candidate.get("kind") == "nth":
+            return True
+        resolved_locator = locator
+        if resolved_locator is None:
+            try:
+                resolved_locator = cls._resolve_candidate_locator(candidate)
+            except ValueError:
+                return False
+        return isinstance(resolved_locator, dict) and resolved_locator.get("method") == "nth"
+
+    @classmethod
+    def _pick_best_strict_candidate(
+        cls, locator_candidates: List[Dict[str, Any]]
+    ) -> Optional[tuple[int, Dict[str, Any], Dict[str, Any]]]:
+        best: Optional[tuple[int, Dict[str, Any], Dict[str, Any]]] = None
+        best_score = float("inf")
+        best_is_nth = False
+
+        for index, candidate in enumerate(locator_candidates):
+            if not isinstance(candidate, dict):
+                continue
+            strict_match_count = candidate.get("strict_match_count")
+            if not isinstance(strict_match_count, int) or strict_match_count != 1:
+                continue
+            try:
+                locator = cls._resolve_candidate_locator(candidate)
+            except ValueError:
+                continue
+
+            score = cls._candidate_score(candidate)
+            is_nth = cls._candidate_is_nth(candidate, locator=locator)
+            if best is None:
+                best = (index, candidate, locator)
+                best_score = score
+                best_is_nth = is_nth
+                continue
+            if score < best_score or (score == best_score and best_is_nth and not is_nth):
+                best = (index, candidate, locator)
+                best_score = score
+                best_is_nth = is_nth
+
+        return best
+
+    @classmethod
+    def _normalize_event_locator_payload(cls, evt: Dict[str, Any]) -> None:
+        locator = evt.get("locator")
+        locator_candidates = evt.get("locator_candidates")
+        if not isinstance(locator, dict) or not isinstance(locator_candidates, list) or not locator_candidates:
+            return
+
+        best_candidate_info = cls._pick_best_strict_candidate(locator_candidates)
+        if best_candidate_info is None:
+            return
+        best_index, best_candidate, best_locator = best_candidate_info
+
+        selected_index: Optional[int] = None
+        for index, candidate in enumerate(locator_candidates):
+            if isinstance(candidate, dict) and candidate.get("selected"):
+                selected_index = index
+                break
+
+        if selected_index is None:
+            locator_json = json.dumps(locator, sort_keys=True)
+            for index, candidate in enumerate(locator_candidates):
+                if not isinstance(candidate, dict):
+                    continue
+                try:
+                    candidate_locator = cls._resolve_candidate_locator(candidate)
+                except ValueError:
+                    continue
+                if json.dumps(candidate_locator, sort_keys=True) == locator_json:
+                    selected_index = index
+                    break
+
+        should_promote = False
+        if selected_index is not None:
+            selected_candidate = locator_candidates[selected_index]
+            selected_strict_count = (
+                selected_candidate.get("strict_match_count") if isinstance(selected_candidate, dict) else None
+            )
+            validation = evt.get("validation")
+            status = validation.get("status") if isinstance(validation, dict) else None
+            should_promote = selected_strict_count != 1 or status in {"fallback", "ambiguous", "warning", "broken"}
+        else:
+            validation = evt.get("validation")
+            status = validation.get("status") if isinstance(validation, dict) else None
+            should_promote = status in {"fallback", "ambiguous", "warning", "broken"}
+
+        if not should_promote:
+            return
+
+        normalized_candidates: List[Dict[str, Any]] = []
+        for index, candidate in enumerate(locator_candidates):
+            if not isinstance(candidate, dict):
+                continue
+            normalized = dict(candidate)
+            normalized["selected"] = index == best_index
+            if index == best_index:
+                normalized["locator"] = best_locator
+            normalized_candidates.append(normalized)
+
+        evt["locator"] = best_locator
+        evt["locator_candidates"] = normalized_candidates
+        validation = evt.get("validation")
+        normalized_validation = dict(validation) if isinstance(validation, dict) else {}
+        normalized_validation["status"] = "ok"
+        if best_candidate.get("reason"):
+            normalized_validation["details"] = best_candidate["reason"]
+        normalized_validation["selected_candidate_index"] = best_index
+        normalized_validation["selected_candidate_kind"] = best_candidate.get("kind", "")
+        evt["validation"] = normalized_validation
+
     async def select_step_locator_candidate(self, session_id: str, step_index: int, candidate_index: int) -> RPAStep:
         session = self.sessions.get(session_id)
         if not session or step_index < 0 or step_index >= len(session.steps):
@@ -1574,6 +1709,8 @@ class RPASessionManager:
                             return
                         logger.debug(f"[RPA] Preserving nav after {last_step.action}: {evt.get('url', '')[:60]}")
 
+        self._normalize_event_locator_payload(evt)
+
         locator_info = evt.get("locator", {})
         is_sensitive = evt.get("sensitive", False)
         step_data = {
@@ -1605,22 +1742,29 @@ class RPASessionManager:
         value = evt.get("value", "")
         locator = evt.get("locator", {})
 
-        method = locator.get("method", "") if isinstance(locator, dict) else ""
-        if method == "role":
-            name = locator.get("name", "")
-            target = f'{locator.get("role", "")}("{name}")' if name else locator.get("role", "")
-        elif method in ("testid", "label", "placeholder", "alt", "title", "text"):
-            target = f'{method}("{locator.get("value", "")}")'
-        elif method == "nested":
-            parent = locator.get("parent", {})
-            child = locator.get("child", {})
-            p_name = parent.get("name", parent.get("value", ""))
-            c_name = child.get("name", child.get("value", ""))
-            target = f'{p_name} >> {c_name}'
-        elif method == "css":
-            target = locator.get("value", "")
-        else:
-            target = str(locator)
+        def _format_locator(value: Any) -> str:
+            if not isinstance(value, dict):
+                return str(value)
+
+            method = value.get("method", "")
+            if method == "role":
+                name = value.get("name", "")
+                return f'{value.get("role", "")}("{name}")' if name else value.get("role", "")
+            if method in ("testid", "label", "placeholder", "alt", "title", "text"):
+                return f'{method}("{value.get("value", "")}")'
+            if method == "nested":
+                parent = _format_locator(value.get("parent", {}))
+                child = _format_locator(value.get("child", {}))
+                return f"{parent} >> {child}"
+            if method == "nth":
+                base = value.get("locator", value.get("base"))
+                base_target = _format_locator(base) if base is not None else "locator"
+                return f"{base_target} >> nth={value.get('index', 0)}"
+            if method == "css":
+                return value.get("value", "")
+            return str(value)
+
+        target = _format_locator(locator)
 
         if action == "fill":
             display_value = '*****' if evt.get("sensitive") else f'"{value}"'

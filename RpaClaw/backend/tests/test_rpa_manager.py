@@ -255,6 +255,50 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.session.steps[-1].locator_candidates[0]["selected"])
         self.assertEqual(self.session.steps[-1].validation["status"], "ok")
 
+    async def test_handle_event_prefers_best_scored_strict_candidate_over_earlier_nth(self):
+        page = _FakePage("https://example.com", "Example")
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "click",
+                "tab_id": tab_id,
+                "tag": "BUTTON",
+                "timestamp": 1234567890,
+                "locator": {"method": "role", "role": "button", "name": "Save"},
+                "locator_candidates": [
+                    {
+                        "kind": "nth",
+                        "score": 10100,
+                        "strict_match_count": 1,
+                        "visible_match_count": 1,
+                        "selected": True,
+                        "locator": {"method": "role", "role": "button", "name": "Save"},
+                        "nth": 1,
+                        "reason": "strict nth match for current target",
+                    },
+                    {
+                        "kind": "css",
+                        "score": 520,
+                        "strict_match_count": 1,
+                        "visible_match_count": 1,
+                        "selected": False,
+                        "locator": {"method": "css", "value": "button.save"},
+                        "reason": "strict unique css match",
+                    },
+                ],
+                "validation": {"status": "fallback", "details": "generated locator strict matches = 2"},
+            },
+        )
+
+        step = self.session.steps[-1]
+        self.assertEqual(json.loads(step.target), {"method": "css", "value": "button.save"})
+        self.assertFalse(step.locator_candidates[0]["selected"])
+        self.assertTrue(step.locator_candidates[1]["selected"])
+        self.assertEqual(step.validation["status"], "ok")
+        self.assertEqual(step.validation["details"], "strict unique css match")
+
     async def test_select_step_locator_candidate_promotes_target_and_selection(self):
         await self.manager.add_step(
             self.session.id,
@@ -475,7 +519,8 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
             "function buildElementSnapshot", 1
         )[0]
         self.assertIn("if (primaryMatchCount !== 1)", build_locator_block)
-        self.assertIn("if (candidate.strict_match_count === 1)", build_locator_block)
+        self.assertIn("candidate.strict_match_count !== 1 || !candidate.locator", build_locator_block)
+        self.assertIn("if (candidateScore < strictScore)", build_locator_block)
         self.assertIn("primary = strictCandidate.locator;", build_locator_block)
 
     async def test_register_page_bootstraps_context_recorder_once(self):
@@ -577,6 +622,21 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.session.steps), 1)
         self.assertEqual(self.session.steps[-1].action, "navigate_click")
         self.assertEqual(self.session.steps[-1].url, "https://example.com/next")
+
+    def test_make_description_formats_nth_locator(self):
+        description = self.manager._make_description(
+            {
+                "action": "click",
+                "locator": {
+                    "method": "nth",
+                    "locator": {"method": "role", "role": "button", "name": "Save"},
+                    "index": 1,
+                },
+            }
+        )
+
+        self.assertIn("nth=1", description)
+        self.assertIn('button("Save")', description)
 
     async def test_handle_event_orders_steps_by_sequence_when_events_arrive_out_of_order(self):
         page = _FakePage("https://example.com", "Example")
