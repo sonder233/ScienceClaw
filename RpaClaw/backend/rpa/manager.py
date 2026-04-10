@@ -1570,7 +1570,7 @@ class RPASessionManager:
         if self._is_engine_mode():
             session_payload = await self._fetch_engine_session(session_id)
             if not session_payload:
-                return None
+                return self.sessions.get(session_id)
             return self._cache_engine_session(session_payload)
         return self.sessions.get(session_id)
 

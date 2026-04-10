@@ -94,6 +94,8 @@ class RPAEngineClient:
                 f"{self._base_url}/sessions/{session_id}/assistant/snapshot",
                 headers=self._headers,
             )
+        if response.status_code == 404:
+            raise RuntimeError("rpa engine session not found")
         if response.status_code != 200:
             raise RuntimeError("rpa engine session request failed")
         return EngineAssistantSnapshotResponse.model_validate(response.json()).model_dump()
@@ -105,6 +107,8 @@ class RPAEngineClient:
                 headers=self._headers,
                 json=EngineAssistantExecuteRequest(intent=intent).model_dump(),
             )
+        if response.status_code == 404:
+            raise RuntimeError("rpa engine session not found")
         if response.status_code != 200:
             raise RuntimeError("rpa engine session request failed")
         return EngineAssistantExecuteResponse.model_validate(response.json()).model_dump()

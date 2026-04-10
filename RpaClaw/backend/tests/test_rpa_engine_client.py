@@ -199,3 +199,21 @@ def test_assistant_snapshot_and_execute_calls_expected_payloads(monkeypatch):
     assert snapshot["snapshot"]["url"] == "https://example.com"
     assert executed["success"] is True
     assert clients == []
+
+
+def test_capture_snapshot_raises_session_not_found_on_404(monkeypatch):
+    fake_client = _FakeAsyncClient(_FakeResponse(status_code=404, payload={"message": "unknown session session-1"}))
+    monkeypatch.setattr("backend.rpa.engine_client.httpx.AsyncClient", lambda *args, **kwargs: fake_client)
+    client = RPAEngineClient(base_url="http://127.0.0.1:3310", auth_token="")
+
+    with pytest.raises(RuntimeError, match="rpa engine session not found"):
+        asyncio.run(client.capture_snapshot("session-1"))
+
+
+def test_execute_assistant_intent_raises_session_not_found_on_404(monkeypatch):
+    fake_client = _FakeAsyncClient(_FakeResponse(status_code=404, payload={"message": "unknown session session-1"}))
+    monkeypatch.setattr("backend.rpa.engine_client.httpx.AsyncClient", lambda *args, **kwargs: fake_client)
+    client = RPAEngineClient(base_url="http://127.0.0.1:3310", auth_token="")
+
+    with pytest.raises(RuntimeError, match="rpa engine session not found"):
+        asyncio.run(client.execute_assistant_intent("session-1", {"action": "click"}))

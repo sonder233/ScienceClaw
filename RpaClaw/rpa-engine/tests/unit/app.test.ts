@@ -315,6 +315,87 @@ describe('engine health endpoint', () => {
     });
   });
 
+  it('generates code from provided actions even when the in-memory session is missing', async () => {
+    const app = buildApp(
+      { NODE_ENV: 'test', RPA_ENGINE_PORT: 3310 },
+      { runtimeController: createRuntimeController() },
+    );
+
+    const action = {
+      id: 'action-1',
+      sessionId: 'missing-session',
+      seq: 1,
+      kind: 'navigate',
+      pageAlias: 'page',
+      framePath: [],
+      locator: {
+        selector: '',
+        locatorAst: { kind: 'url' },
+      },
+      locatorAlternatives: [],
+      signals: {},
+      input: { url: 'https://example.com' },
+      timing: {},
+      snapshot: {},
+      status: 'recorded',
+    };
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/sessions/missing-session/codegen',
+      payload: { actions: [action] },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().script).toContain("https://example.com");
+  });
+
+  it('replays provided actions even when the in-memory session is missing', async () => {
+    const runtimeController = createRuntimeController();
+    runtimeController.replay.mockImplementation(async (session, actions) => ({
+      success: true,
+      output: `replayed ${session.id} with ${actions.length} action(s)`,
+      data: {},
+    }));
+
+    const app = buildApp(
+      { NODE_ENV: 'test', RPA_ENGINE_PORT: 3310 },
+      { runtimeController },
+    );
+
+    const action = {
+      id: 'action-1',
+      sessionId: 'missing-session',
+      seq: 1,
+      kind: 'navigate',
+      pageAlias: 'page',
+      framePath: [],
+      locator: {
+        selector: '',
+        locatorAst: { kind: 'url' },
+      },
+      locatorAlternatives: [],
+      signals: {},
+      input: { url: 'https://example.com' },
+      timing: {},
+      snapshot: {},
+      status: 'recorded',
+    };
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/sessions/missing-session/replay',
+      payload: { actions: [action], params: {} },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(runtimeController.replay).toHaveBeenCalledTimes(1);
+    expect(response.json().result).toMatchObject({
+      success: true,
+      output: 'replayed missing-session with 1 action(s)',
+    });
+  });
+
   it('proxies assistant snapshot and execute requests to the runtime controller', async () => {
     const runtimeController = createRuntimeController();
 

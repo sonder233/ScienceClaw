@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { RecordedAction } from '../action-model.js';
+import { createRuntimeSession } from '../playwright/runtime-session.js';
 import { generatePythonCode } from '../replay/codegen.js';
 import { runReplay } from '../replay/replay-runner.js';
 
@@ -46,17 +47,16 @@ function resolveActions(
 export async function registerReplayRoutes(app: FastifyInstance) {
   app.post('/sessions/:id/codegen', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const session = app.sessionRegistry.get(id);
-    if (!session) {
-      return reply.code(404).send({ message: `unknown session ${id}` });
-    }
-
     const parsedBody = replayBodySchema.safeParse(request.body ?? {});
     if (!parsedBody.success) {
       return reply.code(400).send({ message: 'body must be a replay request object' });
     }
 
-    const actions = resolveActions(parsedBody.data, session.actions);
+    const session = app.sessionRegistry.get(id);
+    const actions = resolveActions(parsedBody.data, session?.actions ?? []);
+    if (actions.length === 0) {
+      return reply.code(404).send({ message: `unknown session ${id}` });
+    }
     return {
       script: generatePythonCode(actions, parsedBody.data.params),
     };
@@ -64,22 +64,23 @@ export async function registerReplayRoutes(app: FastifyInstance) {
 
   app.post('/sessions/:id/replay', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const session = app.sessionRegistry.get(id);
-    if (!session) {
-      return reply.code(404).send({ message: `unknown session ${id}` });
-    }
-
     const parsedBody = replayBodySchema.safeParse(request.body ?? {});
     if (!parsedBody.success) {
       return reply.code(400).send({ message: 'body must be a replay request object' });
     }
 
-    const actions = resolveActions(parsedBody.data, session.actions);
+    const session = app.sessionRegistry.get(id);
+    const actions = resolveActions(parsedBody.data, session?.actions ?? []);
+    if (actions.length === 0) {
+      return reply.code(404).send({ message: `unknown session ${id}` });
+    }
+    const replaySession = session ?? createRuntimeSession({ id, userId: 'replay-user', mode: 'idle' });
+    replaySession.actions = actions;
     return runReplay(
       actions,
       parsedBody.data.params,
       ({ actions: replayActions, params }) =>
-        app.runtimeController.replay(session, replayActions, params),
+        app.runtimeController.replay(replaySession, replayActions, params),
     );
   });
 }
