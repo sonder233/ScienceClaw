@@ -322,6 +322,41 @@ describe('PlaywrightSessionRuntimeController integration', () => {
     );
   });
 
+  it('replays popup signals on press actions without downgrading them to clicks', async () => {
+    const { controller, interactions } = createRestartableControllerHarness(1);
+    const session: RuntimeSession = createRuntimeSession({ userId: 'u1', sandboxSessionId: 'sandbox-1' });
+
+    const result = await controller.replay(
+      session,
+      [
+        {
+          id: 'action-1',
+          sessionId: session.id,
+          seq: 1,
+          kind: 'press',
+          pageAlias: 'page',
+          framePath: [],
+          locator: {
+            selector: '#s',
+            locatorAst: { kind: 'css', value: '#s' },
+          },
+          locatorAlternatives: [],
+          signals: { popup: { targetPageAlias: 'popup1' } },
+          input: { key: 'Enter', value: 'Enter' },
+          timing: {},
+          snapshot: {},
+          status: 'recorded',
+        },
+      ],
+      {},
+    );
+
+    expect(result.success).toBe(true);
+    expect(interactions).toContain('press:locator:#s=Enter');
+    expect(interactions).not.toContain('click:locator:#s');
+    expect(session.activePageAlias).toBe('popup1');
+  });
+
   it('streams screencast frames and forwards input events over the engine websocket', async () => {
     const { controller, interactions } = createControllerHarness();
     const app = buildApp(
@@ -844,6 +879,89 @@ describe('PlaywrightSessionRuntimeController integration', () => {
           }),
         ]),
       );
+    } finally {
+      await controller.stopSession(session.id);
+      await new Promise(resolve => site.close(resolve));
+    }
+  });
+
+  it('assigns popup signals to the Enter press that opens a target blank search result', async () => {
+    const site = createServer((request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      if (request.url?.startsWith('/popup')) {
+        response.end('<!doctype html><html><body>Popup</body></html>');
+        return;
+      }
+      response.end(`<!doctype html>
+        <html>
+          <body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh">
+            <form action="/popup" target="_blank">
+              <input id="s" name="s" placeholder="搜索" style="width:240px;height:80px;font-size:32px" />
+            </form>
+          </body>
+        </html>`);
+    });
+    await new Promise<void>(resolve => site.listen(0, '127.0.0.1', resolve));
+    const address = site.address() as AddressInfo;
+    const targetUrl = `http://127.0.0.1:${address.port}`;
+
+    const controller = new PlaywrightSessionRuntimeController();
+    const session: RuntimeSession = createRuntimeSession({ userId: 'u1', sandboxSessionId: 'sandbox-1' });
+
+    try {
+      await controller.startSession(session);
+      await controller.navigate(session, targetUrl, 'page');
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      await controller.dispatchInput(session, {
+        type: 'mouse',
+        action: 'mouseMoved',
+        x: 0.5,
+        y: 0.5,
+        button: 'left',
+        clickCount: 0,
+        modifiers: 0,
+      });
+      await controller.dispatchInput(session, {
+        type: 'mouse',
+        action: 'mousePressed',
+        x: 0.5,
+        y: 0.5,
+        button: 'left',
+        clickCount: 1,
+        modifiers: 0,
+      });
+      await controller.dispatchInput(session, {
+        type: 'mouse',
+        action: 'mouseReleased',
+        x: 0.5,
+        y: 0.5,
+        button: 'left',
+        clickCount: 0,
+        modifiers: 0,
+      });
+      await controller.dispatchInput(session, {
+        type: 'keyboard',
+        action: 'press',
+        key: 'Enter',
+      });
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      const clickAction = session.actions.find(action => action.kind === 'click');
+      const pressAction = session.actions.find(action => action.kind === 'press');
+
+      expect(clickAction).toBeDefined();
+      expect(pressAction).toBeDefined();
+      expect(clickAction?.signals.popup).toBeUndefined();
+      expect(pressAction).toMatchObject({
+        signals: {
+          popup: {
+            targetPageAlias: expect.any(String),
+          },
+        },
+      });
+      expect(session.pages).toHaveLength(2);
+      expect(session.activePageAlias).toBe((pressAction?.signals.popup as { targetPageAlias?: string } | undefined)?.targetPageAlias);
     } finally {
       await controller.stopSession(session.id);
       await new Promise(resolve => site.close(resolve));

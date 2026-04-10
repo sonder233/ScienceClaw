@@ -108,11 +108,11 @@ function buildActionLines(
     return lines;
   }
 
-  if (popupSignal && action.kind === 'click') {
+  if (popupSignal) {
     const targetAlias = String(popupSignal.targetPageAlias ?? `${action.pageAlias}_popup`);
     knownPages.add(targetAlias);
     lines.push('    async with current_page.expect_popup() as popup_info:');
-    lines.push(`        await ${locator}.click()`);
+    lines.push(...renderLocatorAction(action, locator, params, '        '));
     lines.push('    new_page = await popup_info.value');
     lines.push('    await new_page.wait_for_load_state("domcontentloaded")');
     lines.push(`    pages["${escapePythonString(targetAlias)}"] = new_page`);
@@ -120,52 +120,39 @@ function buildActionLines(
     return lines;
   }
 
-  if (downloadSignal && action.kind === 'click') {
+  if (downloadSignal) {
     lines.push('    async with current_page.expect_download() as download_info:');
-    lines.push(`        await ${locator}.click()`);
+    lines.push(...renderLocatorAction(action, locator, params, '        '));
     lines.push('    _download = await download_info.value');
     lines.push('    _results["download"] = {"filename": _download.suggested_filename}');
     return lines;
   }
 
-  if (navigationSignal && action.kind === 'click') {
+  if (navigationSignal) {
     lines.push('    async with current_page.expect_navigation(wait_until="domcontentloaded"):');
-    lines.push(`        await ${locator}.click()`);
+    lines.push(...renderLocatorAction(action, locator, params, '        '));
     return lines;
   }
 
   switch (action.kind) {
     case 'click':
-      lines.push(`    await ${locator}.click()`);
+      lines.push(...renderLocatorAction(action, locator, params, '    '));
       lines.push('    await current_page.wait_for_timeout(500)');
       return lines;
     case 'fill':
-      lines.push(
-        `    await ${locator}.fill(${parameterizeValue(
-          action.input.value ?? action.input.text ?? '',
-          params,
-        )})`,
-      );
+      lines.push(...renderLocatorAction(action, locator, params, '    '));
       return lines;
     case 'press':
-      lines.push(
-        `    await ${locator}.press("${escapePythonString(
-          String(action.input.key ?? action.input.value ?? ''),
-        )}")`,
-      );
+      lines.push(...renderLocatorAction(action, locator, params, '    '));
       return lines;
     case 'selectOption':
-      lines.push(
-        `    await ${locator}.select_option("${escapePythonString(
-          String(action.input.value ?? ''),
-        )}")`,
-      );
+      lines.push(...renderLocatorAction(action, locator, params, '    '));
       return lines;
     case 'check':
-      lines.push(`    await ${locator}.check()`);
+      lines.push(...renderLocatorAction(action, locator, params, '    '));
       return lines;
     case 'uncheck':
-      lines.push(`    await ${locator}.uncheck()`);
+      lines.push(...renderLocatorAction(action, locator, params, '    '));
       return lines;
     case 'closePage':
       lines.push('    await current_page.close()');
@@ -176,6 +163,43 @@ function buildActionLines(
     default:
       lines.push(`    # Unsupported action ${action.kind}`);
       return lines;
+  }
+}
+
+function renderLocatorAction(
+  action: RecordedAction,
+  locator: string,
+  params: ExportParams,
+  indent: string,
+): string[] {
+  switch (action.kind) {
+    case 'click':
+      return [`${indent}await ${locator}.click()`];
+    case 'fill':
+      return [
+        `${indent}await ${locator}.fill(${parameterizeValue(
+          action.input.value ?? action.input.text ?? '',
+          params,
+        )})`,
+      ];
+    case 'press':
+      return [
+        `${indent}await ${locator}.press("${escapePythonString(
+          String(action.input.key ?? action.input.value ?? ''),
+        )}")`,
+      ];
+    case 'selectOption':
+      return [
+        `${indent}await ${locator}.select_option("${escapePythonString(
+          String(action.input.value ?? ''),
+        )}")`,
+      ];
+    case 'check':
+      return [`${indent}await ${locator}.check()`];
+    case 'uncheck':
+      return [`${indent}await ${locator}.uncheck()`];
+    default:
+      return [`${indent}# Unsupported action ${action.kind}`];
   }
 }
 

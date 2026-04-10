@@ -66,4 +66,35 @@ describe('generatePythonCode', () => {
       'await current_page.get_by_test_id("email").fill(kwargs.get(\'email\', \'person@example.com\'))',
     );
   });
+
+  it('wraps popup-producing press actions with expect_popup', () => {
+    const code = generatePythonCode([
+      {
+        id: '1',
+        sessionId: 's1',
+        seq: 1,
+        kind: 'press',
+        pageAlias: 'page',
+        framePath: [],
+        locator: {
+          selector: '#s',
+          locatorAst: { kind: 'css', value: '#s' },
+        },
+        locatorAlternatives: [],
+        signals: {
+          popup: {
+            targetPageAlias: 'page-2',
+          },
+        },
+        input: { key: 'Enter', value: 'Enter' },
+        timing: {},
+        snapshot: {},
+        status: 'recorded',
+      },
+    ]);
+
+    expect(code).toContain('async with current_page.expect_popup() as popup_info:');
+    expect(code).toContain('await current_page.locator("#s").press("Enter")');
+    expect(code).toContain('pages["page-2"] = new_page');
+  });
 });

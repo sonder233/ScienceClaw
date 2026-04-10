@@ -77,6 +77,14 @@ type DownloadLike = {
   suggestedFilename(): string;
 };
 
+const POPUP_TRIGGER_ACTION_KINDS = new Set<RecordedAction['kind']>([
+  'click',
+  'press',
+  'selectOption',
+  'check',
+  'uncheck',
+]);
+
 type RuntimeHandles = {
   browser: BrowserLike;
   context: ContextLike;
@@ -589,7 +597,7 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
     if (popupSignal) {
       const targetAlias = String(popupSignal.targetPageAlias ?? `${actionAlias}_popup`);
       const popupPromise = page.waitForEvent('popup') as Promise<PageLike>;
-      await locator.click();
+      await this.#invokeLocatorAction(locator, action, params);
       const popup = await popupPromise;
       runtime.pages.set(targetAlias, popup);
       runtime.activePageAlias = targetAlias;
@@ -601,7 +609,7 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
 
     if (downloadSignal) {
       const downloadPromise = page.waitForEvent('download') as Promise<DownloadLike>;
-      await locator.click();
+      await this.#invokeLocatorAction(locator, action, params);
       const download = await downloadPromise;
       results.download = { filename: download.suggestedFilename() };
       await this.#syncPageState(session, actionAlias, page, null);
@@ -611,34 +619,13 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
     if (navigationSignal) {
       await Promise.all([
         page.waitForNavigation({ waitUntil: 'domcontentloaded' }),
-        locator.click(),
+        this.#invokeLocatorAction(locator, action, params),
       ]);
       await this.#syncPageState(session, actionAlias, page, null);
       return actionAlias;
     }
 
-    switch (action.kind) {
-      case 'click':
-        await locator.click();
-        break;
-      case 'fill':
-        await locator.fill(resolveReplayValue(action, params));
-        break;
-      case 'press':
-        await locator.press(String(action.input.key ?? action.input.value ?? ''));
-        break;
-      case 'selectOption':
-        await locator.selectOption(String(action.input.value ?? ''));
-        break;
-      case 'check':
-        await locator.check();
-        break;
-      case 'uncheck':
-        await locator.uncheck();
-        break;
-      default:
-        throw new Error(`unsupported action kind ${action.kind}`);
-    }
+    await this.#invokeLocatorAction(locator, action, params);
 
     await this.#syncPageState(session, actionAlias, page, null);
     return actionAlias;
@@ -701,7 +688,11 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
   #annotatePopupTrigger(session: RuntimeSession, openerAlias: string, targetAlias: string): void {
     for (let index = session.actions.length - 1; index >= 0; index -= 1) {
       const action = session.actions[index] as RecordedAction;
-      if (!action || action.kind !== 'click' || action.pageAlias !== openerAlias) {
+      if (
+        !action
+        || action.pageAlias !== openerAlias
+        || !POPUP_TRIGGER_ACTION_KINDS.has(action.kind)
+      ) {
         continue;
       }
       if (action.signals?.popup) {
@@ -712,6 +703,35 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
         popup: { targetPageAlias: targetAlias },
       };
       return;
+    }
+  }
+
+  async #invokeLocatorAction(
+    locator: LocatorLike,
+    action: RecordedAction,
+    params: Record<string, unknown>,
+  ): Promise<void> {
+    switch (action.kind) {
+      case 'click':
+        await locator.click();
+        return;
+      case 'fill':
+        await locator.fill(resolveReplayValue(action, params));
+        return;
+      case 'press':
+        await locator.press(String(action.input.key ?? action.input.value ?? ''));
+        return;
+      case 'selectOption':
+        await locator.selectOption(String(action.input.value ?? ''));
+        return;
+      case 'check':
+        await locator.check();
+        return;
+      case 'uncheck':
+        await locator.uncheck();
+        return;
+      default:
+        throw new Error(`unsupported action kind ${action.kind}`);
     }
   }
 
