@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
 import { loadConfig, type EngineConfig } from './config.js';
 import { EventBus, type EngineEventMap } from './event-bus.js';
+import { registerReplayRoutes } from './routes/replay.js';
 import { registerSessionRoutes } from './routes/sessions.js';
 import { SessionRegistry } from './session-registry.js';
 
@@ -25,6 +26,7 @@ export function buildApp(overrides: Partial<EngineConfig> = {}) {
   }));
 
   app.register(registerSessionRoutes);
+  app.register(registerReplayRoutes);
 
   return app;
 }

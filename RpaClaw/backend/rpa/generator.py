@@ -3,6 +3,8 @@ import logging
 import re
 from typing import List, Dict, Any, Optional
 
+from backend.config import settings
+
 logger = logging.getLogger(__name__)
 
 RPA_PLAYWRIGHT_TIMEOUT_MS = 60000
@@ -111,6 +113,8 @@ if __name__ == "__main__":
 '''
 
     def generate_script(self, steps: List[Dict[str, Any]], params: Dict[str, Any] = None, is_local: bool = False) -> str:
+        if getattr(settings, "rpa_engine_mode", "legacy") == "node":
+            raise RuntimeError("legacy generator should not be used in node engine mode")
         params = params or {}
         deduped = self._deduplicate_steps(steps)
         deduped = self._infer_missing_tab_transitions(deduped)

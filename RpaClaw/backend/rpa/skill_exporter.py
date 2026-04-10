@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class SkillExporter:
-    """Export recorded RPA skills to MongoDB or local filesystem."""
+    """Persist generated RPA skills to MongoDB or local filesystem."""
 
     async def export_skill(
         self,

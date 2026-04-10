@@ -5,6 +5,8 @@ from typing import Dict, Any, Callable, Optional
 
 from playwright.async_api import Browser
 
+from backend.config import settings
+
 logger = logging.getLogger(__name__)
 
 RPA_PAGE_TIMEOUT_MS = 60000
@@ -32,6 +34,8 @@ class ScriptExecutor:
         Playwright coroutines are scheduled on the dedicated Playwright event loop
         to avoid "Future attached to a different loop" on Windows.
         """
+        if getattr(settings, "rpa_engine_mode", "legacy") == "node":
+            raise RuntimeError("legacy executor should not be used in node engine mode")
         namespace: Dict[str, Any] = {}
         exec(compile(script, "<rpa_script>", "exec"), namespace)
 

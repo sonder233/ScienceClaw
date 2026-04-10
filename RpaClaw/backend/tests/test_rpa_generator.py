@@ -2,6 +2,7 @@ import importlib.util
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 GENERATOR_PATH = Path(__file__).resolve().parents[1] / "rpa" / "generator.py"
@@ -13,6 +14,19 @@ PlaywrightGenerator = GENERATOR_MODULE.PlaywrightGenerator
 
 
 class PlaywrightGeneratorTests(unittest.TestCase):
+    def test_generate_script_still_supports_legacy_mode(self):
+        generator = PlaywrightGenerator()
+
+        with patch.object(
+            GENERATOR_MODULE,
+            "settings",
+            type("SettingsStub", (), {"rpa_engine_mode": "legacy"})(),
+            create=True,
+        ):
+            script = generator.generate_script([], is_local=True)
+
+        self.assertIn("async def execute_skill(page, **kwargs):", script)
+
     def test_build_locator_nested_role_chains_get_by_role(self):
         generator = PlaywrightGenerator()
         target = json.dumps(

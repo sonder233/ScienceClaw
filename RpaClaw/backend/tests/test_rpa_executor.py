@@ -1,6 +1,7 @@
 import importlib
 import unittest
 
+import pytest
 
 EXECUTOR_MODULE = importlib.import_module("backend.rpa.executor")
 
@@ -129,6 +130,21 @@ async def execute_skill(page, **kwargs):
         self.assertEqual(session_manager.detached, [("session-1", browser.contexts[0])])
         self.assertEqual(page_registry, {})
         self.assertTrue(browser.contexts[0].closed)
+
+
+def test_generator_rejects_direct_use_in_node_mode(monkeypatch):
+    import backend.rpa.generator as generator_module
+    from backend.rpa.generator import PlaywrightGenerator
+
+    monkeypatch.setattr(
+        generator_module,
+        "settings",
+        type("SettingsStub", (), {"rpa_engine_mode": "node"})(),
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="legacy generator should not be used in node engine mode"):
+        PlaywrightGenerator().generate_script([])
 
 
 if __name__ == "__main__":

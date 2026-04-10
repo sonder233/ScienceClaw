@@ -202,6 +202,101 @@ def _get_engine_proxy_headers() -> list[tuple[str, str]] | None:
     return [("Authorization", f"Bearer {token}")]
 
 
+def _get_engine_proxy_headers_dict() -> dict[str, str]:
+    headers = _get_engine_proxy_headers() or []
+    return {key: value for key, value in headers}
+
+
+def _is_node_engine_mode() -> bool:
+    return getattr(settings, "rpa_engine_mode", "legacy") == "node"
+
+
+def _build_engine_locator(target: Any) -> dict[str, Any]:
+    if isinstance(target, dict):
+        selector = str(target.get("selector") or "")
+        return {"selector": selector, "locatorAst": target}
+
+    if isinstance(target, str):
+        stripped = target.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                selector = str(parsed.get("selector") or target)
+                return {"selector": selector, "locatorAst": parsed}
+        return {"selector": target, "locatorAst": {}}
+
+    return {"selector": str(target or ""), "locatorAst": {}}
+
+
+def _map_step_action_to_engine_kind(step_action: str) -> str:
+    action = (step_action or "").strip()
+    return {
+        "goto": "navigate",
+        "navigate_click": "click",
+        "open_tab_click": "click",
+        "download_click": "click",
+        "download": "click",
+        "select": "selectOption",
+        "switch_tab": "openPage",
+        "close_tab": "closePage",
+    }.get(action, action or "click")
+
+
+def _step_to_engine_action(session_id: str, index: int, step: Dict[str, Any]) -> dict[str, Any]:
+    signals = dict(step.get("signals") or {})
+    step_action = step.get("action", "")
+    if step_action == "open_tab_click":
+        signals.setdefault("popup", {"targetPageAlias": step.get("target_tab_id") or step.get("tab_id") or "page"})
+    if step_action == "navigate_click":
+        signals.setdefault("navigation", {"url": step.get("url", "")})
+    if step_action in {"download_click", "download"}:
+        signals.setdefault("download", {"suggestedFilename": step.get("value", "")})
+
+    return {
+        "id": step.get("id") or f"{session_id}-{index + 1}",
+        "sessionId": session_id,
+        "seq": index + 1,
+        "kind": _map_step_action_to_engine_kind(step_action),
+        "pageAlias": step.get("tab_id") or "page",
+        "framePath": list(step.get("frame_path") or []),
+        "locator": _build_engine_locator(step.get("target")),
+        "locatorAlternatives": [],
+        "signals": signals,
+        "input": {"value": step.get("value")} if step.get("value") is not None else {},
+        "timing": {},
+        "snapshot": dict(step.get("element_snapshot") or {}),
+        "status": "recorded",
+    }
+
+
+def _resolve_engine_actions(session_id: str, session: Any) -> list[dict[str, Any]]:
+    engine_sessions = getattr(rpa_manager, "_engine_sessions", {})
+    engine_session = engine_sessions.get(session_id) if isinstance(engine_sessions, dict) else None
+    if isinstance(engine_session, dict) and isinstance(engine_session.get("actions"), list):
+        return engine_session["actions"]
+
+    steps = [step.model_dump() for step in session.steps]
+    return [_step_to_engine_action(session_id, index, step) for index, step in enumerate(steps)]
+
+
+async def _post_engine_replay_request(session_id: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    base_url = settings.rpa_engine_base_url.rstrip("/")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"{base_url}/sessions/{session_id}/{path}",
+            headers=_get_engine_proxy_headers_dict(),
+            json=payload,
+        )
+    if response.status_code == 404:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail="RPA engine request failed")
+    return response.json()
+
+
 def _get_sandbox_proxy_headers() -> list[tuple[str, str]] | None:
     """Parse optional proxy request headers from env.
 
@@ -442,6 +537,17 @@ async def generate_script(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    if _is_node_engine_mode():
+        engine_response = await _post_engine_replay_request(
+            session_id,
+            "codegen",
+            {
+                "actions": _resolve_engine_actions(session_id, session),
+                "params": request.params,
+            },
+        )
+        return {"status": "success", "script": engine_response.get("script", "")}
+
     steps = [step.model_dump() for step in session.steps]
     script = generator.generate_script(steps, request.params, is_local=(settings.storage_backend == "local"))
     return {"status": "success", "script": script}
@@ -456,6 +562,17 @@ async def test_script(
     session = await rpa_manager.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    if _is_node_engine_mode():
+        engine_response = await _post_engine_replay_request(
+            session_id,
+            "replay",
+            {
+                "actions": _resolve_engine_actions(session_id, session),
+                "params": request.params,
+            },
+        )
+        return {"status": "success", **engine_response}
 
     steps = [step.model_dump() for step in session.steps]
     script = generator.generate_script(steps, request.params, is_local=(settings.storage_backend == "local"))
@@ -517,8 +634,19 @@ async def save_skill(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    steps = [step.model_dump() for step in session.steps]
-    script = generator.generate_script(steps, request.params, is_local=(settings.storage_backend == "local"))
+    if _is_node_engine_mode():
+        engine_response = await _post_engine_replay_request(
+            session_id,
+            "codegen",
+            {
+                "actions": _resolve_engine_actions(session_id, session),
+                "params": request.params,
+            },
+        )
+        script = engine_response.get("script", "")
+    else:
+        steps = [step.model_dump() for step in session.steps]
+        script = generator.generate_script(steps, request.params, is_local=(settings.storage_backend == "local"))
 
     skill_name = await exporter.export_skill(
         user_id=str(current_user.id),
