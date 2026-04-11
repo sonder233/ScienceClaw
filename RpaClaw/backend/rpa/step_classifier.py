@@ -1,25 +1,14 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Optional
 
 
 SCRIPT_STEP = "script_step"
 AGENT_STEP = "agent_step"
 
-_BRANCHING_KEYWORDS = (
-    "if ",
-    "elif ",
-    "else:",
-    "for ",
-    "while ",
-    "判断",
-    "如果",
-    "否则",
-    "根据",
-    "逐个",
-    "每个",
-    "循环",
-)
+_EN_IF_ELSE_RE = re.compile(r"\bif\b[\s\S]{0,200}\belse\b", re.IGNORECASE)
+_ZH_IF_ELSE_RE = re.compile(r"如果[\s\S]{0,200}(否则|不然)")
 
 
 def classify_candidate_step(
@@ -42,4 +31,6 @@ def classify_candidate_step(
 
 
 def _contains_branching_signal(text: str) -> bool:
-    return any(keyword in text for keyword in _BRANCHING_KEYWORDS)
+    if not text:
+        return False
+    return bool(_EN_IF_ELSE_RE.search(text) or _ZH_IF_ELSE_RE.search(text))
