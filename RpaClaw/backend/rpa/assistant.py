@@ -557,6 +557,42 @@ Return the next JSON action."""
         yield _extract_llm_response_text(response)
 
 
+async def run_agent_until_stop(
+    agent: RPAReActAgent,
+    *,
+    session_id: str,
+    page: Page,
+    goal: str,
+    existing_steps: List[Dict[str, Any]],
+    model_config: Optional[Dict[str, Any]] = None,
+    page_provider: Optional[Callable[[], Optional[Page]]] = None,
+) -> Dict[str, Any]:
+    """Collect a terminal result from an RPAReActAgent run."""
+    completed_step: Optional[Dict[str, Any]] = None
+    async for event in agent.run(
+        session_id=session_id,
+        page=page,
+        goal=goal,
+        existing_steps=existing_steps,
+        model_config=model_config,
+        page_provider=page_provider,
+    ):
+        event_name = event.get("event")
+        data = event.get("data", {})
+        if event_name == "agent_step_done" and completed_step is None:
+            completed_step = data.get("step")
+        if event_name == "agent_aborted":
+            return {"success": False, "error": data.get("reason", "Agent aborted"), "step": completed_step}
+        if event_name == "agent_done":
+            if completed_step is None:
+                return {"success": False, "error": "Agent finished without producing a step"}
+            return {"success": True, "step": completed_step}
+
+    if completed_step is None:
+        return {"success": False, "error": "Agent stopped without producing a step"}
+    return {"success": True, "step": completed_step}
+
+
 class RPAAssistant:
     """Frame-aware AI recording assistant."""
 
