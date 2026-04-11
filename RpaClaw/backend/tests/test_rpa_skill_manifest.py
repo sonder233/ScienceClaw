@@ -1,9 +1,14 @@
 import importlib.util
+import json
+import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from backend.rpa.manager import RPAStep
+from backend.rpa.skill_exporter import SkillExporter
 
 MANIFEST_PATH = Path(__file__).resolve().parents[1] / "rpa" / "skill_manifest.py"
 
@@ -38,21 +43,26 @@ class SkillManifestTests(unittest.TestCase):
         self.assertEqual(manifest["params"], params)
         self.assertEqual([step["type"] for step in manifest["steps"]], ["script", "agent"])
 
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 class SaveSkillExportTests(unittest.IsolatedAsyncioTestCase):
     async def test_save_skill_passes_steps_to_exporter(self):
         route_module = __import__("backend.route.rpa", fromlist=["dummy"])
 
-        step_script = {"type": "script", "action": "click", "target": "#search"}
-        step_agent = {"type": "agent", "action": "extract_text", "result_key": "title"}
         session = SimpleNamespace(
             steps=[
-                SimpleNamespace(model_dump=lambda: step_script),
-                SimpleNamespace(model_dump=lambda: step_agent),
+                RPAStep(
+                    id="step-script",
+                    action="click",
+                    timestamp=datetime(2026, 4, 11, 10, 30, 0),
+                    source="record",
+                    type="script",
+                ),
+                RPAStep(
+                    id="step-agent",
+                    action="extract_text",
+                    timestamp=datetime(2026, 4, 11, 10, 31, 0),
+                    source="ai",
+                    type="agent",
+                ),
             ],
             status="recording",
         )
@@ -76,3 +86,88 @@ class SaveSkillExportTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["status"], "success")
         self.assertEqual([step["type"] for step in captured["steps"]], ["script", "agent"])
+        self.assertIsInstance(captured["steps"][0]["timestamp"], str)
+
+
+class SkillExporterManifestTests(unittest.IsolatedAsyncioTestCase):
+    async def test_export_skill_local_writes_manifest_with_real_step_types_and_json_timestamps(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("backend.rpa.skill_exporter.settings.storage_backend", "local"):
+                with patch("backend.rpa.skill_exporter.settings.external_skills_dir", temp_dir):
+                    steps = [
+                        RPAStep(
+                            id="step-script",
+                            action="click",
+                            timestamp=datetime(2026, 4, 11, 10, 30, 0),
+                            source="record",
+                            type="script",
+                        ).model_dump(),
+                        RPAStep(
+                            id="step-agent",
+                            action="extract_text",
+                            timestamp=datetime(2026, 4, 11, 10, 31, 0),
+                            source="ai",
+                            type="agent",
+                        ).model_dump(),
+                    ]
+
+                    await SkillExporter().export_skill(
+                        user_id="user-1",
+                        skill_name="search_skill",
+                        description="Search and extract title",
+                        script="# script",
+                        params={},
+                        steps=steps,
+                    )
+
+            manifest_path = Path(temp_dir) / "search_skill" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual([step["type"] for step in manifest["steps"]], ["script", "agent"])
+            self.assertIsInstance(manifest["steps"][0]["timestamp"], str)
+
+    async def test_export_skill_mongodb_stores_manifest_with_real_step_types_and_json_timestamps(self):
+        fake_repo = AsyncMock()
+        captured_set = {}
+
+        async def _update_one_stub(_filter, update_doc, upsert):
+            captured_set.update(update_doc["$set"])
+            return None
+
+        fake_repo.update_one.side_effect = _update_one_stub
+
+        with patch("backend.rpa.skill_exporter.settings.storage_backend", "docker"):
+            with patch("backend.rpa.skill_exporter.get_repository", Mock(return_value=fake_repo)):
+                steps = [
+                    RPAStep(
+                        id="step-script",
+                        action="click",
+                        timestamp=datetime(2026, 4, 11, 10, 30, 0),
+                        source="record",
+                        type="script",
+                    ).model_dump(),
+                    RPAStep(
+                        id="step-agent",
+                        action="extract_text",
+                        timestamp=datetime(2026, 4, 11, 10, 31, 0),
+                        source="ai",
+                        type="agent",
+                    ).model_dump(),
+                ]
+
+                await SkillExporter().export_skill(
+                    user_id="user-1",
+                    skill_name="search_skill",
+                    description="Search and extract title",
+                    script="# script",
+                    params={},
+                    steps=steps,
+                )
+
+        manifest_text = captured_set["files"]["manifest.json"]
+        manifest = json.loads(manifest_text)
+        self.assertEqual([step["type"] for step in manifest["steps"]], ["script", "agent"])
+        self.assertIsInstance(manifest["steps"][0]["timestamp"], str)
+
+
+if __name__ == "__main__":
+    unittest.main()

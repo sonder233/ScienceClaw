@@ -469,7 +469,7 @@ async def save_skill(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    steps = [step.model_dump() for step in session.steps]
+    steps = [step.model_dump(mode="json") for step in session.steps]
     script = generator.generate_script(steps, request.params, is_local=(settings.storage_backend == "local"))
 
     skill_name = await exporter.export_skill(

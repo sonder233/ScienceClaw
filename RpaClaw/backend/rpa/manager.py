@@ -21,6 +21,7 @@ RPA_PAGE_TIMEOUT_MS = 60000
 
 class RPAStep(BaseModel):
     id: str
+    type: str = "script"
     action: str
     target: Optional[str] = None
     frame_path: List[str] = Field(default_factory=list)
@@ -1126,7 +1127,13 @@ class RPASessionManager:
             raise ValueError(f"Session {session_id} not found")
 
         session = self.sessions[session_id]
-        step = RPAStep(id=str(uuid.uuid4()), **step_data)
+        normalized_step_data = dict(step_data)
+        if not normalized_step_data.get("type"):
+            normalized_step_data["type"] = (
+                "agent" if normalized_step_data.get("source") == "ai" else "script"
+            )
+
+        step = RPAStep(id=str(uuid.uuid4()), **normalized_step_data)
         insert_at = len(session.steps)
         for index, existing_step in enumerate(session.steps):
             if existing_step.source != step.source:
