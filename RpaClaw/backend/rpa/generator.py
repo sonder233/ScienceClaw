@@ -226,6 +226,8 @@ if __name__ == "__main__":
 
             popup_signal = self._popup_signal(step)
             download_signal = self._download_signal(step)
+            if popup_signal and not self._should_materialize_popup(deduped, step_index - 1, popup_signal, download_signal):
+                popup_signal = None
             if action in {"click", "press"} and (popup_signal or download_signal):
                 interaction = f'await {locator}.click()' if action == "click" else f'await {locator}.press("{value}")'
                 outer_indent = "    "
@@ -472,6 +474,30 @@ if __name__ == "__main__":
                 previous_step["value"] = download_name
             return True
 
+        return False
+
+    @classmethod
+    def _should_materialize_popup(
+        cls,
+        steps: List[Dict[str, Any]],
+        step_index: int,
+        popup_signal: Dict[str, Any],
+        download_signal: Optional[Dict[str, Any]],
+    ) -> bool:
+        target_tab_id = str(popup_signal.get("target_tab_id") or "")
+        if not target_tab_id:
+            return False
+        if not download_signal:
+            return True
+
+        for future_step in steps[step_index + 1:]:
+            future_tab_id = str(future_step.get("tab_id") or "")
+            future_target_tab_id = str(future_step.get("target_tab_id") or "")
+            if future_tab_id == target_tab_id or future_target_tab_id == target_tab_id:
+                return True
+            future_popup_tab_id = cls._popup_target_tab_id(future_step)
+            if future_popup_tab_id == target_tab_id:
+                return True
         return False
 
     @staticmethod
