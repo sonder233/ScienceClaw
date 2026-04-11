@@ -7,6 +7,48 @@ from backend.rpa.step_validator import StepValidator
 
 
 class RecordingOrchestratorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_agent_candidate_persists_agent_step_without_script_execution(self):
+        history = []
+        assistant = SimpleNamespace(
+            generate_candidate_step=AsyncMock(),
+            _execute_with_retry=AsyncMock(side_effect=AssertionError("agent step should not use script retry path")),
+            _execute_single_response=AsyncMock(side_effect=AssertionError("agent step should not use single execute path")),
+            _get_history=lambda _session_id: history,
+            _trim_history=lambda _session_id: None,
+        )
+        assistant.generate_candidate_step.return_value = {
+            "raw_response": '{"goal":"judge sentiment and branch"}',
+            "structured_intent": None,
+            "code": None,
+            "snapshot": {"frames": []},
+            "messages": [{"role": "user", "content": "judge sentiment and branch"}],
+            "step_type": "agent",
+        }
+        manager = AsyncMock()
+        orchestrator = RecordingOrchestrator(
+            assistant=assistant,
+            rpa_manager=manager,
+            validator=StepValidator(),
+        )
+
+        events = []
+        async for event in orchestrator.run(
+            session_id="session-1",
+            page=object(),
+            message="judge sentiment and branch",
+            steps=[],
+            model_config=None,
+            page_provider=None,
+        ):
+            events.append(event)
+
+        manager.add_step.assert_awaited_once()
+        saved_step = manager.add_step.await_args.args[1]
+        self.assertEqual(saved_step["type"], "agent")
+        self.assertEqual(saved_step["goal"], "judge sentiment and branch")
+        self.assertTrue(any(event["event"] == "recording_classified" for event in events))
+        self.assertTrue(events[-2]["data"]["success"])
+
     async def test_uses_retry_execution_path_and_streams_retry_notice(self):
         history = []
         assistant = SimpleNamespace(
@@ -117,6 +159,7 @@ class RecordingOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         saved_step = manager.add_step.await_args.args[1]
         self.assertEqual(saved_step["action"], "ai_script")
         self.assertEqual(saved_step["source"], "ai")
+        self.assertEqual(saved_step["type"], "script")
         self.assertEqual(saved_step["prompt"], "click the button")
         self.assertEqual(saved_step["value"], 'await page.click("button")')
         self.assertTrue(events[-2]["data"]["success"])

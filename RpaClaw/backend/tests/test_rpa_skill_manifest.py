@@ -44,7 +44,7 @@ class SkillManifestTests(unittest.TestCase):
         self.assertEqual([step["type"] for step in manifest["steps"]], ["script", "agent"])
 
 class SaveSkillExportTests(unittest.IsolatedAsyncioTestCase):
-    async def test_save_skill_passes_steps_to_exporter(self):
+    async def test_save_skill_builds_runtime_entry_and_export_steps(self):
         route_module = __import__("backend.route.rpa", fromlist=["dummy"])
 
         session = SimpleNamespace(
@@ -80,13 +80,18 @@ class SaveSkillExportTests(unittest.IsolatedAsyncioTestCase):
             return kwargs["skill_name"]
 
         with patch.object(route_module.rpa_manager, "get_session", AsyncMock(return_value=session)):
-            with patch.object(route_module.generator, "generate_script", Mock(return_value="# script")):
-                with patch.object(route_module.exporter, "export_skill", AsyncMock(side_effect=_export_stub)):
-                    result = await route_module.save_skill("session-1", request, current_user)
+            with patch.object(route_module.generator, "build_export_steps", Mock(return_value=[
+                {"type": "script", "action": "click", "script_fragment": "await current_page.click()"},
+                {"type": "agent", "action": "ai_script", "goal": "Finish the task"},
+            ])):
+                with patch.object(route_module.generator, "generate_runtime_entry", Mock(return_value="# runtime using SkillRuntime")):
+                    with patch.object(route_module.exporter, "export_skill", AsyncMock(side_effect=_export_stub)):
+                        result = await route_module.save_skill("session-1", request, current_user)
 
         self.assertEqual(result["status"], "success")
         self.assertEqual([step["type"] for step in captured["steps"]], ["script", "agent"])
-        self.assertIsInstance(captured["steps"][0]["timestamp"], str)
+        self.assertIn("SkillRuntime", captured["script"])
+        self.assertIn("script_fragment", captured["steps"][0])
 
 
 class SkillExporterManifestTests(unittest.IsolatedAsyncioTestCase):
@@ -115,15 +120,28 @@ class SkillExporterManifestTests(unittest.IsolatedAsyncioTestCase):
                         user_id="user-1",
                         skill_name="search_skill",
                         description="Search and extract title",
-                        script="# script",
+                        script="# runtime using SkillRuntime",
                         params={},
-                        steps=steps,
+                        steps=[
+                            {
+                                **steps[0],
+                                "script_fragment": 'await current_page.get_by_role("button", name="Save", exact=True).click()',
+                            },
+                            {
+                                **steps[1],
+                                "goal": "If positive do X else Y",
+                            },
+                        ],
                     )
 
             manifest_path = Path(temp_dir) / "search_skill" / "manifest.json"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            skill_py = (Path(temp_dir) / "search_skill" / "skill.py").read_text(encoding="utf-8")
             self.assertEqual([step["type"] for step in manifest["steps"]], ["script", "agent"])
             self.assertIsInstance(manifest["steps"][0]["timestamp"], str)
+            self.assertIn("script_fragment", manifest["steps"][0])
+            self.assertIn("goal", manifest["steps"][1])
+            self.assertIn("SkillRuntime", skill_py)
 
     async def test_export_skill_mongodb_stores_manifest_with_real_step_types_and_json_timestamps(self):
         fake_repo = AsyncMock()

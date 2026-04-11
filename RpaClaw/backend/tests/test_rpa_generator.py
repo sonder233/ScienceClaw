@@ -13,6 +13,39 @@ PlaywrightGenerator = GENERATOR_MODULE.PlaywrightGenerator
 
 
 class PlaywrightGeneratorTests(unittest.TestCase):
+    def test_build_script_fragment_click_uses_current_page_locator(self):
+        generator = PlaywrightGenerator()
+        step = {
+            "action": "click",
+            "target": json.dumps({"method": "role", "role": "button", "name": "Save"}),
+            "description": "Click Save",
+            "url": "https://example.com",
+            "tab_id": "tab-1",
+            "type": "script",
+        }
+
+        fragment = generator.build_script_fragment(step)
+
+        self.assertIn('await current_page.get_by_role("button", name="Save", exact=True).click()', fragment)
+        self.assertIn("await current_page.wait_for_timeout(500)", fragment)
+
+    def test_build_script_fragment_extract_text_updates_results_with_result_key(self):
+        generator = PlaywrightGenerator()
+        step = {
+            "action": "extract_text",
+            "target": json.dumps({"method": "role", "role": "heading", "name": "Title"}),
+            "description": "Extract title",
+            "result_key": "page_title",
+            "url": "https://example.com",
+            "tab_id": "tab-1",
+            "type": "script",
+        }
+
+        fragment = generator.build_script_fragment(step)
+
+        self.assertIn('await current_page.get_by_role("heading", name="Title", exact=True).inner_text()', fragment)
+        self.assertIn('_results["page_title"] =', fragment)
+
     def test_build_locator_nested_role_chains_get_by_role(self):
         generator = PlaywrightGenerator()
         target = json.dumps(

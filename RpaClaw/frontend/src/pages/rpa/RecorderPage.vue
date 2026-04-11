@@ -138,13 +138,16 @@ interface ChatMessage {
   locatorSummary?: string;
   collectionSummary?: string;
   diagnostics?: string[];
+  stepType?: 'script' | 'agent';
+  validationPassed?: boolean;
+  recoveryState?: 'recovering' | 'recovered' | 'failed';
 }
 
 const chatMessages = ref<ChatMessage[]>([]);
 const newMessage = ref('');
 const sending = ref(false);
-const agentMode = ref(false);
 const agentRunning = ref(false);
+const recordingStatus = ref<'idle' | 'executing' | 'validated' | 'recovering'>('idle');
 
 interface PendingConfirm {
   description: string;
@@ -177,6 +180,21 @@ const cleanupAssistantText = (text: string, script = '') => {
     next = next.replace(script, '');
   }
   return next.trim();
+};
+
+const getAssistantStatusText = () => {
+  if (agentRunning.value) return 'Agent 运行中...';
+  if (recordingStatus.value === 'recovering') return '正在尝试自动恢复环境';
+  if (recordingStatus.value === 'validated') return '录制态验收已通过';
+  if (recordingStatus.value === 'executing') return '正在执行录制步骤';
+  return '已就绪 · 统一录制中';
+};
+
+const getAssistantStatusClass = () => {
+  if (agentRunning.value) return 'text-orange-500';
+  if (recordingStatus.value === 'recovering') return 'text-amber-500';
+  if (recordingStatus.value === 'validated') return 'text-emerald-600';
+  return 'text-[#831bd7]';
 };
 
 const initSession = async () => {
@@ -501,7 +519,7 @@ const sendMessage = async () => {
   const userText = newMessage.value.trim();
   newMessage.value = '';
   sending.value = true;
-  if (agentMode.value) agentRunning.value = true;
+  recordingStatus.value = 'idle';
 
   const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   chatMessages.value.push({ role: 'user', text: userText, time: now });
@@ -517,7 +535,7 @@ const sendMessage = async () => {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
       },
-      body: JSON.stringify({ message: userText, mode: agentMode.value ? 'react' : 'chat' }),
+      body: JSON.stringify({ message: userText }),
     });
 
     if (!resp.ok || !resp.body) {
@@ -551,6 +569,8 @@ const sendMessage = async () => {
             const data = JSON.parse(raw);
             if (eventType === 'message_chunk') {
               chatMessages.value[msgIdx].text += data.text || '';
+            } else if (eventType === 'recording_classified') {
+              chatMessages.value[msgIdx].stepType = data.step_type === 'agent' ? 'agent' : 'script';
             } else if (eventType === 'script') {
               chatMessages.value[msgIdx].script = data.code || '';
               chatMessages.value[msgIdx].text = cleanupAssistantText(
@@ -567,15 +587,32 @@ const sendMessage = async () => {
                 chatMessages.value[msgIdx].collectionSummary = `${resolved.collection_hint.kind}${resolved.ordinal ? ` / ${resolved.ordinal}` : ''}`;
               }
             } else if (eventType === 'executing') {
+              recordingStatus.value = 'executing';
               chatMessages.value[msgIdx].status = 'executing';
               if (!chatMessages.value[msgIdx].text.trim()) {
                 chatMessages.value[msgIdx].text = '代码已生成，正在执行浏览器操作。';
               }
+            } else if (eventType === 'recording_validated') {
+              recordingStatus.value = 'validated';
+              chatMessages.value[msgIdx].validationPassed = true;
+            } else if (eventType === 'validation_failed') {
+              chatMessages.value[msgIdx].validationPassed = false;
+              chatMessages.value[msgIdx].status = 'error';
+              chatMessages.value[msgIdx].error = data.message || '录制态验收失败';
+            } else if (eventType === 'recovery_started') {
+              recordingStatus.value = 'recovering';
+              chatMessages.value[msgIdx].recoveryState = 'recovering';
+            } else if (eventType === 'recovery_finished') {
+              recordingStatus.value = data.success ? 'executing' : 'idle';
+              chatMessages.value[msgIdx].recoveryState = data.success ? 'recovered' : 'failed';
             } else if (eventType === 'result') {
               chatMessages.value[msgIdx].status = data.success ? 'done' : 'error';
               if (data.error) chatMessages.value[msgIdx].error = data.error;
               if (data.output && data.output !== 'ok' && data.output !== 'None') {
                 chatMessages.value[msgIdx].text += `${chatMessages.value[msgIdx].text ? '\n' : ''}输出: ${data.output}`;
+              }
+              if (data.success && chatMessages.value[msgIdx].stepType === 'agent') {
+                recordingStatus.value = 'idle';
               }
             } else if (eventType === 'agent_thought') {
               chatMessages.value[msgIdx].text += (chatMessages.value[msgIdx].text ? '\n' : '') + `💭 ${data.text || ''}`;
@@ -616,6 +653,7 @@ const sendMessage = async () => {
               chatMessages.value[msgIdx].status = 'error';
               chatMessages.value[msgIdx].error = data.message || '未知错误';
               agentRunning.value = false;
+              recordingStatus.value = 'idle';
             }
           } catch { /* ignore parse errors */ }
           eventType = '';
@@ -630,6 +668,7 @@ const sendMessage = async () => {
     chatMessages.value[msgIdx].text = `连接失败: ${err.message}`;
     chatMessages.value[msgIdx].status = 'error';
     agentRunning.value = false;
+    recordingStatus.value = 'idle';
   } finally {
     sending.value = false;
   }
@@ -828,8 +867,8 @@ const sendMessage = async () => {
               </div>
               <div>
                 <h3 class="text-gray-900 font-bold text-sm">AI 录制助手</h3>
-                <p class="text-[10px] font-bold" :class="agentRunning ? 'text-orange-500' : 'text-[#831bd7]'">
-                  {{ agentRunning ? 'Agent 运行中...' : (agentMode ? 'Agent 模式' : '已就绪 · 协助录制中') }}
+                <p class="text-[10px] font-bold" :class="getAssistantStatusClass()">
+                  {{ getAssistantStatusText() }}
                 </p>
               </div>
             </div>
@@ -839,18 +878,6 @@ const sendMessage = async () => {
                 @click="abortAgent"
                 class="text-[10px] font-bold text-red-500 border border-red-200 px-2 py-1 rounded-lg hover:bg-red-50 transition-colors"
               >中止</button>
-              <label class="flex items-center gap-1.5 cursor-pointer" :class="agentRunning ? 'opacity-50 pointer-events-none' : ''">
-                <span class="text-[10px] text-gray-500 font-medium">Agent</span>
-                <div
-                  @click="agentMode = !agentMode"
-                  class="w-8 h-4 rounded-full transition-colors relative"
-                  :class="agentMode ? 'bg-[#831bd7]' : 'bg-gray-300'"
-                >
-                  <div class="w-3 h-3 bg-white rounded-full absolute top-0.5 transition-transform shadow-sm"
-                    :class="agentMode ? 'translate-x-4' : 'translate-x-0.5'"
-                  ></div>
-                </div>
-              </label>
             </div>
           </div>
         </div>
@@ -892,6 +919,26 @@ const sendMessage = async () => {
                 <div class="w-2 h-2 rounded-full bg-[#831bd7] animate-pulse"></div>
                 正在执行...
               </div>
+              <div v-if="msg.stepType || msg.validationPassed || msg.recoveryState" class="mt-2 flex flex-wrap gap-1.5 text-[10px] font-medium">
+                <span v-if="msg.stepType === 'script'" class="px-2 py-1 rounded-full bg-sky-50 text-sky-700 border border-sky-100">
+                  已录制为脚本步骤
+                </span>
+                <span v-else-if="msg.stepType === 'agent'" class="px-2 py-1 rounded-full bg-violet-50 text-violet-700 border border-violet-100">
+                  已录制为 Agent 步骤
+                </span>
+                <span v-if="msg.validationPassed" class="px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100">
+                  录制态验收已通过
+                </span>
+                <span v-if="msg.recoveryState === 'recovering'" class="px-2 py-1 rounded-full bg-amber-50 text-amber-700 border border-amber-100">
+                  正在尝试自动恢复环境
+                </span>
+                <span v-if="msg.recoveryState === 'recovered'" class="px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100">
+                  恢复成功，正在重试原步骤
+                </span>
+                <span v-if="msg.recoveryState === 'failed'" class="px-2 py-1 rounded-full bg-rose-50 text-rose-700 border border-rose-100">
+                  恢复失败
+                </span>
+              </div>
               <div v-if="msg.status === 'error' && msg.error" class="mt-2 text-[10px] text-red-500 bg-red-50 p-2 rounded-lg">
                 {{ msg.error }}
               </div>
@@ -909,8 +956,8 @@ const sendMessage = async () => {
                   <span class="ml-1">{{ msg.locatorSummary }}</span>
                 </div>
               </div>
-              <div v-if="msg.status === 'done' && msg.role === 'assistant' && !agentMode" class="mt-2 flex items-center gap-1 text-[10px] text-green-600 font-medium">
-                <CheckCircle :size="10" /> 执行成功
+              <div v-if="msg.status === 'done' && msg.role === 'assistant'" class="mt-2 flex items-center gap-1 text-[10px] text-green-600 font-medium">
+                <CheckCircle :size="10" /> {{ msg.stepType === 'agent' ? 'Agent 步骤已保存' : '执行成功' }}
               </div>
               <!-- Legacy script toggle (for non-agent mode) -->
               <button
@@ -945,7 +992,7 @@ const sendMessage = async () => {
               @keyup.enter="sendMessage"
               :disabled="sending || agentRunning"
               class="w-full bg-white border border-gray-200 rounded-2xl py-3 pl-4 pr-12 text-xs focus:ring-2 focus:ring-[#831bd7] focus:border-transparent shadow-sm placeholder:text-gray-400 outline-none disabled:opacity-50"
-              :placeholder="agentRunning ? 'Agent 运行中...' : (sending ? 'AI 正在处理...' : (agentMode ? '描述目标任务...' : '向助手提问...'))"
+              :placeholder="agentRunning ? 'Agent 运行中...' : (sending ? 'AI 正在处理...' : '描述要录制的动作或目标...')"
               type="text"
             />
             <button

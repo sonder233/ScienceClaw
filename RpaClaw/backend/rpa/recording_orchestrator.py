@@ -33,12 +33,25 @@ class RecordingOrchestrator:
             return None
 
         body = self.assistant._extract_function_body(executable_code)
+        step_type = "agent" if candidate.get("step_type") == "agent" else "script"
         return {
+            "type": step_type,
             "action": "ai_script",
             "source": "ai",
             "value": body,
             "description": message,
             "prompt": message,
+        }
+
+    @staticmethod
+    def _build_agent_step(message: str, candidate: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "type": "agent",
+            "action": "ai_script",
+            "source": "ai",
+            "description": message,
+            "prompt": message,
+            "goal": candidate.get("goal") or message,
         }
 
     async def run(
@@ -64,6 +77,33 @@ class RecordingOrchestrator:
         raw_response = candidate.get("raw_response", "")
         if raw_response:
             yield {"event": "message_chunk", "data": {"text": raw_response}}
+        yield {
+            "event": "recording_classified",
+            "data": {"step_type": "agent" if candidate.get("step_type") == "agent" else "script"},
+        }
+
+        if candidate.get("step_type") == "agent":
+            step_data = self._build_agent_step(message, candidate)
+            await self.rpa_manager.add_step(session_id, step_data)
+
+            history = self.assistant._get_history(session_id)
+            history.append({"role": "user", "content": message})
+            history.append({"role": "assistant", "content": raw_response})
+            self.assistant._trim_history(session_id)
+
+            yield {
+                "event": "result",
+                "data": {
+                    "success": True,
+                    "error": None,
+                    "step": step_data,
+                    "output": None,
+                    "validation": {"valid": True, "message": "agent step saved"},
+                    "code": candidate.get("code"),
+                },
+            }
+            yield {"event": "done", "data": {}}
+            return
 
         yield {"event": "executing", "data": {}}
 
@@ -108,6 +148,7 @@ class RecordingOrchestrator:
         if validation["valid"]:
             if overall_success and step_data:
                 await self.rpa_manager.add_step(session_id, step_data)
+                yield {"event": "recording_validated", "data": validation}
         else:
             yield {"event": "validation_failed", "data": validation}
             result_error = result_error or validation["message"]

@@ -316,6 +316,303 @@ if __name__ == "__main__":
             navigation_timeout_ms=RPA_NAVIGATION_TIMEOUT_MS,
         )
 
+    def build_export_steps(
+        self,
+        steps: List[Dict[str, Any]],
+        params: Dict[str, Any] = None,
+    ) -> List[Dict[str, Any]]:
+        params = params or {}
+        normalized_steps = self._deduplicate_steps(steps)
+        normalized_steps = self._infer_missing_tab_transitions(normalized_steps)
+        normalized_steps = self._normalize_step_signals(normalized_steps)
+        used_result_keys: Dict[str, int] = {}
+        exported_steps: List[Dict[str, Any]] = []
+
+        for step_index, step in enumerate(normalized_steps):
+            export_step = dict(step)
+            step_type = self._infer_step_type(export_step)
+            export_step["type"] = step_type
+            if step_type == "agent":
+                export_step.setdefault(
+                    "goal",
+                    export_step.get("goal")
+                    or export_step.get("prompt")
+                    or export_step.get("description")
+                    or export_step.get("value")
+                    or "Complete the task",
+                )
+            else:
+                export_step["script_fragment"] = self.build_script_fragment(
+                    export_step,
+                    params=params,
+                    used_result_keys=used_result_keys,
+                    all_steps=normalized_steps,
+                    step_index=step_index,
+                )
+            exported_steps.append(export_step)
+
+        return exported_steps
+
+    def generate_runtime_entry(self, is_local: bool = False) -> str:
+        execute_skill_func = '''\
+import textwrap as _textwrap
+from pathlib import Path
+
+from backend.rpa.assistant import RPAReActAgent, run_agent_until_stop
+from backend.rpa.recovery_agent import RecoveryAgent
+from backend.rpa.skill_runtime import SkillRuntime
+
+
+def load_manifest():
+    return _json.loads((Path(__file__).parent / "manifest.json").read_text(encoding="utf-8"))
+
+
+async def execute_skill(page, **kwargs):
+    manifest = load_manifest()
+    steps = manifest.get("steps", [])
+    root_tab_id = (steps[0].get("tab_id") if steps else None) or "tab-1"
+    state = {
+        "tabs": {root_tab_id: page},
+        "current_page": page,
+        "_results": {},
+    }
+
+    async def _script_executor(step, _page):
+        fragment = str(step.get("script_fragment") or "").strip()
+        if not fragment:
+            return {"success": True, "step": step, "results": state["_results"]}
+
+        exec_globals = {
+            "__builtins__": __builtins__,
+            "page": page,
+            "current_page": state["current_page"],
+            "tabs": state["tabs"],
+            "_results": state["_results"],
+            "kwargs": kwargs,
+        }
+        script_source = (
+            "async def _fragment_impl():\\n"
+            "    global current_page, tabs, _results\\n"
+            + _textwrap.indent(fragment, "    ")
+            + "\\n"
+        )
+        exec(script_source, exec_globals)
+        await exec_globals["_fragment_impl"]()
+        state["current_page"] = exec_globals.get("current_page", state["current_page"])
+        state["tabs"] = exec_globals.get("tabs", state["tabs"])
+        state["_results"] = exec_globals.get("_results", state["_results"])
+        return {"success": True, "step": step, "results": state["_results"]}
+
+    async def _agent_executor(step, _page):
+        goal = (
+            step.get("goal")
+            or step.get("prompt")
+            or step.get("description")
+            or "Complete the current task"
+        )
+        agent = RPAReActAgent()
+        return await run_agent_until_stop(
+            agent,
+            session_id="skill-runtime",
+            page=state["current_page"],
+            goal=goal,
+            existing_steps=steps,
+            page_provider=lambda: state["current_page"],
+        )
+
+    runtime = SkillRuntime(
+        script_executor=_script_executor,
+        recovery_agent=RecoveryAgent(
+            agent_factory=RPAReActAgent,
+            agent_runner=run_agent_until_stop,
+        ),
+        agent_executor=_agent_executor,
+    )
+    await runtime.run(
+        manifest=manifest,
+        page=page,
+        session_id="skill-runtime",
+        page_provider=lambda: state["current_page"],
+    )
+    return state["_results"]
+'''
+        template = self.RUNNER_TEMPLATE_LOCAL if is_local else self.RUNNER_TEMPLATE_DOCKER
+        return template.format(
+            execute_skill_func=execute_skill_func,
+            default_timeout_ms=RPA_PLAYWRIGHT_TIMEOUT_MS,
+            navigation_timeout_ms=RPA_NAVIGATION_TIMEOUT_MS,
+        )
+
+    def build_script_fragment(
+        self,
+        step: Dict[str, Any],
+        params: Dict[str, Any] = None,
+        scope_var: str = "current_page",
+        used_result_keys: Optional[Dict[str, int]] = None,
+        all_steps: Optional[List[Dict[str, Any]]] = None,
+        step_index: int = 0,
+    ) -> str:
+        params = params or {}
+        used_result_keys = used_result_keys or {}
+        normalized_step = dict(step)
+        normalized_steps = all_steps
+        if normalized_steps is None:
+            normalized_steps = self._normalize_step_signals([normalized_step])
+            normalized_step = normalized_steps[0]
+
+        lines: List[str] = []
+        action = normalized_step.get("action", "")
+        target = normalized_step.get("target", "")
+        value = normalized_step.get("value", "")
+        frame_path = normalized_step.get("frame_path") or []
+
+        if action == "ai_script":
+            ai_code = normalized_step.get("value", "")
+            if not ai_code:
+                return ""
+            converted = self._sync_to_async(ai_code)
+            converted = self._inject_result_capture(converted)
+            converted = self._strip_locator_result_capture(converted)
+            return converted.strip()
+
+        if action == "navigate" or (action == "goto" and normalized_step.get("url")):
+            url = self._escape(normalized_step.get("url", ""))
+            lines.append(f'await {scope_var}.goto("{url}")')
+            lines.append(f'await {scope_var}.wait_for_load_state("domcontentloaded")')
+            return "\n".join(lines)
+
+        if action == "switch_tab":
+            target_tab_id = normalized_step.get("target_tab_id") or normalized_step.get("tab_id") or "tab-1"
+            lines.append(f'current_page = tabs["{self._escape(str(target_tab_id))}"]')
+            lines.append("await current_page.bring_to_front()")
+            return "\n".join(lines)
+
+        if action == "close_tab":
+            closing_tab_id = normalized_step.get("tab_id") or normalized_step.get("source_tab_id")
+            fallback_tab_id = normalized_step.get("target_tab_id")
+            if closing_tab_id:
+                lines.append(f'closing_page = tabs.pop("{self._escape(str(closing_tab_id))}", current_page)')
+            else:
+                lines.append("closing_page = current_page")
+            lines.append("await closing_page.close()")
+            if fallback_tab_id:
+                lines.append(f'current_page = tabs["{self._escape(str(fallback_tab_id))}"]')
+                lines.append("await current_page.bring_to_front()")
+            return "\n".join(lines)
+
+        if action == "download":
+            download_name = self._escape(str(value or "file"))
+            return (
+                f'# NOTE: download of "{download_name}" was triggered by a previous action\n'
+                "# If this step appears, manually wrap the triggering click with expect_download()"
+            )
+
+        locator_scope = scope_var
+        if frame_path:
+            frame_parent = scope_var
+            for frame_selector in frame_path:
+                lines.append(
+                    f'frame_scope = {frame_parent}.frame_locator("{self._escape(frame_selector)}")'
+                )
+                frame_parent = "frame_scope"
+            locator_scope = "frame_scope"
+
+        locator = self._build_adaptive_locator_for_step(normalized_step, locator_scope)
+        if not locator:
+            locator = self._build_locator_for_page(target, locator_scope)
+
+        popup_signal = self._popup_signal(normalized_step)
+        download_signal = self._download_signal(normalized_step)
+        if popup_signal and not self._should_materialize_popup(normalized_steps, step_index, popup_signal, download_signal):
+            popup_signal = None
+
+        if action in {"click", "press"} and (popup_signal or download_signal):
+            interaction = f"await {locator}.click()" if action == "click" else f'await {locator}.press("{self._escape(str(value))}")'
+            outer_indent = ""
+            if download_signal:
+                lines.append(f"{outer_indent}async with current_page.expect_download() as _dl_info:")
+                outer_indent += "    "
+            if popup_signal:
+                lines.append(f"{outer_indent}async with current_page.expect_popup() as popup_info:")
+                outer_indent += "    "
+            lines.append(f"{outer_indent}{interaction}")
+
+            if popup_signal:
+                target_tab_id = popup_signal.get("target_tab_id") or normalized_step.get("target_tab_id") or "tab-new"
+                popup_indent = "    " + ("    " if download_signal else "")
+                safe_tab_id = self._escape(str(target_tab_id))
+                lines.append(f"{popup_indent}new_page = await popup_info.value")
+                lines.append(f'{popup_indent}tabs["{safe_tab_id}"] = new_page')
+                lines.append(f"{popup_indent}current_page = new_page")
+
+            if download_signal:
+                download_name = download_signal.get("filename") or value or "file"
+                safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", str(download_name).split(".")[0]) or "file"
+                lines.append("_dl = await _dl_info.value")
+                lines.append("_dl_dir = kwargs.get('_downloads_dir', '.')")
+                lines.append("import os as _os; _os.makedirs(_dl_dir, exist_ok=True)")
+                lines.append("_dl_dest = _os.path.join(_dl_dir, _dl.suggested_filename)")
+                lines.append("await _dl.save_as(_dl_dest)")
+                lines.append(
+                    f'_results["download_{safe_name}"] = {{"filename": _dl.suggested_filename, "path": _dl_dest}}'
+                )
+            return "\n".join(lines)
+
+        if action == "navigate_click":
+            lines.append(
+                f"async with current_page.expect_navigation(wait_until='domcontentloaded', timeout={RPA_NAVIGATION_TIMEOUT_MS}):"
+            )
+            lines.append(f"    await {locator}.click()")
+            return "\n".join(lines)
+
+        if action == "navigate_press":
+            lines.append(
+                f"async with current_page.expect_navigation(wait_until='domcontentloaded', timeout={RPA_NAVIGATION_TIMEOUT_MS}):"
+            )
+            lines.append(f'    await {locator}.press("{self._escape(str(value))}")')
+            return "\n".join(lines)
+
+        if action == "click":
+            lines.append(f"await {locator}.click()")
+            lines.append("await current_page.wait_for_timeout(500)")
+            return "\n".join(lines)
+
+        if action == "fill":
+            lines.append(f"await {locator}.fill({self._maybe_parameterize(str(value), params)})")
+            return "\n".join(lines)
+
+        if action == "check":
+            return f"await {locator}.check()"
+
+        if action == "uncheck":
+            return f"await {locator}.uncheck()"
+
+        if action == "set_input_files":
+            input_files_value = self._build_input_files_value(normalized_step, str(value), params)
+            return f"await {locator}.set_input_files({input_files_value})"
+
+        if action == "extract_text":
+            result_var = f"extract_text_value_{step_index + 1}"
+            result_key = self._build_extract_result_key(normalized_step, used_result_keys)
+            lines.append(f"{result_var} = await {locator}.inner_text()")
+            lines.append(f'_results["{result_key}"] = {result_var}')
+            return "\n".join(lines)
+
+        if action == "press":
+            return f'await {locator}.press("{self._escape(str(value))}")'
+
+        if action == "select":
+            return f'await {locator}.select_option("{self._escape(str(value))}")'
+
+        raise ValueError(f"Unsupported action for fragment build: {action}")
+
+    @staticmethod
+    def _infer_step_type(step: Dict[str, Any]) -> str:
+        step_type = str(step.get("type") or "").strip().lower()
+        if step_type in {"script", "agent"}:
+            return step_type
+        return "agent" if step.get("source") == "ai" else "script"
+
     def _build_extract_result_key(self, step: Dict[str, Any], used_result_keys: Dict[str, int]) -> str:
         key = self._normalize_result_key(step.get("result_key"))
         if not key:

@@ -68,6 +68,33 @@ class SkillRuntime:
 
         return first_result
 
+    async def run(
+        self,
+        manifest: Dict[str, Any],
+        page: Any,
+        session_id: str = "skill-runtime",
+        model_config: Optional[Dict[str, Any]] = None,
+        page_provider: Optional[Callable[[], Optional[Any]]] = None,
+    ) -> Dict[str, Any]:
+        steps = list(manifest.get("steps") or [])
+        last_result: Dict[str, Any] = {"success": True}
+        completed_steps: List[Dict[str, Any]] = []
+
+        for step in steps:
+            last_result = await self.run_step(
+                step=step,
+                page=page,
+                existing_steps=completed_steps,
+                session_id=session_id,
+                model_config=model_config,
+                page_provider=page_provider,
+            )
+            if not last_result.get("success"):
+                raise RuntimeError(str(last_result.get("error") or "skill runtime failed"))
+            completed_steps.append(step)
+
+        return last_result
+
     async def _recover_and_retry(
         self,
         step: Dict[str, Any],
