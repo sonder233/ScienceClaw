@@ -4,6 +4,10 @@ import { useRouter, useRoute } from 'vue-router';
 import { Play, Save, CheckCircle, XCircle, Loader2, Terminal, Code, ArrowLeft, RotateCcw, House, FolderOpen, Globe } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import { getBackendWsUrl } from '@/utils/sandbox';
+import {
+  getFrameSizeFromMetadata,
+  type ScreencastFrameMetadata,
+} from '@/utils/screencastGeometry';
 
 const router = useRouter();
 const route = useRoute();
@@ -90,7 +94,7 @@ const loadSessionDiagnostics = async () => {
   }
 };
 
-const drawFrame = (base64Data: string, _metadata: { width: number; height: number }) => {
+const drawFrame = (base64Data: string, metadata: ScreencastFrameMetadata) => {
   const canvas = canvasRef.value;
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
@@ -98,8 +102,12 @@ const drawFrame = (base64Data: string, _metadata: { width: number; height: numbe
 
   const img = new Image();
   img.onload = () => {
-    if (canvas.width !== img.naturalWidth) canvas.width = img.naturalWidth;
-    if (canvas.height !== img.naturalHeight) canvas.height = img.naturalHeight;
+    const frameSize = getFrameSizeFromMetadata(metadata, {
+      width: img.naturalWidth,
+      height: img.naturalHeight,
+    });
+    if (canvas.width !== frameSize.width) canvas.width = frameSize.width;
+    if (canvas.height !== frameSize.height) canvas.height = frameSize.height;
     ctx.drawImage(img, 0, 0);
   };
   img.src = `data:image/jpeg;base64,${base64Data}`;

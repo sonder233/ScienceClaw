@@ -4,6 +4,13 @@ import { useRouter, useRoute } from 'vue-router';
 import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen, Globe } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import { getBackendWsUrl } from '@/utils/sandbox';
+import {
+  getFrameSizeFromMetadata,
+  getInputSizeFromMetadata,
+  mapClientPointToViewportPoint,
+  type ScreencastFrameMetadata,
+  type ScreencastSize,
+} from '@/utils/screencastGeometry';
 
 const router = useRouter();
 const route = useRoute();
@@ -17,6 +24,8 @@ const loading = ref(true);
 const error = ref<string | null>(null);
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
+const screencastFrameSize = ref<ScreencastSize>({ width: 1280, height: 720 });
+const screencastInputSize = ref<ScreencastSize>({ width: 1280, height: 720 });
 let screencastWs: WebSocket | null = null;
 let lastMoveTime = 0;
 interface BrowserTab {
@@ -249,7 +258,7 @@ const getModifiers = (e: MouseEvent | KeyboardEvent | WheelEvent): number => {
   return mask;
 };
 
-const drawFrame = (base64Data: string, _metadata: { width: number; height: number }) => {
+const drawFrame = (base64Data: string, metadata: ScreencastFrameMetadata) => {
   const canvas = canvasRef.value;
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
@@ -257,9 +266,16 @@ const drawFrame = (base64Data: string, _metadata: { width: number; height: numbe
 
   const img = new Image();
   img.onload = () => {
-    // 同步绘图缓冲区尺寸与图片原始尺寸
-    if (canvas.width !== img.naturalWidth) canvas.width = img.naturalWidth;
-    if (canvas.height !== img.naturalHeight) canvas.height = img.naturalHeight;
+    const nextFrameSize = getFrameSizeFromMetadata(metadata, {
+      width: img.naturalWidth,
+      height: img.naturalHeight,
+    });
+    const nextInputSize = getInputSizeFromMetadata(metadata, nextFrameSize);
+    screencastFrameSize.value = nextFrameSize;
+    screencastInputSize.value = nextInputSize;
+
+    if (canvas.width !== nextFrameSize.width) canvas.width = nextFrameSize.width;
+    if (canvas.height !== nextFrameSize.height) canvas.height = nextFrameSize.height;
     ctx.drawImage(img, 0, 0);
   };
   img.src = `data:image/jpeg;base64,${base64Data}`;
@@ -366,10 +382,19 @@ const sendInputEvent = (e: Event) => {
     }
 
     const rect = canvas.getBoundingClientRect();
-    // rect.width/height 是 css 显示尺寸，canvas.width/height 是实际缓冲区（图片）尺寸
-    // 归一化坐标应基于 CSS 视口比例
-    const x = (e.clientX - rect.left) / rect.width;
-    const y = (e.clientY - rect.top) / rect.height;
+    const point = mapClientPointToViewportPoint({
+      clientX: e.clientX,
+      clientY: e.clientY,
+      containerRect: {
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      },
+      frameSize: screencastFrameSize.value,
+      inputSize: screencastInputSize.value,
+    });
+    if (!point) return;
     const actionMap: Record<string, string> = {
       mousedown: 'mousePressed',
       mouseup: 'mouseReleased',
@@ -381,20 +406,33 @@ const sendInputEvent = (e: Event) => {
     screencastWs.send(JSON.stringify({
       type: 'mouse',
       action,
-      x,
-      y,
+      coordinateSpace: 'css-pixel',
+      x: point.x,
+      y: point.y,
       button: buttonMap[e.button] || 'left',
       clickCount: e.type === 'mousedown' ? 1 : 0,
       modifiers: getModifiers(e),
     }));
   } else if (e instanceof WheelEvent) {
     const rect = canvas.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / rect.width;
-    const y = (e.clientY - rect.top) / rect.height;
+    const point = mapClientPointToViewportPoint({
+      clientX: e.clientX,
+      clientY: e.clientY,
+      containerRect: {
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      },
+      frameSize: screencastFrameSize.value,
+      inputSize: screencastInputSize.value,
+    });
+    if (!point) return;
     screencastWs.send(JSON.stringify({
       type: 'wheel',
-      x,
-      y,
+      coordinateSpace: 'css-pixel',
+      x: point.x,
+      y: point.y,
       deltaX: e.deltaX,
       deltaY: e.deltaY,
       modifiers: getModifiers(e),
