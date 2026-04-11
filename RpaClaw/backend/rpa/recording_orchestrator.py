@@ -73,18 +73,23 @@ class RecordingOrchestrator:
             yield {"event": "done", "data": {}}
             return
 
-        result, code, resolution = await self.assistant._execute_single_response(
-            current_page,
-            candidate["snapshot"],
-            raw_response,
+        result, final_response, code, resolution, retry_notice = await self.assistant._execute_with_retry(
+            page=page,
+            page_provider=page_provider,
+            snapshot=candidate["snapshot"],
+            full_response=raw_response,
+            messages=candidate["messages"],
+            model_config=model_config,
         )
 
+        if retry_notice:
+            yield {"event": "message_chunk", "data": {"text": retry_notice}}
         if resolution:
             yield {"event": "resolution", "data": {"intent": resolution}}
 
         history = self.assistant._get_history(session_id)
         history.append({"role": "user", "content": message})
-        history.append({"role": "assistant", "content": raw_response})
+        history.append({"role": "assistant", "content": final_response})
         self.assistant._trim_history(session_id)
 
         step_data = self._build_fallback_step(
