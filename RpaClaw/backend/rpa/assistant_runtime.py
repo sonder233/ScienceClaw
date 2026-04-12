@@ -6,7 +6,6 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from .assistant_resolution import pick_expansion_container
 from .assistant_snapshot_runtime import SNAPSHOT_V2_JS
 from .frame_selectors import build_frame_path
 
@@ -418,28 +417,16 @@ def _node_locator_bundle(node: Dict[str, Any]) -> tuple[Dict[str, Any], List[Dic
 
 
 def _resolve_content_node(snapshot: Dict[str, Any], intent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    target_hint = intent.get("target_hint", {}) or {}
-    expected_name = _normalize_hint(target_hint.get("name") or target_hint.get("text") or target_hint.get("value"))
-    expected_tokens = _tokenize_text(expected_name)
-    for node in snapshot.get("content_nodes", []):
-        haystack = " ".join(
-            [
-                str(node.get("text") or ""),
-                str(node.get("semantic_kind") or ""),
-                str(node.get("role") or ""),
-            ]
-        ).lower()
-        if expected_name:
-            haystack_tokens = _tokenize_text(haystack)
-            if expected_name in haystack:
-                return node
-            if expected_tokens and expected_tokens & haystack_tokens:
-                return node
-            if "title" in expected_tokens and _normalize_hint(node.get("semantic_kind")) in {"heading", "title"}:
-                return node
-            continue
-        return node
-    return None
+    nodes = list(snapshot.get("content_nodes", []))
+    if not nodes:
+        return None
+    scored = [{"node": node, "score": _content_node_score(node, intent)} for node in nodes]
+    scored.sort(key=lambda item: (-item["score"],) + _node_sort_key(item["node"]))
+    if _intent_requests_ordinal(intent):
+        max_score = scored[0]["score"]
+        ordinal_pool = [item["node"] for item in scored if item["score"] >= max_score - 1]
+        return _select_ordinal_node(ordinal_pool, intent)
+    return scored[0]["node"]
 
 
 def _node_sort_key(node: Dict[str, Any]) -> tuple[int, int]:
@@ -447,8 +434,12 @@ def _node_sort_key(node: Dict[str, Any]) -> tuple[int, int]:
     return int(bbox.get("y", 0) or 0), int(bbox.get("x", 0) or 0)
 
 
+def _sort_nodes_by_visual_position(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(nodes, key=_node_sort_key)
+
+
 def _annotate_visual_order(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    ordered = sorted(nodes, key=_node_sort_key)
+    ordered = _sort_nodes_by_visual_position(nodes)
     last_y: Optional[int] = None
     row_index = 0
     annotated: List[Dict[str, Any]] = []
@@ -460,28 +451,6 @@ def _annotate_visual_order(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             last_y = current_y
         annotated.append({**node, "row_index": row_index})
     return annotated
-
-
-def expand_container_snapshot(snapshot: Dict[str, Any], container: Dict[str, Any], _intent: Dict[str, Any]) -> Dict[str, Any]:
-    container_id = str(container.get("container_id") or "")
-    actionable_ids = set(container.get("child_actionable_ids") or [])
-    content_ids = set(container.get("child_content_ids") or [])
-
-    actionable_nodes = [
-        node
-        for node in snapshot.get("actionable_nodes", [])
-        if (actionable_ids and node.get("node_id") in actionable_ids) or str(node.get("container_id") or "") == container_id
-    ]
-    content_nodes = [
-        node
-        for node in snapshot.get("content_nodes", [])
-        if (content_ids and node.get("node_id") in content_ids) or str(node.get("container_id") or "") == container_id
-    ]
-
-    return {
-        "actionable_nodes": _annotate_visual_order(actionable_nodes),
-        "content_nodes": _annotate_visual_order(content_nodes),
-    }
 
 
 def _normalize_hint(value: Optional[str]) -> str:
@@ -619,6 +588,124 @@ def _normalize_ordinal(intent: Dict[str, Any]) -> str:
     return ordinal or "first"
 
 
+def _intent_requests_ordinal(intent: Dict[str, Any]) -> bool:
+    prompt_text = " ".join(
+        part for part in [intent.get("prompt"), intent.get("description")] if isinstance(part, str) and part.strip()
+    ).lower()
+    if intent.get("ordinal") not in (None, ""):
+        return True
+    return any(token in prompt_text for token in ["\u7b2c\u4e00\u4e2a", "\u9996\u4e2a", "\u7b2c1\u4e2a", "\u6700\u540e\u4e00\u4e2a", "first", "last"])
+
+
+def _select_ordinal_node(nodes: List[Dict[str, Any]], intent: Dict[str, Any]) -> Dict[str, Any]:
+    ordered = _sort_nodes_by_visual_position(nodes)
+    ordinal = _normalize_ordinal(intent)
+    if not ordered:
+        raise ValueError("No ordinal node candidates")
+    if ordinal == "first":
+        return ordered[0]
+    if ordinal == "last":
+        return ordered[-1]
+    try:
+        index = max(int(ordinal) - 1, 0)
+    except Exception:
+        index = 0
+    return ordered[min(index, len(ordered) - 1)]
+
+
+def _node_search_text(node: Dict[str, Any]) -> str:
+    return " ".join(
+        [
+            str(node.get("name") or ""),
+            str(node.get("text") or ""),
+            str(node.get("title") or ""),
+            str(node.get("placeholder") or ""),
+            str(node.get("type") or ""),
+        ]
+    ).lower()
+
+
+def _actionable_node_score(node: Dict[str, Any], intent: Dict[str, Any], action: str) -> Optional[int]:
+    target_hint = intent.get("target_hint", {}) or {}
+    expected_role = _normalize_hint(target_hint.get("role"))
+    expected_name = _normalize_hint(target_hint.get("name") or target_hint.get("text") or target_hint.get("value"))
+    expected_tokens = _tokenize_text(expected_name)
+    node_role = _normalize_hint(node.get("role"))
+    action_kinds = {str(kind).lower() for kind in (node.get("action_kinds") or [])}
+    if action in {"click", "fill", "press"} and action_kinds and action not in action_kinds:
+        return None
+    if expected_role and node_role != expected_role:
+        return None
+
+    score = 0
+    if expected_role and node_role == expected_role:
+        score += 5
+    haystack = _node_search_text(node)
+    haystack_tokens = _tokenize_text(haystack)
+    if expected_name:
+        if expected_name in haystack:
+            score += 6
+        overlap = len(expected_tokens & haystack_tokens)
+        score += min(overlap * 2, 6)
+        if overlap == 0 and expected_name not in haystack and expected_tokens:
+            score -= 2
+    validation = node.get("validation") or {}
+    if validation.get("status") == "ok":
+        score += 4
+    elif validation.get("status"):
+        score += 1
+    if node.get("hit_test_ok"):
+        score += 3
+    if node.get("is_visible", True):
+        score += 2
+    if node.get("is_enabled", True):
+        score += 1
+    return score
+
+
+def _resolve_actionable_node(snapshot: Dict[str, Any], intent: Dict[str, Any], action: str) -> Optional[Dict[str, Any]]:
+    scored: List[Dict[str, Any]] = []
+    for node in snapshot.get("actionable_nodes", []):
+        score = _actionable_node_score(node, intent, action)
+        if score is None:
+            continue
+        scored.append({"node": node, "score": score})
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda item: (-item["score"],) + _node_sort_key(item["node"]))
+    if _intent_requests_ordinal(intent):
+        max_score = scored[0]["score"]
+        ordinal_pool = [item["node"] for item in scored if item["score"] >= max_score - 1]
+        return _select_ordinal_node(ordinal_pool, intent)
+    return scored[0]["node"]
+
+
+def _content_node_score(node: Dict[str, Any], intent: Dict[str, Any]) -> int:
+    target_hint = intent.get("target_hint", {}) or {}
+    expected_name = _normalize_hint(target_hint.get("name") or target_hint.get("text") or target_hint.get("value"))
+    expected_tokens = _tokenize_text(expected_name)
+    haystack = " ".join(
+        [
+            str(node.get("text") or ""),
+            str(node.get("semantic_kind") or ""),
+            str(node.get("role") or ""),
+        ]
+    ).lower()
+    haystack_tokens = _tokenize_text(haystack)
+    score = 0
+    if expected_name:
+        if expected_name in haystack:
+            score += 6
+        score += min(len(expected_tokens & haystack_tokens) * 2, 6)
+        if "title" in expected_tokens and _normalize_hint(node.get("semantic_kind")) in {"heading", "title"}:
+            score += 3
+    if node.get("bbox"):
+        score += 1
+    return score
+
+
 def _collection_score(collection: Dict[str, Any], intent: Dict[str, Any]) -> int:
     score = 0
     collection_hint = intent.get("collection_hint", {}) or {}
@@ -706,51 +793,21 @@ def resolve_structured_intent(snapshot: Dict[str, Any], intent: Dict[str, Any]) 
                 },
             }
 
-    expansion_container = pick_expansion_container(snapshot, intent)
-    if expansion_container:
-        expanded = expand_container_snapshot(snapshot, expansion_container, intent)
-        expanded_nodes = list((expanded or {}).get("actionable_nodes") or [])
-        if action == "extract_text":
-            expanded_content_nodes = list((expanded or {}).get("content_nodes") or [])
-            if expanded_content_nodes:
-                content_node = expanded_content_nodes[0]
-                locator = content_node.get("locator") or {"method": "text", "value": content_node.get("text", "")}
-                return {
-                    **intent,
-                    "resolved": {
-                        "frame_path": list(content_node.get("frame_path") or expansion_container.get("frame_path") or []),
-                        "locator": locator,
-                        "locator_candidates": list(content_node.get("locator_candidates") or []),
-                        "collection_hint": {},
-                        "item_hint": {},
-                        "ordinal": None,
-                        "selected_locator_kind": str((content_node.get("locator_candidates") or [{}])[0].get("kind") or locator.get("method", "")),
-                        "content_node": content_node,
-                        "assistant_diagnostics": {
-                            "used_local_expansion": True,
-                            "container_id": expansion_container.get("container_id"),
-                        },
-                    },
-                }
-        if expanded_nodes:
-            selected_node = expanded_nodes[0]
-            locator, locator_candidates, selected_locator_kind = _node_locator_bundle(selected_node)
-            return {
-                **intent,
-                "resolved": {
-                    "frame_path": list(selected_node.get("frame_path") or expansion_container.get("frame_path") or []),
-                    "locator": locator,
-                    "locator_candidates": locator_candidates,
-                    "collection_hint": {},
-                    "item_hint": {},
-                    "ordinal": _normalize_ordinal(intent) if intent.get("ordinal") else None,
-                    "selected_locator_kind": selected_locator_kind,
-                    "assistant_diagnostics": {
-                        "used_local_expansion": True,
-                        "container_id": expansion_container.get("container_id"),
-                    },
-                },
-            }
+    best_actionable = _resolve_actionable_node(snapshot, intent, action)
+    if best_actionable:
+        locator, locator_candidates, selected_locator_kind = _node_locator_bundle(best_actionable)
+        return {
+            **intent,
+            "resolved": {
+                "frame_path": list(best_actionable.get("frame_path") or []),
+                "locator": locator,
+                "locator_candidates": locator_candidates,
+                "collection_hint": {},
+                "item_hint": {},
+                "ordinal": _normalize_ordinal(intent) if _intent_requests_ordinal(intent) else None,
+                "selected_locator_kind": selected_locator_kind,
+            },
+        }
 
     expected_role = _normalize_hint(target_hint.get("role"))
     expected_name = _normalize_hint(target_hint.get("name") or target_hint.get("text") or target_hint.get("value"))

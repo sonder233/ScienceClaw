@@ -586,59 +586,20 @@ class RPAAssistantFrameAwareSnapshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolved["frame_path"], ["iframe[title='results']"])
         self.assertEqual(resolved["resolved_target"]["name"], "Result A")
 
-    async def test_expand_container_snapshot_orders_nodes_by_visual_position(self):
-        snapshot = {
-            "actionable_nodes": [
-                {
-                    "node_id": "download-2",
-                    "container_id": "table-1",
-                    "name": "文件二",
-                    "bbox": {"x": 20, "y": 60, "width": 80, "height": 20},
-                },
-                {
-                    "node_id": "download-1",
-                    "container_id": "table-1",
-                    "name": "文件一",
-                    "bbox": {"x": 20, "y": 20, "width": 80, "height": 20},
-                },
-            ],
-            "content_nodes": [
-                {
-                    "node_id": "title-2",
-                    "container_id": "table-1",
-                    "text": "第二行",
-                    "bbox": {"x": 140, "y": 60, "width": 80, "height": 20},
-                },
-                {
-                    "node_id": "title-1",
-                    "container_id": "table-1",
-                    "text": "第一行",
-                    "bbox": {"x": 140, "y": 20, "width": 80, "height": 20},
-                },
-            ],
-            "containers": [
-                {
-                    "container_id": "table-1",
-                    "container_kind": "table",
-                    "child_actionable_ids": ["download-1", "download-2"],
-                    "child_content_ids": ["title-1", "title-2"],
-                }
-            ],
-        }
+    async def test_sort_nodes_by_visual_position_orders_top_to_bottom_then_left_to_right(self):
+        nodes = [
+            {"node_id": "download-2", "name": "文件二", "bbox": {"x": 40, "y": 60, "width": 80, "height": 20}},
+            {"node_id": "download-1", "name": "文件一", "bbox": {"x": 20, "y": 20, "width": 80, "height": 20}},
+            {"node_id": "download-3", "name": "文件三", "bbox": {"x": 100, "y": 20, "width": 80, "height": 20}},
+        ]
 
-        expanded = ASSISTANT_RUNTIME_MODULE.expand_container_snapshot(
-            snapshot,
-            snapshot["containers"][0],
-            {"action": "click", "prompt": "点击第一个文件下载", "ordinal": "first"},
-        )
+        ordered = ASSISTANT_RUNTIME_MODULE._sort_nodes_by_visual_position(nodes)
 
-        self.assertEqual([node["name"] for node in expanded["actionable_nodes"]], ["文件一", "文件二"])
-        self.assertEqual([node["row_index"] for node in expanded["actionable_nodes"]], [1, 2])
-        self.assertEqual([node["text"] for node in expanded["content_nodes"]], ["第一行", "第二行"])
+        self.assertEqual([node["name"] for node in ordered], ["文件一", "文件三", "文件二"])
 
 
 class RPAAssistantStructuredExecutionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_resolve_structured_intent_uses_local_expansion_when_top_candidates_are_close(self):
+    async def test_resolve_structured_intent_uses_bbox_order_for_first_match_in_single_pass(self):
         snapshot = {
             "frames": [],
             "actionable_nodes": [
@@ -647,24 +608,30 @@ class RPAAssistantStructuredExecutionTests(unittest.IsolatedAsyncioTestCase):
                     "frame_path": [],
                     "container_id": "table-1",
                     "role": "link",
-                    "name": "下载一",
+                    "name": "ContractList20260411124156",
                     "action_kinds": ["click"],
-                    "locator": {"method": "text", "value": "下载一"},
-                    "locator_candidates": [{"kind": "text", "selected": True, "locator": {"method": "text", "value": "下载一"}}],
+                    "locator": {"method": "text", "value": "ContractList20260411124156"},
+                    "locator_candidates": [{"kind": "text", "selected": True, "locator": {"method": "text", "value": "ContractList20260411124156"}}],
                     "validation": {"status": "ok"},
                     "hit_test_ok": True,
+                    "is_visible": True,
+                    "is_enabled": True,
+                    "bbox": {"x": 20, "y": 20, "width": 80, "height": 20},
                 },
                 {
                     "node_id": "download-2",
                     "frame_path": [],
                     "container_id": "table-1",
                     "role": "link",
-                    "name": "下载二",
+                    "name": "ContractList20260411124157",
                     "action_kinds": ["click"],
-                    "locator": {"method": "text", "value": "下载二"},
-                    "locator_candidates": [{"kind": "text", "selected": True, "locator": {"method": "text", "value": "下载二"}}],
+                    "locator": {"method": "text", "value": "ContractList20260411124157"},
+                    "locator_candidates": [{"kind": "text", "selected": True, "locator": {"method": "text", "value": "ContractList20260411124157"}}],
                     "validation": {"status": "ok"},
                     "hit_test_ok": True,
+                    "is_visible": True,
+                    "is_enabled": True,
+                    "bbox": {"x": 20, "y": 60, "width": 80, "height": 20},
                 },
             ],
             "content_nodes": [],
@@ -682,41 +649,20 @@ class RPAAssistantStructuredExecutionTests(unittest.IsolatedAsyncioTestCase):
             ],
         }
 
-        with patch.object(
-            ASSISTANT_RUNTIME_MODULE,
-            "expand_container_snapshot",
-            return_value={
-                "actionable_nodes": [
-                    {
-                        "node_id": "download-1-row-1",
-                        "frame_path": [],
-                        "container_id": "table-1",
-                        "role": "link",
-                        "name": "ContractList20260411124156",
-                        "row_index": 1,
-                        "action_kinds": ["click"],
-                        "locator": {"method": "text", "value": "ContractList20260411124156"},
-                        "locator_candidates": [{"kind": "text", "selected": True, "locator": {"method": "text", "value": "ContractList20260411124156"}}],
-                        "validation": {"status": "ok"},
-                        "hit_test_ok": True,
-                    }
-                ],
-                "content_nodes": [],
+        resolved = ASSISTANT_MODULE.resolve_structured_intent(
+            snapshot,
+            {
+                "action": "click",
+                "description": "点击第一个文件下载",
+                "prompt": "点击第一个文件下载",
+                "target_hint": {"role": "link", "name": "contractlist"},
+                "ordinal": "first",
             },
-        ):
-            resolved = ASSISTANT_MODULE.resolve_structured_intent(
-                snapshot,
-                {
-                    "action": "click",
-                    "description": "点击第一个文件下载",
-                    "prompt": "点击第一个文件下载",
-                    "target_hint": {"role": "link", "name": "file download"},
-                    "ordinal": "first",
-                },
-            )
+        )
 
-        self.assertTrue(resolved["resolved"]["assistant_diagnostics"]["used_local_expansion"])
         self.assertEqual(resolved["resolved"]["locator"]["value"], "ContractList20260411124156")
+        self.assertEqual(resolved["resolved"]["ordinal"], "first")
+        self.assertNotIn("assistant_diagnostics", resolved["resolved"])
 
     async def test_resolve_structured_intent_prefers_snapshot_locator_bundle_for_actionable_node(self):
         snapshot = {
@@ -815,7 +761,7 @@ class RPAAssistantStructuredExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolved["resolved"]["locator"]["method"], "text")
         self.assertEqual(resolved["resolved"]["content_node"]["semantic_kind"], "heading")
 
-    async def test_execute_structured_click_records_local_expansion_diagnostics(self):
+    async def test_execute_structured_click_does_not_mark_local_expansion_in_single_pass_mode(self):
         page = _FakeActionPage()
         intent = {
             "action": "click",
@@ -835,7 +781,6 @@ class RPAAssistantStructuredExecutionTests(unittest.IsolatedAsyncioTestCase):
                 "item_hint": {},
                 "ordinal": "first",
                 "selected_locator_kind": "text",
-                "assistant_diagnostics": {"used_local_expansion": True, "container_id": "table-1"},
             },
         }
 
@@ -843,7 +788,7 @@ class RPAAssistantStructuredExecutionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["success"])
         self.assertEqual(page.scope.locator_calls[0], "text:ContractList20260411124156")
-        self.assertTrue(result["step"]["assistant_diagnostics"]["used_local_expansion"])
+        self.assertNotIn("used_local_expansion", result["step"]["assistant_diagnostics"])
 
     async def test_execute_structured_click_uses_frame_locator_chain(self):
         page = _FakeActionPage()
