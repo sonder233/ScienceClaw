@@ -311,7 +311,7 @@ const scheduleScreencastReconnect = () => {
 
   screencastReconnectAttempts += 1;
   const delay = Math.min(1000 * screencastReconnectAttempts, 5000);
-  error.value = `褰曞埗鐢婚潰娴佹殏鏃朵腑鏂紝姝ｅ湪灏濊瘯閲嶈繛... (${delay}ms)`;
+  error.value = `录制画面流暂时中断，正在尝试重连... (${delay}ms)`;
   screencastReconnectTimer = setTimeout(() => {
     screencastReconnectTimer = null;
     if (!shouldReconnectScreencast || !currentScreencastSessionId) return;
