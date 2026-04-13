@@ -53,10 +53,20 @@ class SkillExporter:
 
         auto_inject_note = ""
         if has_auto_injected:
+            # Build example from actual parameters with defaults
+            examples = []
+            for param_name, param_info in params.items():
+                original = param_info.get("original_value", "")
+                if original and original != "{{credential}}":
+                    examples.append(f"`--{param_name}={original}`")
+            example_text = ""
+            if examples:
+                example_text = f" For example: {', '.join(examples[:3])}"
+            
             auto_inject_note = (
                 "\nNote: Some parameters (credentials and defaults) are automatically "
                 "injected at runtime. You can run this skill without providing them. "
-                "Pass `--param=value` only to override the pre-configured defaults.\n"
+                f"Pass `--param=value` only to override the pre-configured defaults.{example_text}\n"
             )
 
         skill_md = f"""---
