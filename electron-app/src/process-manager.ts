@@ -3,7 +3,13 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { app } from 'electron';
 import { ProcessStatus } from './types';
-import { buildBackendEnv, loadEnvFile, resolveRuntimePaths, RuntimePaths } from './runtime';
+import {
+  buildBackendEnv,
+  loadEnvFile,
+  resolveHomeEnvFilePath,
+  resolveRuntimePaths,
+  RuntimePaths,
+} from './runtime';
 import treeKill from 'tree-kill';
 
 export class ProcessManager {
@@ -26,7 +32,7 @@ export class ProcessManager {
    * Build environment variables for backend processes
    */
   private buildEnv(): Record<string, string> {
-    const extraEnv = loadEnvFile(this.runtimePaths.envFilePath);
+    const extraEnv = loadEnvFile(resolveHomeEnvFilePath(this.homeDir));
     return buildBackendEnv({
       homeDir: this.homeDir,
       resourceDir: this.runtimePaths.resourceDir,

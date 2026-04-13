@@ -26,6 +26,13 @@ runTest('packaged mode resolves install-root config and env paths', () => {
   assert.equal(runtimePaths.envFilePath, 'C:\\Apps\\RpaClaw\\.env');
 });
 
+runTest('desktop home env path is stored under RPA_CLAW_HOME', () => {
+  assert.equal(
+    runtime.resolveHomeEnvFilePath('D:\\Users\\Alice\\RpaClaw'),
+    'D:\\Users\\Alice\\RpaClaw\\.env'
+  );
+});
+
 runTest('env parsing ignores comments and strips quotes', () => {
   const parsed = runtime.parseEnvContent(
     ['# comment', 'BACKEND_PORT=13001', 'LOG_LEVEL="DEBUG"', "CUSTOM_VALUE='hello world'"].join(

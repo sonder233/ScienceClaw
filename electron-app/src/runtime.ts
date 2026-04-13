@@ -68,6 +68,10 @@ export function resolveRuntimePaths(options: ResolveRuntimePathsOptions): Runtim
   };
 }
 
+export function resolveHomeEnvFilePath(homeDir: string): string {
+  return path.join(homeDir, ENV_FILE);
+}
+
 export function parseEnvContent(content: string): Record<string, string> {
   const entries: Record<string, string> = {};
 

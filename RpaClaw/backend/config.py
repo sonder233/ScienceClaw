@@ -11,6 +11,13 @@ def _resolve_home() -> str:
     return os.environ.get("RPA_CLAW_HOME", "")
 
 
+def _resolve_home_env_path() -> Path | None:
+    home = (_resolve_home() or "").strip()
+    if not home:
+        return None
+    return Path(home) / ".env"
+
+
 def _resolve_sandbox_home() -> str:
     """Return SANDBOX_RPA_CLAW_HOME, falling back to /home/rpaclaw."""
     return os.environ.get("SANDBOX_RPA_CLAW_HOME", "/home/rpaclaw")
@@ -98,6 +105,9 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "local")
     if ENVIRONMENT == "local":
         load_dotenv(".env")
+    _home_env_path = _resolve_home_env_path()
+    if _home_env_path and _home_env_path.exists():
+        load_dotenv(_home_env_path)
 
     model_ds_name: str = os.environ.get("DS_MODEL") or "deepseek-chat"
     model_ds_api_key: str = os.environ.get("DS_API_KEY") or ""
