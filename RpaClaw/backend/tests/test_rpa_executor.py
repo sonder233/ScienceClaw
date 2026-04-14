@@ -68,8 +68,10 @@ class _FakeContext:
 class _FakeBrowser:
     def __init__(self):
         self.contexts = []
+        self.new_context_calls = []
 
-    async def new_context(self, **_kwargs):
+    async def new_context(self, **kwargs):
+        self.new_context_calls.append(kwargs)
         context = _FakeContext()
         self.contexts.append(context)
         return context
@@ -121,6 +123,16 @@ async def execute_skill(page, **kwargs):
 
         self.assertTrue(result["success"])
         self.assertEqual(len(browser.contexts), 1)
+        self.assertEqual(
+            browser.new_context_calls,
+            [
+                {
+                    "no_viewport": True,
+                    "accept_downloads": True,
+                    "ignore_https_errors": True,
+                }
+            ],
+        )
         self.assertEqual(len(session_manager.attached), 1)
         self.assertEqual(len(session_manager.registered), 1)
         self.assertEqual(len(session_manager.context_pages), 1)

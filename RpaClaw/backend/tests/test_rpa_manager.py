@@ -20,6 +20,7 @@ class _FakeContext:
         self.handlers = {}
         self.exposed_bindings = []
         self.init_scripts = []
+        self.pages = []
 
     def on(self, event_name, handler):
         self.handlers[event_name] = handler
@@ -29,6 +30,23 @@ class _FakeContext:
 
     async def add_init_script(self, script=None, path=None):
         self.init_scripts.append({"script": script, "path": path})
+
+    async def new_page(self):
+        page = _FakePage("about:blank", "Blank", context=self)
+        self.pages.append(page)
+        return page
+
+
+class _FakeBrowser:
+    def __init__(self):
+        self.new_context_calls = []
+        self.contexts = []
+
+    async def new_context(self, **kwargs):
+        self.new_context_calls.append(kwargs)
+        context = _FakeContext()
+        self.contexts.append(context)
+        return context
 
 
 class _FakePage:
@@ -142,6 +160,32 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
             sandbox_session_id="sandbox-1",
         )
         self.manager.sessions[self.session.id] = self.session
+
+    async def test_create_session_uses_https_ignoring_context(self):
+        fake_browser = _FakeBrowser()
+
+        class _FakeConnector:
+            async def get_browser(self, session_id=None, user_id=None):
+                return fake_browser
+
+        original = MANAGER_MODULE.get_cdp_connector
+        MANAGER_MODULE.get_cdp_connector = lambda: _FakeConnector()
+        try:
+            session = await self.manager.create_session("user-1", "sandbox-1")
+        finally:
+            MANAGER_MODULE.get_cdp_connector = original
+
+        self.assertEqual(session.user_id, "user-1")
+        self.assertEqual(
+            fake_browser.new_context_calls,
+            [
+                {
+                    "no_viewport": True,
+                    "accept_downloads": True,
+                    "ignore_https_errors": True,
+                }
+            ],
+        )
 
     async def test_register_page_tracks_first_tab_as_active(self):
         page = _FakePage("https://example.com", "Example")

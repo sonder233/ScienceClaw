@@ -13,6 +13,7 @@ from playwright.async_api import Page, BrowserContext
 
 from .cdp_connector import get_cdp_connector
 from .frame_selectors import build_frame_path
+from .playwright_security import get_context_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +136,7 @@ class RPASessionManager:
             session_id=sandbox_session_id,
             user_id=user_id,
         )
-        context = await browser.new_context(no_viewport=True, accept_downloads=True)
+        context = await browser.new_context(**get_context_kwargs())
         page = await context.new_page()
         page.set_default_timeout(RPA_PAGE_TIMEOUT_MS)
         page.set_default_navigation_timeout(RPA_PAGE_TIMEOUT_MS)

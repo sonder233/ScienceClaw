@@ -730,6 +730,24 @@ class PlaywrightGeneratorTests(unittest.TestCase):
         self.assertEqual(script_normal, script_explicit)
         self.assertNotIn("StepExecutionError", script_normal)
 
+    def test_generate_script_local_runner_uses_relaxed_browser_security_settings(self):
+        generator = PlaywrightGenerator()
+
+        script = generator.generate_script([], is_local=True)
+
+        self.assertIn("--ignore-certificate-errors", script)
+        self.assertIn("--allow-insecure-localhost", script)
+        self.assertIn("--allow-running-insecure-content", script)
+        self.assertIn("--test-type", script)
+        self.assertIn("'ignore_https_errors': True", script)
+
+    def test_generate_script_docker_runner_ignores_https_errors_in_context(self):
+        generator = PlaywrightGenerator()
+
+        script = generator.generate_script([], is_local=False)
+
+        self.assertIn("'ignore_https_errors': True", script)
+
     def test_generate_script_test_mode_step_index_aligns_after_dedup(self):
         generator = PlaywrightGenerator()
         steps = [

@@ -5,6 +5,8 @@ from typing import Dict, Any, Callable, Optional
 
 from playwright.async_api import Browser
 
+from .playwright_security import get_context_kwargs
+
 logger = logging.getLogger(__name__)
 
 RPA_PAGE_TIMEOUT_MS = 60000
@@ -47,7 +49,7 @@ class ScriptExecutor:
             try:
                 if on_log:
                     on_log("Creating browser context...")
-                context = await browser.new_context(no_viewport=True, accept_downloads=True)
+                context = await browser.new_context(**get_context_kwargs())
                 page = await context.new_page()
                 page.set_default_timeout(RPA_PAGE_TIMEOUT_MS)
                 page.set_default_navigation_timeout(RPA_PAGE_TIMEOUT_MS)
