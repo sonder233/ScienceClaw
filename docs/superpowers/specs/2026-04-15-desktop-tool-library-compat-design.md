@@ -215,7 +215,7 @@ Behavior changes:
 
 - ensure `tools_dir` exists before saving
 - return better 4xx or 5xx errors for invalid path, missing directory, permission issues, or malformed tool files
-- keep overwrite semantics unchanged unless later product requirements say otherwise
+- keep current overwrite semantics unchanged in this project scope
 
 ### 5. Make the directory watcher configurable
 
@@ -327,7 +327,7 @@ If a saved tool file cannot be parsed:
 
 - skip it from the active tool registry
 - log the reason with file path
-- surface enough metadata in tool list APIs for debugging if desired later
+- log enough metadata to diagnose failures without changing current list API scope
 
 ### Execute-time errors
 
