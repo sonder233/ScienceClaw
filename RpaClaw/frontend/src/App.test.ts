@@ -78,4 +78,27 @@ describe('App desktop shell', () => {
 
     app.unmount();
   });
+
+  it('renders the desktop title bar when the electron bridge becomes available after app setup', async () => {
+    const { app, root } = await mountApp();
+
+    expect(root.querySelector('header.desktop-title-bar')).toBeNull();
+
+    window.electronAPI = {
+      desktopWindow: {
+        minimize: vi.fn(),
+        toggleMaximize: vi.fn(),
+        close: vi.fn(),
+        isMaximized: vi.fn().mockResolvedValue(false),
+        onStateChanged: vi.fn().mockReturnValue(() => undefined),
+      },
+    };
+
+    window.dispatchEvent(new Event('electron-api-ready'));
+    await nextTick();
+
+    expect(root.querySelector('header.desktop-title-bar')).not.toBeNull();
+
+    app.unmount();
+  });
 });
