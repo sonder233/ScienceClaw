@@ -64,6 +64,14 @@ def _resolve_sandbox_mcp_url() -> str:
     ).rstrip("/")
 
 
+def _resolve_tools_dir() -> str:
+    return _sub("TOOLS_DIR", _resolve_home(), "tools", "/app/Tools")
+
+
+def _resolve_sandbox_tools_dir() -> str:
+    return _env_or_default("SANDBOX_TOOLS_DIR", "/app/Tools").rstrip("/")
+
+
 def _derive_sandbox_vnc_ws_url(base_url: str) -> str:
     parsed = urlparse(base_url.rstrip("/"))
     ws_scheme = "wss" if parsed.scheme == "https" else "ws"
@@ -147,6 +155,8 @@ class Settings(BaseSettings):
     external_skills_dir: str = _sub("EXTERNAL_SKILLS_DIR", _resolve_home(), "external_skills", "./Skills")
     builtin_skills_dir: str = _sub("BUILTIN_SKILLS_DIR", _resolve_home(), "builtin_skills", "./builtin_skills")
     local_data_dir: str = _sub("LOCAL_DATA_DIR", _resolve_home(), "data", "./data")
+    tools_dir: str = _resolve_tools_dir()
+    sandbox_tools_dir: str = _resolve_sandbox_tools_dir()
 
     # 沙箱内 workspace 路径（与后端共享卷）
     sandbox_workspace_dir: str = _sub("SANDBOX_WORKSPACE_DIR", _resolve_sandbox_home(), "workspace", "/home/rpaclaw")

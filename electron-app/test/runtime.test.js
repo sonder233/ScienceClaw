@@ -61,6 +61,7 @@ runTest('extra env overrides defaults and preserves built-in resource paths', ()
   assert.equal(env.BACKEND_PORT, '13001');
   assert.equal(env.FEATURE_FLAG, 'enabled');
   assert.equal(env.BUILTIN_SKILLS_DIR, path.join(resourceDir, 'builtin_skills'));
+  assert.equal(env.TOOLS_DIR, path.join('D:\\Users\\Alice\\RpaClaw', 'tools'));
 });
 
 runTest('packaged backend env prepends bundled python to PATH for shell commands', () => {

@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { resolveHomeLayout } from './home-layout';
 
 const CONFIG_FILE = 'app-config.json';
 const ENV_FILE = '.env';
@@ -114,6 +115,7 @@ export function loadEnvFile(filePath: string): Record<string, string> {
 }
 
 export function buildBackendEnv(options: BuildBackendEnvOptions): Record<string, string> {
+  const homeLayout = resolveHomeLayout(options.homeDir);
   const pythonDir = path.join(options.resourceDir, 'python');
   const sitePackages = path.join(pythonDir, 'Lib', 'site-packages');
   const nodeDir = path.join(options.resourceDir, 'node');
@@ -133,9 +135,10 @@ export function buildBackendEnv(options: BuildBackendEnvOptions): Record<string,
   return {
     STORAGE_BACKEND: 'local',
     RPA_CLAW_HOME: options.homeDir,
-    WORKSPACE_DIR: path.join(options.homeDir, 'workspace'),
-    EXTERNAL_SKILLS_DIR: path.join(options.homeDir, 'external_skills'),
-    LOCAL_DATA_DIR: path.join(options.homeDir, 'data'),
+    WORKSPACE_DIR: homeLayout.workspaceDir,
+    TOOLS_DIR: homeLayout.toolsDir,
+    EXTERNAL_SKILLS_DIR: homeLayout.externalSkillsDir,
+    LOCAL_DATA_DIR: homeLayout.dataDir,
     BUILTIN_SKILLS_DIR: path.join(options.resourceDir, 'builtin_skills'),
     BACKEND_PORT: '12001',
     TASK_SERVICE_PORT: '12002',
