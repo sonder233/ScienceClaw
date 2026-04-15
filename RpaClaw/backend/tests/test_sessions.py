@@ -4,7 +4,9 @@ import tempfile
 import shutil
 from pathlib import Path
 from pathlib import Path as _Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 
 # Load sessions module directly to avoid import issues
@@ -13,6 +15,8 @@ SPEC = importlib.util.spec_from_file_location("sessions_module", SESSIONS_PATH)
 SESSIONS_MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC is not None and SPEC.loader is not None
 SPEC.loader.exec_module(SESSIONS_MODULE)
+SESSIONS_MODULE.Any = Any
+SESSIONS_MODULE.ApiResponse.model_rebuild(_types_namespace={"Any": Any})
 
 
 class TestShouldSkipFile(unittest.TestCase):
@@ -236,6 +240,57 @@ description: Test skill
         # Verify filtered files are NOT in the list
         self.assertNotIn("skill.cpython-313.pyc", file_names)
         self.assertNotIn("module.pyc", file_names)
+
+
+class TestSaveToolFromSession(unittest.IsolatedAsyncioTestCase):
+    """Regression coverage for configured tools_dir writes."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.workspace_root = _Path(self.temp_dir) / "workspace"
+        self.tools_root = _Path(self.temp_dir) / "configured-tools"
+        self.session_id = "session-123"
+        self.tool_name = "demo_tool"
+        staging_dir = self.workspace_root / self.session_id / "tools_staging"
+        staging_dir.mkdir(parents=True)
+        (staging_dir / f"{self.tool_name}.py").write_text(
+            '@tool\ndef demo_tool():\n    """demo"""\n    return "ok"\n',
+            encoding="utf-8",
+        )
+
+        self.original_workspace_dir = getattr(SESSIONS_MODULE, "_WORKSPACE_DIR", None)
+        self.original_tools_dir = SESSIONS_MODULE.settings.tools_dir
+        self.original_get_session = SESSIONS_MODULE.async_get_science_session
+
+        SESSIONS_MODULE._WORKSPACE_DIR = str(self.workspace_root)
+        SESSIONS_MODULE.settings.tools_dir = str(self.tools_root)
+        SESSIONS_MODULE.async_get_science_session = AsyncMock(
+            return_value=SimpleNamespace(user_id="user-1")
+        )
+
+    def tearDown(self):
+        SESSIONS_MODULE.async_get_science_session = self.original_get_session
+        SESSIONS_MODULE.settings.tools_dir = self.original_tools_dir
+        if self.original_workspace_dir is not None:
+            SESSIONS_MODULE._WORKSPACE_DIR = self.original_workspace_dir
+        shutil.rmtree(self.temp_dir)
+
+    async def test_save_tool_from_session_creates_configured_tools_dir(self):
+        body = SESSIONS_MODULE.SaveToolRequest(tool_name=self.tool_name, replaces="")
+        current_user = SimpleNamespace(id="user-1")
+
+        response = await SESSIONS_MODULE.save_tool_from_session(
+            self.session_id,
+            body,
+            current_user,
+        )
+
+        saved_tool = self.tools_root / f"{self.tool_name}.py"
+        self.assertTrue(self.tools_root.is_dir())
+        self.assertTrue(saved_tool.is_file())
+        self.assertIn("@tool", saved_tool.read_text(encoding="utf-8"))
+        self.assertEqual(response.data["tool_name"], self.tool_name)
+        self.assertTrue(response.data["saved"])
 
 
 if __name__ == "__main__":

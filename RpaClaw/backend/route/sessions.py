@@ -1130,7 +1130,12 @@ async def write_skill_file(
 # 外置 Tools 管理（必须放在 /{session_id} 路由之前）
 # ═══════════════════════════════════════════════════════════════════
 
-_TOOLS_DIR = os.environ.get("TOOLS_DIR", "/app/Tools")
+def _tools_dir_path() -> _Path:
+    return _Path(settings.tools_dir)
+
+
+def _tool_file_path(tool_name: str) -> _Path:
+    return _tools_dir_path() / f"{tool_name}.py"
 
 
 def _extract_tool_description(py_file: _Path) -> str:
@@ -1147,7 +1152,7 @@ def _extract_tool_description(py_file: _Path) -> str:
 
 def _list_external_tools() -> List[Dict[str, Any]]:
     """列出 Tools 目录中所有外置工具（排除 __init__.py）。"""
-    base = _Path(_TOOLS_DIR)
+    base = _tools_dir_path()
     if not base.is_dir():
         return []
     tools: List[Dict[str, Any]] = []
@@ -1213,11 +1218,11 @@ async def delete_tool(
 ) -> ApiResponse:
     """彻底删除一个外置 tool 文件。"""
     try:
-        tool_path = _Path(_TOOLS_DIR) / f"{tool_name}.py"
+        tool_path = _tool_file_path(tool_name)
         if not tool_path.is_file():
             raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found")
         resolved = tool_path.resolve()
-        base_resolved = _Path(_TOOLS_DIR).resolve()
+        base_resolved = _tools_dir_path().resolve()
         if not str(resolved).startswith(str(base_resolved)):
             raise HTTPException(status_code=403, detail="Invalid tool path")
         resolved.unlink()
@@ -1238,7 +1243,7 @@ async def read_tool_file(
 ) -> ApiResponse:
     """读取一个外置 tool 的源码内容。"""
     try:
-        tool_path = _Path(_TOOLS_DIR) / f"{tool_name}.py"
+        tool_path = _tool_file_path(tool_name)
         if not tool_path.is_file():
             raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found")
         content = tool_path.read_text(encoding="utf-8", errors="replace")
@@ -1285,12 +1290,13 @@ async def save_tool_from_session(
                 detail="File does not contain a @tool decorated function",
             )
 
-        dst = _Path(_TOOLS_DIR) / f"{tool_name}.py"
+        dst = _tool_file_path(tool_name)
+        dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
 
         replaces = (body.replaces or "").strip()
         if replaces and replaces != tool_name:
-            old_file = _Path(_TOOLS_DIR) / f"{replaces}.py"
+            old_file = _tool_file_path(replaces)
             if old_file.is_file():
                 old_file.unlink()
                 logger.info(f"[Tools] Removed old tool '{replaces}.py' (replaced by '{tool_name}')")
@@ -1794,9 +1800,9 @@ async def _agent_background_worker(
             staging_dir = _Path(_WORKSPACE_DIR) / session_id / "tools_staging"
             if staging_dir.is_dir():
                 saved_tools = {
-                    f.stem for f in _Path(_TOOLS_DIR).glob("*.py")
+                    f.stem for f in _tools_dir_path().glob("*.py")
                     if f.name != "__init__.py"
-                } if _Path(_TOOLS_DIR).is_dir() else set()
+                } if _tools_dir_path().is_dir() else set()
                 for child in sorted(staging_dir.glob("*.py")):
                     tool_name = child.stem
                     if tool_name not in saved_tools and "@tool" in child.read_text(encoding="utf-8", errors="replace"):
