@@ -15,7 +15,7 @@ async def _load_user_mcp_servers(user_id: str) -> List[McpServerDefinition]:
         endpoint = doc.get("endpoint_config") or {}
         servers.append(
             McpServerDefinition(
-                id=doc["_id"],
+                id=str(doc["_id"]),
                 name=doc["name"],
                 description=doc.get("description", ""),
                 transport=doc["transport"],
