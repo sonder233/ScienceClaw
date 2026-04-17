@@ -4,6 +4,8 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
+
 from backend.deepagent.mcp_tool_bridge import bridge_mcp_tool, mcp_tool_name
 from backend.deepagent.mcp_tools_loader import load_mcp_tools
 from backend.deepagent.mcp_runtime import McpToolDefinition
@@ -16,13 +18,19 @@ class FakeRuntime:
     call_result: Any = None
     discovery_error: Exception | None = None
     calls: list[dict[str, Any]] = field(default_factory=list)
+    bound_loop: asyncio.AbstractEventLoop | None = None
 
     async def list_tools(self):
         if self.discovery_error is not None:
             raise self.discovery_error
+        self.bound_loop = asyncio.get_running_loop()
         return self.tools
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+        current_loop = asyncio.get_running_loop()
+        if self.bound_loop is None:
+            self.bound_loop = current_loop
+        assert current_loop is self.bound_loop
         self.calls.append({"tool_name": tool_name, "arguments": arguments})
         return self.call_result
 
@@ -73,6 +81,40 @@ def test_bridge_maps_tool_name_and_preserves_metadata():
         "tool_name": "search",
         "tool_description": "Search PubMed",
     }
+
+
+def test_bridge_preserves_raw_payload_for_propertyless_object_schema():
+    server = McpServerDefinition(
+        id="pubmed",
+        name="PubMed",
+        transport="streamable_http",
+        scope="system",
+        url="https://example.test/mcp",
+    )
+    runtime = FakeRuntime(
+        tools=[
+            McpToolDefinition(
+                name="search",
+                description="Search PubMed",
+                input_schema={
+                    "type": "object",
+                    "additionalProperties": True,
+                },
+            )
+        ],
+        call_result={"ok": True},
+    )
+
+    tool = bridge_mcp_tool(server=server, runtime=runtime, tool=runtime.tools[0])
+    result = asyncio.run(tool.ainvoke({"query": "cells", "limit": 2}))
+
+    assert result == {"ok": True}
+    assert runtime.calls == [
+        {
+            "tool_name": "search",
+            "arguments": {"query": "cells", "limit": 2},
+        }
+    ]
 
 
 def test_loader_applies_tool_policy_filtering():
@@ -213,7 +255,7 @@ def test_loader_logs_redacted_bridge_failures_without_exception_text(caplog, mon
     assert "Tool bridge failed for server pubmed tool 'search'" in caplog.text
 
 
-def test_bridged_tool_forwards_arguments_and_result():
+def test_bridged_tool_rejects_sync_invocation():
     server = McpServerDefinition(
         id="pubmed",
         name="PubMed",
@@ -240,7 +282,45 @@ def test_bridged_tool_forwards_arguments_and_result():
     )
 
     tool = bridge_mcp_tool(server=server, runtime=runtime, tool=runtime.tools[0])
-    result = tool.invoke({"query": "cancer", "limit": 5})
+
+    with pytest.raises(RuntimeError, match="async-only"):
+        tool.invoke({"query": "cancer", "limit": 5})
+
+    assert runtime.calls == []
+
+
+def test_bridged_tool_forwards_arguments_and_result():
+    server = McpServerDefinition(
+        id="pubmed",
+        name="PubMed",
+        transport="streamable_http",
+        scope="system",
+        url="https://example.test/mcp",
+    )
+    runtime = FakeRuntime(
+        tools=[
+            McpToolDefinition(
+                name="search",
+                description="Search PubMed",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer"},
+                    },
+                    "required": ["query"],
+                },
+            )
+        ],
+        call_result={"hits": 3},
+    )
+
+    async def run_flow():
+        tools = await load_mcp_tools([server], runtime_factory=FakeRuntimeFactory({server.id: runtime}))
+        tool = tools[0]
+        return await tool.ainvoke({"query": "cancer", "limit": 5})
+
+    result = asyncio.run(run_flow())
 
     assert result == {"hits": 3}
     assert runtime.calls == [

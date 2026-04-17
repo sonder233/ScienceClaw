@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Mapping
 
 from langchain_core.tools import StructuredTool
-from pydantic import Field, ConfigDict, create_model
+from pydantic import ConfigDict, create_model
 
 from backend.deepagent.mcp_runtime import McpRuntime, McpToolDefinition, coerce_mcp_tool_definition
 from backend.mcp.models import McpServerDefinition
@@ -15,26 +13,26 @@ def mcp_tool_name(server_id: str, tool_name: str) -> str:
     return f"mcp__{server_id}__{tool_name}"
 
 
-def _build_args_schema(tool: McpToolDefinition) -> type:
+def _build_args_schema(tool: McpToolDefinition) -> Any:
     schema = tool.input_schema or {}
     properties = schema.get("properties") if isinstance(schema, dict) else {}
     required = set(schema.get("required") or []) if isinstance(schema, dict) else set()
 
+    if not isinstance(properties, dict) or not properties:
+        return schema if isinstance(schema, dict) else {"type": "object"}
+
     fields: dict[str, tuple[Any, Any]] = {}
-    if isinstance(properties, dict) and properties:
-        for field_name, field_schema in properties.items():
-            if not isinstance(field_name, str):
-                continue
-            field_schema = field_schema if isinstance(field_schema, dict) else {}
-            annotation = _schema_to_annotation(field_schema)
-            default = field_schema.get("default", None)
-            if field_name in required:
-                default = ...
-            if default is None and annotation is not Any:
-                annotation = annotation if _is_optional_annotation(annotation) else annotation | None
-            fields[field_name] = (annotation, default)
-    else:
-        fields["arguments"] = (dict[str, Any], Field(default_factory=dict))
+    for field_name, field_schema in properties.items():
+        if not isinstance(field_name, str):
+            continue
+        field_schema = field_schema if isinstance(field_schema, dict) else {}
+        annotation = _schema_to_annotation(field_schema)
+        default = field_schema.get("default", None)
+        if field_name in required:
+            default = ...
+        if default is None and annotation is not Any:
+            annotation = annotation if _is_optional_annotation(annotation) else annotation | None
+        fields[field_name] = (annotation, default)
 
     model_name = "".join(part.capitalize() for part in tool.name.split("_") if part) or "McpToolInput"
     model = create_model(  # type: ignore[call-overload]
@@ -82,16 +80,6 @@ def _is_optional_annotation(annotation: Any) -> bool:
     return type(None) in getattr(annotation, "__args__", ())
 
 
-def _run_coro_sync(coro: Any) -> Any:
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, coro).result()
-
-
 def bridge_mcp_tool(
     *,
     server: McpServerDefinition,
@@ -113,7 +101,7 @@ def bridge_mcp_tool(
     }
 
     def _sync_call(**kwargs: Any) -> Any:
-        return _run_coro_sync(runtime.call_tool(tool_def.name, kwargs))
+        raise RuntimeError("MCP bridged tools are async-only; use ainvoke()")
 
     async def _async_call(**kwargs: Any) -> Any:
         return await runtime.call_tool(tool_def.name, kwargs)
