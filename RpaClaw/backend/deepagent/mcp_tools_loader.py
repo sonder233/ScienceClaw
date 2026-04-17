@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Sequence
+from typing import Sequence
 
 from langchain_core.tools import StructuredTool
 
@@ -42,12 +42,11 @@ async def load_mcp_tools(
         try:
             runtime = factory.create_runtime(server)
             discovered_tools = await runtime.list_tools()
-        except Exception as exc:
+        except Exception:
             logger.warning(
-                "[MCPToolsLoader] Discovery failed for server %s (%s): %s",
+                "[MCPToolsLoader] Discovery failed for server %s (%s)",
                 server.id,
                 server.transport,
-                exc,
             )
             continue
 
@@ -65,12 +64,11 @@ async def load_mcp_tools(
                         tool=tool_def,
                     )
                 )
-            except Exception as exc:
+            except Exception:
                 logger.warning(
-                    "[MCPToolsLoader] Tool bridge failed for server %s tool %r: %s",
+                    "[MCPToolsLoader] Tool bridge failed for server %s tool %r",
                     server.id,
                     getattr(raw_tool, "name", None) if not isinstance(raw_tool, dict) else raw_tool.get("name"),
-                    exc,
                 )
                 continue
 

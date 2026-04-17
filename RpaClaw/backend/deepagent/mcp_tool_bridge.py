@@ -102,7 +102,9 @@ def bridge_mcp_tool(
     internal_name = mcp_tool_name(server.id, tool_def.name)
     args_schema = _build_args_schema(tool_def)
     tool_metadata = {
+        "source": "mcp",
         "server_id": server.id,
+        "server_key": f"{server.scope}:{server.id}",
         "server_name": server.name,
         "scope": server.scope,
         "transport": server.transport,

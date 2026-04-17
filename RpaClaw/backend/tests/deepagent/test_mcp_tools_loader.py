@@ -64,7 +64,9 @@ def test_bridge_maps_tool_name_and_preserves_metadata():
 
     assert tool.name == mcp_tool_name("pubmed", "search")
     assert tool.metadata["mcp"] == {
+        "source": "mcp",
         "server_id": "pubmed",
+        "server_key": "system:pubmed",
         "server_name": "PubMed",
         "scope": "system",
         "transport": "streamable_http",
@@ -162,6 +164,53 @@ def test_loader_is_fail_soft_when_one_server_breaks():
     )
 
     assert [tool.name for tool in tools] == [mcp_tool_name("healthy", "search")]
+
+
+def test_loader_logs_redacted_context_without_exception_text(caplog):
+    failing_server = McpServerDefinition(
+        id="broken",
+        name="Broken",
+        transport="sse",
+        scope="system",
+        url="https://example.test/broken",
+    )
+
+    class ExplodingFactory:
+        def create_runtime(self, server: McpServerDefinition):
+            raise RuntimeError("secret-token-123")
+
+    caplog.set_level("WARNING")
+
+    tools = asyncio.run(load_mcp_tools([failing_server], runtime_factory=ExplodingFactory()))
+
+    assert tools == []
+    assert "secret-token-123" not in caplog.text
+    assert "Discovery failed for server broken (sse)" in caplog.text
+
+
+def test_loader_logs_redacted_bridge_failures_without_exception_text(caplog, monkeypatch):
+    server = McpServerDefinition(
+        id="pubmed",
+        name="PubMed",
+        transport="streamable_http",
+        scope="system",
+        url="https://example.test/mcp",
+    )
+    runtime = FakeRuntime(
+        tools=[{"name": "search", "description": "Search"}],
+    )
+
+    def exploding_bridge(*, server: McpServerDefinition, runtime: FakeRuntime, tool: Any):
+        raise RuntimeError("secret-query-value")
+
+    caplog.set_level("WARNING")
+    monkeypatch.setattr("backend.deepagent.mcp_tools_loader.bridge_mcp_tool", exploding_bridge)
+
+    tools = asyncio.run(load_mcp_tools([server], runtime_factory=FakeRuntimeFactory({server.id: runtime})))
+
+    assert tools == []
+    assert "secret-query-value" not in caplog.text
+    assert "Tool bridge failed for server pubmed tool 'search'" in caplog.text
 
 
 def test_bridged_tool_forwards_arguments_and_result():
