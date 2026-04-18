@@ -29,7 +29,6 @@
                   : 'border-gray-200 text-[var(--icon-secondary)] dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 hover:shadow-sm'">
                 <FileSearch :size="16" />
               </button>
-
             </div>
           </div>
           <div class="w-full flex justify-between items-center">
@@ -154,7 +153,21 @@
             @update:selectedModelId="selectedModelId = $event"
             @files-changed="onFilesChanged"
             @open-model-settings="openSettingsDialog('models')"
-            />
+          >
+            <template #toolbar-actions>
+              <McpSessionSelector
+                v-if="sessionId"
+                :label="t('MCP')"
+                :title="t('Current session MCP')"
+                :description="t('Override MCP availability for this conversation.')"
+                :tooltip="t('Configure MCP for this conversation')"
+                :servers="sessionMcpServers"
+                :loading="sessionMcpLoading"
+                @open="loadSessionMcpState"
+                @update-mode="updateSessionMcpMode"
+              />
+            </template>
+          </ChatBox>
         </div>
       </div>
     </div>
@@ -214,11 +227,13 @@ import { listModels, type ModelConfig } from '../api/models';
 import { useSettingsDialog } from '../composables/useSettingsDialog';
 import { useSessionNotifications } from '../composables/useSessionNotifications';
 import { consumePendingChat } from '../composables/usePendingChat';
+import { listSessionMcpServers, updateSessionMcpServerMode, type SessionMcpServerItem } from '../api/mcp';
 
 import { useMessageGrouper } from '../composables/useMessageGrouper';
 import ProcessMessage from '../components/ProcessMessage.vue';
 import ActivityPanel from '../components/ActivityPanel.vue';
 import type { ActivityItem } from '../components/ActivityPanel.vue';
+import McpSessionSelector from '../components/McpSessionSelector.vue';
 
 const router = useRouter()
 const { t, locale } = useI18n()
@@ -318,6 +333,8 @@ const savingSkill = ref(false);
 const pendingToolSave = ref<string | null>(null);
 const pendingToolReplaces = ref<string | null>(null);
 const savingTool = ref(false);
+const sessionMcpLoading = ref(false);
+const sessionMcpServers = ref<SessionMcpServerItem[]>([]);
 
 // 上一轮是否因报错结束（用于显示「推理失败」而非「推理完成」）
 const lastTurnHadError = ref(false);
@@ -1022,6 +1039,42 @@ const restoreSession = async () => {
   agentApi.clearUnreadMessageCount(restoreTarget);
 }
 
+const loadSessionMcpState = async () => {
+  if (!sessionId.value) return;
+  sessionMcpLoading.value = true;
+  try {
+    sessionMcpServers.value = await listSessionMcpServers(sessionId.value);
+  } catch (error) {
+    console.error('Failed to load session MCP', error);
+    showErrorToast(t('Failed to load session MCP'));
+  } finally {
+    sessionMcpLoading.value = false;
+  }
+}
+
+const updateSessionMcpMode = async (
+  serverKey: string,
+  mode: 'inherit' | 'enabled' | 'disabled'
+) => {
+  if (!sessionId.value) return;
+  try {
+    await updateSessionMcpServerMode(sessionId.value, serverKey, mode);
+    sessionMcpServers.value = sessionMcpServers.value.map((server) => {
+      if (server.server_key !== serverKey) return server;
+      const effectiveEnabled = server.enabled && (mode === 'enabled' || (mode === 'inherit' && server.default_enabled));
+      return {
+        ...server,
+        session_mode: mode,
+        effective_enabled: effectiveEnabled,
+      };
+    });
+    showSuccessToast(t('Session MCP updated'));
+  } catch (error) {
+    console.error('Failed to update session MCP mode', error);
+    showErrorToast(t('Failed to update session MCP'));
+  }
+}
+
 
 
 // Initialize active conversation
@@ -1031,6 +1084,7 @@ const restoreSession = async () => {
     console.log('[ChatPage] onMounted, sessionId:', routeParams.sessionId);
     if (routeParams.sessionId) {
       sessionId.value = String(routeParams.sessionId) as string;
+      loadSessionMcpState();
 
       const pending = consumePendingChat();
       if (pending?.message) {

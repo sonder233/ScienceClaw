@@ -72,6 +72,11 @@ def _resolve_sandbox_tools_dir() -> str:
     return _env_or_default("SANDBOX_TOOLS_DIR", "/app/Tools").rstrip("/")
 
 
+def _resolve_system_mcp_config_path() -> str:
+    repo_root = Path(__file__).resolve().parents[2]
+    return _env_or_default("SYSTEM_MCP_CONFIG_PATH", str(repo_root / "mcp_servers.yaml"))
+
+
 def _derive_sandbox_vnc_ws_url(base_url: str) -> str:
     parsed = urlparse(base_url.rstrip("/"))
     ws_scheme = "wss" if parsed.scheme == "https" else "ws"
@@ -158,6 +163,7 @@ class Settings(BaseSettings):
     local_data_dir: str = _sub("LOCAL_DATA_DIR", _resolve_home(), "data", "./data")
     tools_dir: str = _resolve_tools_dir()
     sandbox_tools_dir: str = _resolve_sandbox_tools_dir()
+    system_mcp_config_path: str = _resolve_system_mcp_config_path()
 
     # 沙箱内 workspace 路径（与后端共享卷）
     sandbox_workspace_dir: str = _sub("SANDBOX_WORKSPACE_DIR", _resolve_sandbox_home(), "workspace", "/home/rpaclaw")
