@@ -11,6 +11,13 @@ import {
   type ScreencastFrameMetadata,
   type ScreencastSize,
 } from '@/utils/screencastGeometry';
+import {
+  buildScreencastReconnectMessage,
+  getScreencastReconnectDelayMs,
+  getScreencastReconnectNoticeDelayMs,
+  isTerminalScreencastClose,
+  shouldShowScreencastReconnectNotice,
+} from '@/utils/screencastReconnect';
 
 const router = useRouter();
 const route = useRoute();
@@ -28,7 +35,9 @@ const screencastFrameSize = ref<ScreencastSize>({ width: 1280, height: 720 });
 const screencastInputSize = ref<ScreencastSize>({ width: 1280, height: 720 });
 let screencastWs: WebSocket | null = null;
 let screencastReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let screencastReconnectNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 let screencastReconnectAttempts = 0;
+let screencastReconnectStartedAt = 0;
 let shouldReconnectScreencast = true;
 let currentScreencastSessionId: string | null = null;
 let lastMoveTime = 0;
@@ -290,8 +299,21 @@ const clearScreencastReconnectTimer = () => {
   }
 };
 
+const clearScreencastReconnectNoticeTimer = () => {
+  if (screencastReconnectNoticeTimer !== null) {
+    clearTimeout(screencastReconnectNoticeTimer);
+    screencastReconnectNoticeTimer = null;
+  }
+};
+
+const hasPendingScreencastReconnect = () => (
+  screencastReconnectTimer !== null ||
+  (screencastWs !== null && screencastWs.readyState !== WebSocket.OPEN)
+);
+
 const disconnectScreencast = () => {
   clearScreencastReconnectTimer();
+  clearScreencastReconnectNoticeTimer();
   if (!screencastWs) return;
 
   const ws = screencastWs;
@@ -310,8 +332,25 @@ const scheduleScreencastReconnect = () => {
   if (!shouldReconnectScreencast || !currentScreencastSessionId || screencastReconnectTimer !== null) return;
 
   screencastReconnectAttempts += 1;
-  const delay = Math.min(1000 * screencastReconnectAttempts, 5000);
-  error.value = `录制画面流暂时中断，正在尝试重连... (${delay}ms)`;
+  if (screencastReconnectStartedAt <= 0) {
+    screencastReconnectStartedAt = Date.now();
+  }
+  const delay = getScreencastReconnectDelayMs(screencastReconnectAttempts);
+  const message = buildScreencastReconnectMessage('录制', delay);
+  const noticeDelay = getScreencastReconnectNoticeDelayMs({
+    outageStartedAtMs: screencastReconnectStartedAt,
+    nowMs: Date.now(),
+  });
+  clearScreencastReconnectNoticeTimer();
+  screencastReconnectNoticeTimer = setTimeout(() => {
+    screencastReconnectNoticeTimer = null;
+    if (shouldShowScreencastReconnectNotice({
+      shouldReconnect: shouldReconnectScreencast,
+      hasPendingReconnect: hasPendingScreencastReconnect(),
+    })) {
+      error.value = message;
+    }
+  }, noticeDelay);
   screencastReconnectTimer = setTimeout(() => {
     screencastReconnectTimer = null;
     if (!shouldReconnectScreencast || !currentScreencastSessionId) return;
@@ -342,6 +381,8 @@ const connectScreencast = (sid: string) => {
     if (screencastWs !== ws) return;
     console.log('[RecorderPage] Screencast connected');
     screencastReconnectAttempts = 0;
+    screencastReconnectStartedAt = 0;
+    clearScreencastReconnectNoticeTimer();
     error.value = null;
   };
 
@@ -351,6 +392,8 @@ const connectScreencast = (sid: string) => {
       const msg = JSON.parse(ev.data);
       console.log('[RecorderPage] Screencast message:', msg.type, msg.message || '');
       if (msg.type === 'frame') {
+        screencastReconnectStartedAt = 0;
+        clearScreencastReconnectNoticeTimer();
         error.value = null;
         drawFrame(msg.data, msg.metadata);
       } else if (msg.type === 'tabs_snapshot') {
@@ -366,18 +409,23 @@ const connectScreencast = (sid: string) => {
   ws.onclose = (ev) => {
     if (screencastWs !== ws) return;
     console.warn('[RecorderPage] Screencast closed:', ev.code, ev.reason);
-    if (!error.value) {
-      error.value = `录制画面流已断开（code=${ev.code}${ev.reason ? `, reason=${ev.reason}` : ''}）`;
-    }
     screencastWs = null;
     if (!shouldReconnectScreencast) return;
+    if (isTerminalScreencastClose(ev.code)) {
+      shouldReconnectScreencast = false;
+      clearScreencastReconnectNoticeTimer();
+      error.value = `录制画面流已断开（code=${ev.code}${ev.reason ? `, reason=${ev.reason}` : ''}）`;
+      return;
+    }
     scheduleScreencastReconnect();
   };
 
   ws.onerror = (ev) => {
     if (screencastWs !== ws) return;
     console.error('[RecorderPage] Screencast error:', ev);
-    error.value = '无法连接录制画面流，请检查后端 screencast WebSocket/代理配置。';
+    if (!shouldReconnectScreencast) {
+      error.value = '无法连接录制画面流，请检查后端 screencast WebSocket/代理配置。';
+    }
   };
 };
 

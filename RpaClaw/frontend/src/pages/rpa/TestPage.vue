@@ -22,6 +22,13 @@ import {
   getFrameSizeFromMetadata,
   type ScreencastFrameMetadata,
 } from '@/utils/screencastGeometry';
+import {
+  buildScreencastReconnectMessage,
+  getScreencastReconnectDelayMs,
+  getScreencastReconnectNoticeDelayMs,
+  isTerminalScreencastClose,
+  shouldShowScreencastReconnectNotice,
+} from '@/utils/screencastReconnect';
 
 const router = useRouter();
 const route = useRoute();
@@ -40,7 +47,9 @@ const params = computed(() => {
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 let screencastWs: WebSocket | null = null;
 let screencastReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let screencastReconnectNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 let screencastReconnectAttempts = 0;
+let screencastReconnectStartedAt = 0;
 let shouldReconnectScreencast = true;
 
 interface BrowserTab {
@@ -187,8 +196,21 @@ const clearScreencastReconnectTimer = () => {
   }
 };
 
+const clearScreencastReconnectNoticeTimer = () => {
+  if (screencastReconnectNoticeTimer !== null) {
+    clearTimeout(screencastReconnectNoticeTimer);
+    screencastReconnectNoticeTimer = null;
+  }
+};
+
+const hasPendingScreencastReconnect = () => (
+  screencastReconnectTimer !== null ||
+  (screencastWs !== null && screencastWs.readyState !== WebSocket.OPEN)
+);
+
 const disconnectScreencast = () => {
   clearScreencastReconnectTimer();
+  clearScreencastReconnectNoticeTimer();
   if (!screencastWs) return;
 
   const ws = screencastWs;
@@ -207,8 +229,25 @@ const scheduleScreencastReconnect = (sid: string) => {
   if (!shouldReconnectScreencast || screencastReconnectTimer !== null) return;
 
   screencastReconnectAttempts += 1;
-  const delay = Math.min(1000 * screencastReconnectAttempts, 5000);
-  error.value = `测试画面流暂时中断，正在尝试重连... (${delay}ms)`;
+  if (screencastReconnectStartedAt <= 0) {
+    screencastReconnectStartedAt = Date.now();
+  }
+  const delay = getScreencastReconnectDelayMs(screencastReconnectAttempts);
+  const message = buildScreencastReconnectMessage('测试', delay);
+  const noticeDelay = getScreencastReconnectNoticeDelayMs({
+    outageStartedAtMs: screencastReconnectStartedAt,
+    nowMs: Date.now(),
+  });
+  clearScreencastReconnectNoticeTimer();
+  screencastReconnectNoticeTimer = setTimeout(() => {
+    screencastReconnectNoticeTimer = null;
+    if (shouldShowScreencastReconnectNotice({
+      shouldReconnect: shouldReconnectScreencast,
+      hasPendingReconnect: hasPendingScreencastReconnect(),
+    })) {
+      error.value = message;
+    }
+  }, noticeDelay);
   screencastReconnectTimer = setTimeout(() => {
     screencastReconnectTimer = null;
     if (!shouldReconnectScreencast) return;
@@ -239,6 +278,8 @@ const connectScreencast = (sid: string) => {
     if (screencastWs !== ws) return;
     console.log('[TestPage] Screencast connected');
     screencastReconnectAttempts = 0;
+    screencastReconnectStartedAt = 0;
+    clearScreencastReconnectNoticeTimer();
     error.value = null;
   };
 
@@ -247,6 +288,8 @@ const connectScreencast = (sid: string) => {
     try {
       const msg = JSON.parse(ev.data);
       if (msg.type === 'frame') {
+        screencastReconnectStartedAt = 0;
+        clearScreencastReconnectNoticeTimer();
         error.value = null;
         drawFrame(msg.data, msg.metadata);
       } else if (msg.type === 'tabs_snapshot') {
@@ -264,17 +307,22 @@ const connectScreencast = (sid: string) => {
   ws.onerror = (event) => {
     if (screencastWs !== ws) return;
     console.error('[TestPage] Screencast error:', event);
-    error.value = '无法连接测试画面流，请检查后端 screencast WebSocket 或代理配置。';
+    if (!shouldReconnectScreencast) {
+      error.value = '无法连接测试画面流，请检查后端 screencast WebSocket 或代理配置。';
+    }
   };
 
   ws.onclose = (event) => {
     if (screencastWs !== ws) return;
     console.log('[TestPage] Screencast closed:', event.code, event.reason);
-    if (!error.value) {
-      error.value = `测试画面流已断开（code=${event.code}${event.reason ? `, reason=${event.reason}` : ''}）`;
-    }
     screencastWs = null;
     if (!shouldReconnectScreencast) return;
+    if (isTerminalScreencastClose(event.code)) {
+      shouldReconnectScreencast = false;
+      clearScreencastReconnectNoticeTimer();
+      error.value = `测试画面流已断开（code=${event.code}${event.reason ? `, reason=${event.reason}` : ''}）`;
+      return;
+    }
     scheduleScreencastReconnect(sid);
   };
 };
