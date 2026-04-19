@@ -11,6 +11,7 @@ import {
   type RpaMcpExecutionResult,
   type RpaMcpPreview,
 } from '@/api/rpaMcp';
+import { focusPreviewTestSection, getPreviewTestStatus } from '@/utils/rpaMcpConvert';
 import { convertCookieInputToPlaywrightCookies, type CookieInputMode } from '@/utils/rpaMcpTest';
 import { showErrorToast, showSuccessToast } from '@/utils/toast';
 
@@ -40,6 +41,7 @@ const cookieSectionOpen = ref(false);
 const cookieMode = ref<CookieInputMode>('cookie_header');
 const cookieText = ref('');
 const cookieDomain = ref('');
+const previewTestSection = ref<HTMLElement | null>(null);
 const argumentValues = reactive<Record<string, unknown>>({});
 
 const formatJsonBlock = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
@@ -97,6 +99,22 @@ const getAllowedCookieDomains = () => {
 
 const paramFields = computed(() => getParamFields(preview.value));
 const allowedCookieDomains = computed(() => getAllowedCookieDomains());
+const previewTestStatus = computed(() => getPreviewTestStatus(hasSuccessfulTest.value, testResult.value));
+const previewTestStatusLabel = computed(() => {
+  if (previewTestStatus.value === 'success') return 'Preview test passed';
+  if (previewTestStatus.value === 'failed') return 'Preview test failed';
+  return 'Preview test required';
+});
+const previewTestStatusDescription = computed(() => {
+  if (previewTestStatus.value === 'success') return 'This draft can now be saved as an MCP tool.';
+  if (previewTestStatus.value === 'failed') return 'Fix the current draft inputs and run preview test again before saving.';
+  return 'Run a preview test on this page before saving the tool.';
+});
+const previewTestStatusClass = computed(() => {
+  if (previewTestStatus.value === 'success') return 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200';
+  if (previewTestStatus.value === 'failed') return 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200';
+  return 'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-200';
+});
 const cookieInputPlaceholder = computed(() => {
   if (cookieMode.value === 'cookie_header') return 'Cookie: sid=abc; theme=dark';
   if (cookieMode.value === 'header_value') return 'sid=abc; theme=dark';
@@ -214,6 +232,7 @@ const saveTool = async () => {
   if (!sessionId.value) return;
   if (!hasSuccessfulTest.value) {
     showErrorToast('Run a successful preview test before saving this tool');
+    focusPreviewTestSection(previewTestSection.value);
     return;
   }
   saving.value = true;
@@ -270,6 +289,23 @@ onMounted(loadPreview);
           <div v-if="loading" class="rounded-2xl border border-dashed border-slate-300 p-8 text-sm text-slate-500 dark:border-white/10">Loading preview...</div>
 
           <template v-else-if="preview">
+            <section class="rounded-3xl border p-4" :class="previewTestStatusClass">
+              <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <p class="text-sm font-black">{{ previewTestStatusLabel }}</p>
+                  <p class="text-sm opacity-90">{{ previewTestStatusDescription }}</p>
+                </div>
+                <button
+                  class="inline-flex items-center gap-2 rounded-full border border-current/20 bg-white/80 px-4 py-2 text-sm font-semibold text-inherit dark:bg-[#17181d]"
+                  :disabled="testing"
+                  @click="runPreviewTest"
+                >
+                  <Beaker :size="16" />
+                  {{ testing ? 'Testing...' : 'Run preview test' }}
+                </button>
+              </div>
+            </section>
+
             <div class="grid gap-4 md:grid-cols-2">
               <label class="block space-y-2">
                 <span class="text-sm font-semibold">Tool name</span>
@@ -291,7 +327,7 @@ onMounted(loadPreview);
               <textarea v-model="allowedDomainsText" rows="4" class="w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm outline-none dark:border-white/10 dark:bg-white/5" />
             </label>
 
-            <section class="rounded-3xl border border-slate-200 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-white/[0.03]">
+            <section ref="previewTestSection" class="rounded-3xl border border-slate-200 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-white/[0.03]">
               <div class="mb-4 flex items-center justify-between gap-3">
                 <div class="flex items-center gap-3">
                   <div class="flex h-9 w-9 items-center justify-center rounded-2xl bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-200">
@@ -303,6 +339,7 @@ onMounted(loadPreview);
                   </div>
                 </div>
                 <button
+                  data-preview-test-action
                   class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold dark:border-white/10 dark:bg-white/5"
                   :disabled="testing"
                   @click="runPreviewTest"
