@@ -83,8 +83,6 @@ def _preview_config_signature(*, session_id: str, user_id: str, name: str, descr
         {
             "session_id": session_id,
             "user_id": user_id,
-            "name": name,
-            "description": description,
             "allowed_domains": allowed_domains,
             "post_auth_start_url": post_auth_start_url,
         },

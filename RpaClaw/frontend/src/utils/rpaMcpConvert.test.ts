@@ -42,7 +42,7 @@ describe('getPreviewTestStatus', () => {
 });
 
 describe('buildPreviewDraftSignature', () => {
-  it('normalizes trimmed values into a stable signature', () => {
+  it('normalizes execution-relevant values into a stable signature', () => {
     expect(buildPreviewDraftSignature({
       sessionId: 's1',
       name: ' tool ',
@@ -52,12 +52,26 @@ describe('buildPreviewDraftSignature', () => {
     })).toBe(
       JSON.stringify({
         session_id: 's1',
-        name: 'tool',
-        description: 'desc',
         allowed_domains: ['github.com', 'api.github.com'],
         post_auth_start_url: 'https://github.com/trending',
       }),
     );
+  });
+
+  it('does not change when only name or description changes', () => {
+    expect(buildPreviewDraftSignature({
+      sessionId: 's1',
+      name: 'tool-a',
+      description: 'desc-a',
+      allowedDomains: ['github.com'],
+      postAuthStartUrl: 'https://github.com/trending',
+    })).toBe(buildPreviewDraftSignature({
+      sessionId: 's1',
+      name: 'tool-b',
+      description: 'desc-b',
+      allowedDomains: ['github.com'],
+      postAuthStartUrl: 'https://github.com/trending',
+    }));
   });
 });
 

@@ -23,8 +23,6 @@ function normalizeList(items: string[]): string[] {
 export function buildPreviewDraftSignature(input: PreviewDraftSignatureInput): string {
   return JSON.stringify({
     session_id: input.sessionId.trim(),
-    name: input.name.trim(),
-    description: input.description.trim(),
     allowed_domains: normalizeList(input.allowedDomains),
     post_auth_start_url: input.postAuthStartUrl.trim(),
   });

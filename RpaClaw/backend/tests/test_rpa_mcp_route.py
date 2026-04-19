@@ -534,3 +534,45 @@ def test_create_tool_uses_successful_preview_test_artifacts(monkeypatch):
     assert response.json()["data"]["output_schema_confirmed"] is True
     assert registry.tool.output_schema["properties"]["data"]["properties"]["arguments"]["type"] == "object"
     assert registry.tool.output_examples[0]["data"]["browser"]["session_id"] == "sandbox-1"
+
+
+def test_create_tool_allows_name_and_description_changes_after_successful_preview_test(monkeypatch):
+    app = _build_rpa_mcp_app()
+    client = TestClient(app)
+    converter = _FakeConverter()
+    tool = _sample_tool()
+    registry = _FakeRegistry(tool)
+    draft_registry = _FakePreviewTestRegistry()
+
+    monkeypatch.setattr(rpa_mcp_route, "get_rpa_session_steps", _fake_steps)
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpConverter", lambda: converter)
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpToolRegistry", lambda: registry)
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpPreviewDraftRegistry", lambda: draft_registry)
+
+    config_signature = rpa_mcp_route._preview_config_signature(
+        session_id="session-1",
+        user_id="user-1",
+        name="download_invoice",
+        description="Download invoice",
+        allowed_domains=["example.com"],
+        post_auth_start_url="https://example.com/dashboard",
+    )
+    draft_registry.docs[("session-1", "user-1", config_signature)] = {
+        "recommended_output_schema": {"type": "object", "properties": {"data": {"type": "object"}}},
+        "output_examples": [{"success": True}],
+        "output_inference_report": {"test_result_keys": ["browser"]},
+        "tested": True,
+    }
+
+    response = client.post(
+        "/api/v1/rpa-mcp/session/session-1/tools",
+        json={
+            "name": "download_invoice_v2",
+            "description": "Download invoice with better copy",
+            "allowed_domains": ["example.com"],
+            "post_auth_start_url": "https://example.com/dashboard",
+            "output_schema": {"type": "object", "properties": {"data": {"type": "object"}}},
+        },
+    )
+
+    assert response.status_code == 200
