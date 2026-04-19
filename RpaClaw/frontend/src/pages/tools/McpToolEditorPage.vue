@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue';
+import { useI18n } from 'vue-i18n';
 import { useRoute, useRouter } from 'vue-router';
 import { ArrowLeft, Beaker, ChevronDown, ChevronUp, Save, Shield, Wand2 } from 'lucide-vue-next';
 
@@ -19,6 +20,7 @@ import {
   getPreviewTestStatus,
   hasMatchingPreviewTest,
 } from '@/utils/rpaMcpConvert';
+import { buildRecordedStepSummary, buildSchemaSummary } from '@/utils/rpaMcpEditorView';
 import { convertCookieInputToPlaywrightCookies, type CookieInputMode } from '@/utils/rpaMcpTest';
 import { showErrorToast, showSuccessToast } from '@/utils/toast';
 
@@ -73,6 +75,7 @@ interface RecordedStepItem {
 
 const route = useRoute();
 const router = useRouter();
+const { t } = useI18n();
 const sessionId = computed(() => typeof route.query.sessionId === 'string' ? route.query.sessionId : '');
 const loading = ref(true);
 const saving = ref(false);
@@ -120,7 +123,7 @@ const getNthBaseLocator = (locator: ParsedLocator) => locator.locator || locator
 
 const formatLocator = (raw: unknown): string => {
   const locator = parseLocator(raw);
-  if (!locator) return 'No locator';
+  if (!locator) return t('MCP Editor No locator');
   if (locator.method === 'role') {
     return locator.name ? `role=${locator.role}[name="${locator.name}"]` : `role=${locator.role}`;
   }
@@ -137,16 +140,16 @@ const formatLocator = (raw: unknown): string => {
 };
 
 const formatFramePath = (framePath?: string[]) => {
-  if (!framePath?.length) return 'Main frame';
+  if (!framePath?.length) return t('MCP Editor Main frame');
   return framePath.join(' -> ');
 };
 
 const VALIDATION_LABELS: Record<string, string> = {
-  ok: 'Strict match',
-  ambiguous: 'Ambiguous / not unique',
-  fallback: 'Fallback',
-  warning: 'Warning',
-  broken: 'Broken',
+  ok: 'MCP Editor Strict match',
+  ambiguous: 'MCP Editor Ambiguous / not unique',
+  fallback: 'MCP Editor Fallback',
+  warning: 'MCP Editor Warning',
+  broken: 'MCP Editor Broken',
 };
 
 const VALIDATION_CLASS_MAP: Record<string, string> = {
@@ -158,8 +161,8 @@ const VALIDATION_CLASS_MAP: Record<string, string> = {
 };
 
 const getValidationLabel = (status?: string) => {
-  if (!status) return 'Unknown';
-  return VALIDATION_LABELS[status] || status.replace(/_/g, ' ');
+  if (!status) return t('MCP Editor Unknown');
+  return VALIDATION_LABELS[status] ? t(VALIDATION_LABELS[status]) : status.replace(/_/g, ' ');
 };
 
 const getValidationClass = (status?: string) => {
@@ -169,21 +172,21 @@ const getValidationClass = (status?: string) => {
 
 const getActionLabel = (action: string) => {
   const map: Record<string, string> = {
-    click: 'Click',
-    fill: 'Fill',
-    press: 'Press',
-    select: 'Select',
-    navigate: 'Navigate',
-    goto: 'Navigate',
-    navigate_click: 'Navigate after click',
-    navigate_press: 'Navigate after keypress',
-    open_tab_click: 'Open tab',
-    switch_tab: 'Switch tab',
-    close_tab: 'Close tab',
-    download_click: 'Download',
-    download: 'Download',
+    click: 'MCP Editor Click',
+    fill: 'MCP Editor Fill',
+    press: 'MCP Editor Press',
+    select: 'MCP Editor Select',
+    navigate: 'MCP Editor Navigate',
+    goto: 'MCP Editor Navigate',
+    navigate_click: 'MCP Editor Navigate after click',
+    navigate_press: 'MCP Editor Navigate after keypress',
+    open_tab_click: 'MCP Editor Open tab',
+    switch_tab: 'MCP Editor Switch tab',
+    close_tab: 'MCP Editor Close tab',
+    download_click: 'MCP Editor Download',
+    download: 'MCP Editor Download',
   };
-  return map[action] || action;
+  return map[action] ? t(map[action]) : action;
 };
 
 const getActionColor = (action: string) => {
@@ -208,12 +211,14 @@ const getActionColor = (action: string) => {
 const getValuePreview = (step: RecordedStepItem) => {
   if (!step.value) return '';
   const display = step.sensitive ? '******' : String(step.value);
-  return shortenText(`Value: ${display}`, 28);
+  return shortenText(t('MCP Editor Value preview', { value: display }), 28);
 };
 
 const getFrameHint = (step: RecordedStepItem) => {
   if (!step.frame_path?.length) return '';
-  return `iframe ${step.frame_path.length} level${step.frame_path.length > 1 ? 's' : ''}`;
+  return step.frame_path.length === 1
+    ? t('MCP Editor iframe level', { count: step.frame_path.length })
+    : t('MCP Editor iframe levels', { count: step.frame_path.length });
 };
 
 const getSelectedCandidate = (step: RecordedStepItem): LocatorCandidate | null => {
@@ -226,13 +231,19 @@ const formatCandidateMatchText = (candidate: LocatorCandidate): string => {
   const visibleCount = candidate.visible_match_count;
 
   if (typeof strictCount === 'number' && strictCount > 0) {
-    return strictCount === 1 ? 'strict match' : `${strictCount} strict matches`;
+    return strictCount === 1
+      ? t('MCP Editor strict match lower')
+      : t('MCP Editor strict matches', { count: strictCount });
   }
   if (typeof visibleCount === 'number') {
-    return `${visibleCount} visible match${visibleCount === 1 ? '' : 'es'}`;
+    return visibleCount === 1
+      ? t('MCP Editor visible match', { count: visibleCount })
+      : t('MCP Editor visible matches', { count: visibleCount });
   }
   if (typeof strictCount === 'number') {
-    return `${strictCount} strict match${strictCount === 1 ? '' : 'es'}`;
+    return strictCount === 1
+      ? t('MCP Editor strict match with count', { count: strictCount })
+      : t('MCP Editor strict matches', { count: strictCount });
   }
   return '';
 };
@@ -242,13 +253,17 @@ const getCandidateSummary = (step: RecordedStepItem) => {
   const total = candidates.length;
   if (!total) return '';
   const selected = getSelectedCandidate(step);
-  if (!selected) return `${total} candidate${total === 1 ? '' : 's'}`;
+  if (!selected) return total === 1
+    ? t('MCP Editor candidate count', { count: total })
+    : t('MCP Editor candidates count', { count: total });
 
   const summary: string[] = [];
-  if (selected.kind) summary.push(`Current ${selected.kind}`);
+  if (selected.kind) summary.push(t('MCP Editor Current locator kind', { kind: selected.kind }));
   const matchText = formatCandidateMatchText(selected);
   if (matchText) summary.push(matchText);
-  summary.push(`${total} candidate${total === 1 ? '' : 's'}`);
+  summary.push(total === 1
+    ? t('MCP Editor candidate count', { count: total })
+    : t('MCP Editor candidates count', { count: total }));
   return summary.join(' / ');
 };
 
@@ -316,6 +331,11 @@ const getAllowedCookieDomains = () => {
 
 const paramFields = computed(() => getParamFields(preview.value));
 const allowedCookieDomains = computed(() => getAllowedCookieDomains());
+const recordedStepSummary = computed(() => buildRecordedStepSummary(recordedSteps.value as unknown as Array<Record<string, any>>));
+const schemaSummary = computed(() => buildSchemaSummary({
+  input_schema: preview.value?.input_schema,
+  output_schema: preview.value?.output_schema,
+}));
 const currentPreviewSignature = computed(() => buildPreviewDraftSignature({
   sessionId: sessionId.value,
   name: toolName.value,
@@ -331,16 +351,16 @@ const previewTestStatus = computed(() => getPreviewTestStatus({
   hasConfigChangesSinceLastTest: hasConfigChangesSinceLastTest.value,
 }));
 const previewTestStatusLabel = computed(() => {
-  if (previewTestStatus.value === 'success') return 'Preview test passed';
-  if (previewTestStatus.value === 'stale') return 'Preview test is out of date';
-  if (previewTestStatus.value === 'failed') return 'Preview test failed';
-  return 'Preview test required';
+  if (previewTestStatus.value === 'success') return t('MCP Editor Preview test passed');
+  if (previewTestStatus.value === 'stale') return t('MCP Editor Preview test is out of date');
+  if (previewTestStatus.value === 'failed') return t('MCP Editor Preview test failed');
+  return t('MCP Editor Preview test required');
 });
 const previewTestStatusDescription = computed(() => {
-  if (previewTestStatus.value === 'success') return 'This draft can now be saved as an MCP tool.';
-  if (previewTestStatus.value === 'stale') return 'You changed the draft after testing. Run preview test again before saving.';
-  if (previewTestStatus.value === 'failed') return 'Fix the current draft inputs and run preview test again before saving.';
-  return 'Run a preview test on this page before saving the tool.';
+  if (previewTestStatus.value === 'success') return t('MCP Editor This draft can now be saved as an MCP tool.');
+  if (previewTestStatus.value === 'stale') return t('MCP Editor You changed the draft after testing. Run preview test again before saving.');
+  if (previewTestStatus.value === 'failed') return t('MCP Editor Fix the current draft inputs and run preview test again before saving.');
+  return t('MCP Editor Run a preview test on this page before saving the tool.');
 });
 const previewTestStatusClass = computed(() => {
   if (previewTestStatus.value === 'success') return 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200';
@@ -353,10 +373,10 @@ const cookieInputPlaceholder = computed(() => {
   if (cookieMode.value === 'header_value') return 'sid=abc; theme=dark';
   return '[{"name":"sid","value":"abc","domain":".example.com","path":"/"}]';
 });
-const pageTitle = computed(() => source.value === 'rpa-session' ? 'Create MCP Tool' : 'MCP Tool Editor');
+const pageTitle = computed(() => source.value === 'rpa-session' ? t('MCP Editor Create MCP Tool') : t('MCP Editor MCP Tool Editor'));
 const pageDescription = computed(() => source.value === 'rpa-session'
-  ? 'Publish an RPA recording as a reusable MCP tool.'
-  : 'Edit MCP tool metadata, schemas, and preview test state.');
+  ? t('MCP Editor Publish an RPA recording as a reusable MCP tool.')
+  : t('MCP Editor Edit MCP tool metadata, schemas, preview test state, and recorded steps.'));
 
 const loadRecordedSession = async () => {
   if (!sessionId.value) {
@@ -370,7 +390,7 @@ const loadRecordedSession = async () => {
     recordedSteps.value = (session.steps || []) as RecordedStepItem[];
   } catch (error: any) {
     console.error(error);
-    showErrorToast(error?.message || 'Failed to load recorded steps');
+    showErrorToast(error?.message || t('MCP Editor Failed to load recorded steps'));
   } finally {
     stepsLoading.value = false;
   }
@@ -410,7 +430,7 @@ const loadPreview = async () => {
     hasSuccessfulTest.value = Boolean(preview.value.output_examples?.length);
     lastSuccessfulTestSignature.value = hasSuccessfulTest.value ? currentPreviewSignature.value : null;
   } catch (error: any) {
-    showErrorToast(error?.message || 'Failed to load MCP preview');
+    showErrorToast(error?.message || t('MCP Editor Failed to load MCP preview'));
   } finally {
     loading.value = false;
   }
@@ -423,7 +443,7 @@ const buildArgumentsPayload = () => {
     const isBlank = rawValue === '' || rawValue === null || rawValue === undefined;
     if (isBlank) {
       if (field.required) {
-        throw new Error(`Parameter "${field.key}" is required`);
+        throw new Error(t('Gateway parameter required', { name: field.key }));
       }
       continue;
     }
@@ -434,7 +454,7 @@ const buildArgumentsPayload = () => {
     if (field.type === 'number' || field.type === 'integer') {
       const numericValue = Number(rawValue);
       if (Number.isNaN(numericValue) || (field.type === 'integer' && !Number.isInteger(numericValue))) {
-        throw new Error(`Parameter "${field.key}" must be a valid number`);
+        throw new Error(t('Gateway parameter number invalid', { name: field.key }));
       }
       payload[field.key] = numericValue;
       continue;
@@ -443,7 +463,7 @@ const buildArgumentsPayload = () => {
       try {
         payload[field.key] = typeof rawValue === 'string' ? JSON.parse(rawValue) : rawValue;
       } catch {
-        throw new Error(`Parameter "${field.key}" must be valid JSON`);
+        throw new Error(t('Gateway parameter JSON invalid', { name: field.key }));
       }
       continue;
     }
@@ -474,12 +494,12 @@ const runPreviewTest = async () => {
     hasSuccessfulTest.value = Boolean(testResult.value.success);
     lastSuccessfulTestSignature.value = testResult.value.success ? currentPreviewSignature.value : null;
     await loadPreview();
-    showSuccessToast(testResult.value.message || 'Preview test completed');
+    showSuccessToast(testResult.value.message || t('MCP Editor Preview test completed'));
   } catch (error: any) {
     hasSuccessfulTest.value = false;
     lastSuccessfulTestSignature.value = null;
     console.error(error);
-    showErrorToast(error?.message || 'Preview test failed');
+    showErrorToast(error?.message || t('MCP Editor Preview test failed'));
   } finally {
     testing.value = false;
   }
@@ -488,7 +508,7 @@ const runPreviewTest = async () => {
 const saveTool = async () => {
   if (!sessionId.value) return;
   if (!hasMatchingSuccessfulTest.value) {
-    showErrorToast('Run a successful preview test before saving this tool');
+    showErrorToast(t('MCP Editor Run a successful preview test before saving this tool'));
     focusPreviewTestSection(previewTestSection.value);
     return;
   }
@@ -499,12 +519,12 @@ const saveTool = async () => {
       description: description.value,
       post_auth_start_url: postAuthStartUrl.value,
       allowed_domains: getAllowedDomains(),
-      output_schema: parseJsonObjectText(outputSchemaText.value, 'Output schema JSON must be a JSON object'),
+      output_schema: parseJsonObjectText(outputSchemaText.value, t('Output schema JSON invalid')),
     });
-    showSuccessToast('Converted tool saved');
+    showSuccessToast(t('MCP Editor Converted tool saved'));
     router.push('/chat/tools');
   } catch (error: any) {
-    showErrorToast(error?.message || 'Failed to save MCP tool');
+    showErrorToast(error?.message || t('MCP Editor Failed to save MCP tool'));
   } finally {
     saving.value = false;
   }
@@ -519,10 +539,10 @@ const promoteLocator = async (stepIndex: number, candidateIndex: number) => {
     });
     await Promise.all([loadRecordedSession(), loadPreview()]);
     expandedStepIndex.value = stepIndex;
-    showSuccessToast('Step locator updated');
+    showSuccessToast(t('MCP Editor Step locator updated'));
   } catch (error: any) {
     console.error(error);
-    showErrorToast(error?.response?.data?.detail || error?.message || 'Failed to switch locator');
+    showErrorToast(error?.response?.data?.detail || error?.message || t('MCP Editor Failed to switch locator'));
   } finally {
     promotingStepIndex.value = null;
   }
@@ -540,7 +560,7 @@ onMounted(async () => {
       <div class="mb-6 flex items-center justify-between gap-4">
         <button class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold dark:border-white/10 dark:bg-white/5" @click="router.back()">
           <ArrowLeft :size="16" />
-          Back
+          {{ t('Back') }}
         </button>
         <button
           class="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-[#8930b0] to-[#004be2] px-5 py-2 text-sm font-bold text-white disabled:cursor-not-allowed disabled:opacity-60"
@@ -548,12 +568,12 @@ onMounted(async () => {
           @click="saveTool"
         >
           <Save :size="16" />
-          {{ saving ? 'Saving...' : 'Save as MCP Tool' }}
+          {{ saving ? t('Saving...') : t('MCP Editor Save as MCP Tool') }}
         </button>
       </div>
 
-      <div class="grid gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
-        <section class="space-y-4 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-white/[0.04]">
+      <div class="grid gap-6 xl:grid-cols-[minmax(0,1.02fr)_minmax(360px,0.98fr)]">
+        <section class="space-y-5 rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-white/[0.04]">
           <div class="flex items-center gap-3">
             <div class="flex h-10 w-10 items-center justify-center rounded-2xl bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-200">
               <Wand2 :size="18" />
@@ -564,165 +584,61 @@ onMounted(async () => {
             </div>
           </div>
 
-          <div v-if="loading" class="rounded-2xl border border-dashed border-slate-300 p-8 text-sm text-slate-500 dark:border-white/10">Loading preview...</div>
+          <div v-if="loading" class="rounded-2xl border border-dashed border-slate-300 p-8 text-sm text-slate-500 dark:border-white/10">{{ t('MCP Editor Loading preview...') }}</div>
 
           <template v-else-if="preview">
-            <section class="rounded-3xl border p-4" :class="previewTestStatusClass">
-              <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div>
-                  <p class="text-sm font-black">{{ previewTestStatusLabel }}</p>
-                  <p class="text-sm opacity-90">{{ previewTestStatusDescription }}</p>
-                </div>
-                <button
-                  class="inline-flex items-center gap-2 rounded-full border border-current/20 bg-white/80 px-4 py-2 text-sm font-semibold text-inherit dark:bg-[#17181d]"
-                  :disabled="testing"
-                  @click="runPreviewTest"
-                >
-                  <Beaker :size="16" />
-                  {{ testing ? 'Testing...' : 'Run preview test' }}
-                </button>
+            <section class="rounded-lg border border-slate-200 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-white/[0.03]">
+              <div class="mb-4">
+                <h2 class="text-base font-black">{{ t('MCP Editor Basic Info') }}</h2>
+                <p class="text-sm text-slate-500 dark:text-slate-400">{{ t('MCP Editor Basic info hint') }}</p>
               </div>
-            </section>
-
-            <div class="grid gap-4 md:grid-cols-2">
-              <label class="block space-y-2">
-                <span class="text-sm font-semibold">Tool name</span>
-                <input v-model="toolName" class="w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none dark:border-white/10 dark:bg-white/5" />
-              </label>
-              <label class="block space-y-2">
-                <span class="text-sm font-semibold">Post-login start URL</span>
-                <input v-model="postAuthStartUrl" class="w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none dark:border-white/10 dark:bg-white/5" />
-              </label>
-            </div>
-
-            <label class="block space-y-2">
-              <span class="text-sm font-semibold">Description</span>
-              <textarea v-model="description" rows="3" class="w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none dark:border-white/10 dark:bg-white/5" />
-            </label>
-
-            <label class="block space-y-2">
-              <span class="text-sm font-semibold">Allowed domains</span>
-              <textarea v-model="allowedDomainsText" rows="4" class="w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm outline-none dark:border-white/10 dark:bg-white/5" />
-            </label>
-
-            <section ref="previewTestSection" class="rounded-3xl border border-slate-200 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-white/[0.03]">
-              <div class="mb-4 flex items-center justify-between gap-3">
-                <div class="flex items-center gap-3">
-                  <div class="flex h-9 w-9 items-center justify-center rounded-2xl bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-200">
-                    <Beaker :size="17" />
-                  </div>
-                  <div>
-                    <h2 class="text-base font-black">Run & Test</h2>
-                    <p class="text-sm text-slate-500 dark:text-slate-400">Use the current draft config to validate the tool before saving.</p>
-                  </div>
-                </div>
-                <button
-                  data-preview-test-action
-                  class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold dark:border-white/10 dark:bg-white/5"
-                  :disabled="testing"
-                  @click="runPreviewTest"
-                >
-                  <Beaker :size="16" />
-                  {{ testing ? 'Testing...' : 'Run preview test' }}
-                </button>
-              </div>
-
-              <div v-if="paramFields.length" class="grid gap-4 md:grid-cols-2">
-                <label v-for="field in paramFields" :key="field.key" class="block space-y-2">
-                  <span class="text-sm font-semibold">{{ field.key }}<template v-if="field.required"> *</template></span>
-                  <select v-if="field.type === 'boolean'" v-model="argumentValues[field.key]" class="w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none dark:border-white/10 dark:bg-white/5">
-                    <option :value="true">true</option>
-                    <option :value="false">false</option>
-                  </select>
-                  <textarea
-                    v-else-if="field.type === 'array' || field.type === 'object'"
-                    v-model="argumentValues[field.key]"
-                    class="min-h-[120px] w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none dark:border-white/10 dark:bg-white/5"
-                    :placeholder="field.type === 'array' ? '[]' : '{}'"
-                  ></textarea>
-                  <input
-                    v-else
-                    v-model="argumentValues[field.key]"
-                    class="w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none dark:border-white/10 dark:bg-white/5"
-                    :type="field.type === 'number' || field.type === 'integer' ? 'number' : 'text'"
-                    :placeholder="field.defaultValue !== undefined ? String(field.defaultValue) : field.key"
-                  />
-                  <p class="text-xs text-slate-500 dark:text-slate-400">{{ field.description || field.type }}</p>
-                </label>
-              </div>
-
-              <div v-if="preview.requires_cookies || cookieSectionOpen" class="mt-4 space-y-4 rounded-2xl border border-slate-200 bg-white p-4 dark:border-white/10 dark:bg-white/[0.04]">
-                <div class="flex items-center justify-between gap-3">
-                  <div>
-                    <h3 class="text-sm font-bold">Gateway test cookies</h3>
-                    <p class="text-xs text-slate-500 dark:text-slate-400">
-                      {{ preview.requires_cookies ? 'This draft removed login steps, so cookies are required.' : 'Cookies are optional for this draft.' }}
-                    </p>
-                  </div>
-                  <button v-if="!preview.requires_cookies" class="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold dark:border-white/10" @click="cookieSectionOpen = !cookieSectionOpen">
-                    {{ cookieSectionOpen ? 'Hide cookie input' : 'Show cookie input' }}
-                  </button>
-                </div>
-
-                <div class="inline-flex rounded-full border border-slate-200 bg-slate-100 p-1 dark:border-white/10 dark:bg-white/10">
-                  <button class="rounded-full px-3 py-1.5 text-xs font-semibold" :class="cookieMode === 'cookie_header' ? 'bg-white text-slate-900 dark:bg-[#17181d] dark:text-white' : 'text-slate-600 dark:text-slate-300'" @click="cookieMode = 'cookie_header'">Cookie header</button>
-                  <button class="rounded-full px-3 py-1.5 text-xs font-semibold" :class="cookieMode === 'header_value' ? 'bg-white text-slate-900 dark:bg-[#17181d] dark:text-white' : 'text-slate-600 dark:text-slate-300'" @click="cookieMode = 'header_value'">Header value</button>
-                  <button class="rounded-full px-3 py-1.5 text-xs font-semibold" :class="cookieMode === 'playwright_json' ? 'bg-white text-slate-900 dark:bg-[#17181d] dark:text-white' : 'text-slate-600 dark:text-slate-300'" @click="cookieMode = 'playwright_json'">Playwright JSON</button>
-                </div>
-
-                <label v-if="cookieMode !== 'playwright_json'" class="block space-y-2">
-                  <span class="text-sm font-semibold">Cookie domain</span>
-                  <input v-model="cookieDomain" list="tool-editor-cookie-domain-list" class="w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none dark:border-white/10 dark:bg-white/5" placeholder="example.com" />
-                  <datalist id="tool-editor-cookie-domain-list">
-                    <option v-for="domain in allowedCookieDomains" :key="domain" :value="domain"></option>
-                  </datalist>
-                </label>
-
+              <div class="grid gap-4 md:grid-cols-2">
                 <label class="block space-y-2">
-                  <span class="text-sm font-semibold">Cookie input</span>
-                  <textarea v-model="cookieText" class="min-h-[140px] w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs outline-none dark:border-white/10 dark:bg-white/5" :placeholder="cookieInputPlaceholder"></textarea>
-                  <p class="text-xs text-slate-500 dark:text-slate-400">Accepts `Cookie: a=1; b=2`, `a=1; b=2`, or Playwright cookie array JSON.</p>
+                  <span class="text-sm font-semibold">{{ t('MCP Editor Tool name') }}</span>
+                  <input v-model="toolName" class="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none dark:border-white/10 dark:bg-white/5" />
+                </label>
+                <label class="block space-y-2">
+                  <span class="text-sm font-semibold">{{ t('MCP Editor Post-login start URL') }}</span>
+                  <input v-model="postAuthStartUrl" class="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none dark:border-white/10 dark:bg-white/5" />
                 </label>
               </div>
 
-              <div v-if="testResult" class="mt-4 rounded-2xl border border-slate-200 bg-white p-4 dark:border-white/10 dark:bg-white/[0.04]">
-                <div class="mb-3 flex items-center justify-between gap-3">
-                  <div>
-                    <h3 class="text-sm font-bold">Latest test result</h3>
-                    <p class="text-xs text-slate-500 dark:text-slate-400">{{ testResult.message || '-' }}</p>
-                  </div>
-                  <span class="rounded-full px-3 py-1 text-xs font-bold" :class="testResult.success ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-200' : 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-200'">
-                    {{ testResult.success ? 'Success' : 'Failed' }}
-                  </span>
-                </div>
-                <pre class="overflow-x-auto rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs dark:border-white/10 dark:bg-[#101115]"><code>{{ JSON.stringify(testResult, null, 2) }}</code></pre>
-              </div>
+              <label class="mt-4 block space-y-2">
+                <span class="text-sm font-semibold">{{ t('MCP Editor Description') }}</span>
+                <textarea v-model="description" rows="3" class="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none dark:border-white/10 dark:bg-white/5" />
+              </label>
+
+              <label class="mt-4 block space-y-2">
+                <span class="text-sm font-semibold">{{ t('MCP Editor Allowed domains') }}</span>
+                <textarea v-model="allowedDomainsText" rows="4" class="w-full rounded-md border border-slate-200 bg-white px-3 py-2 font-mono text-sm outline-none dark:border-white/10 dark:bg-white/5" />
+                <span class="block text-xs text-slate-500 dark:text-slate-400">{{ t('MCP Editor Allowed domains hint') }}</span>
+              </label>
             </section>
 
-            <section class="rounded-3xl border border-slate-200 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-white/[0.03]">
+            <section class="rounded-lg border border-slate-200 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-white/[0.03]">
               <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <h2 class="text-base font-black">Recorded steps</h2>
-                  <p class="text-sm text-slate-500 dark:text-slate-400">Tune locators here before the next preview test. Changes apply to the session and refresh the MCP draft.</p>
+                  <h2 class="text-base font-black">{{ t('MCP Editor Recorded steps') }}</h2>
+                  <p class="text-sm text-slate-500 dark:text-slate-400">{{ t('MCP Editor Recorded steps hint') }}</p>
                 </div>
                 <div class="rounded-full bg-white px-4 py-1.5 text-xs font-bold text-violet-700 shadow-sm ring-1 ring-violet-100 dark:bg-white/[0.06] dark:text-violet-200 dark:ring-white/10">
-                  {{ recordedSteps.length }} steps
+                  {{ recordedSteps.length }} {{ t('MCP Editor steps') }}
                 </div>
               </div>
 
               <div v-if="stepsLoading" class="rounded-2xl border border-dashed border-slate-300 bg-white/80 p-6 text-sm text-slate-500 dark:border-white/10 dark:bg-white/[0.04]">
-                Loading recorded steps...
+                {{ t('MCP Editor Loading recorded steps...') }}
               </div>
 
               <div v-else-if="recordedSteps.length === 0" class="rounded-2xl border border-dashed border-slate-300 bg-white/80 p-6 text-sm text-slate-500 dark:border-white/10 dark:bg-white/[0.04]">
-                No recorded steps available for this session.
+                {{ t('MCP Editor No recorded steps available for this session.') }}
               </div>
 
               <div v-else class="space-y-3">
                 <article
                   v-for="(step, idx) in recordedSteps"
                   :key="step.id"
-                  class="overflow-hidden rounded-3xl border bg-white shadow-sm transition-all dark:bg-white/[0.04]"
+                  class="overflow-hidden rounded-lg border bg-white shadow-sm transition-all dark:bg-white/[0.04]"
                   :class="expandedStepIndex === idx ? 'border-violet-300 shadow-lg shadow-violet-500/10 dark:border-violet-400/30' : 'border-slate-200 dark:border-white/10'"
                 >
                   <div class="cursor-pointer px-4 py-4 sm:px-5" @click="toggleStep(idx)">
@@ -789,15 +705,15 @@ onMounted(async () => {
                     <div class="grid gap-3 rounded-2xl bg-white p-4 ring-1 ring-violet-100 dark:bg-white/[0.04] dark:ring-violet-400/15">
                       <div class="grid gap-2 text-sm text-slate-600 dark:text-slate-400">
                         <div class="grid gap-1 sm:grid-cols-[92px_minmax(0,1fr)]">
-                          <span class="text-xs font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500">Primary</span>
+                          <span class="text-xs font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500">{{ t('MCP Editor Primary') }}</span>
                           <span class="break-all font-mono text-xs text-slate-700 dark:text-slate-300">{{ formatLocator(step.target) }}</span>
                         </div>
                         <div class="grid gap-1 sm:grid-cols-[92px_minmax(0,1fr)]">
-                          <span class="text-xs font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500">Frame</span>
+                          <span class="text-xs font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500">{{ t('MCP Editor Frame') }}</span>
                           <span class="break-all font-mono text-xs text-slate-700 dark:text-slate-300">{{ formatFramePath(step.frame_path) }}</span>
                         </div>
                         <div class="grid gap-1 sm:grid-cols-[92px_minmax(0,1fr)]">
-                          <span class="text-xs font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500">Validation</span>
+                          <span class="text-xs font-bold uppercase tracking-wide text-slate-400 dark:text-slate-500">{{ t('MCP Editor Validation') }}</span>
                           <div class="flex flex-wrap items-center gap-2">
                             <span
                               v-if="step.validation?.status"
@@ -806,15 +722,15 @@ onMounted(async () => {
                             >
                               {{ getValidationLabel(step.validation.status) }}
                             </span>
-                            <span class="text-xs text-slate-600 dark:text-slate-400">{{ step.validation?.details || 'No extra diagnostics' }}</span>
+                            <span class="text-xs text-slate-600 dark:text-slate-400">{{ step.validation?.details || t('MCP Editor No extra diagnostics') }}</span>
                           </div>
                         </div>
                       </div>
 
                       <div v-if="step.locator_candidates?.length" class="space-y-2">
                         <div class="flex items-center justify-between">
-                          <p class="text-sm font-bold text-slate-900 dark:text-slate-100">Locator candidates</p>
-                          <p class="text-xs text-slate-400 dark:text-slate-500">Switching here updates the next MCP preview.</p>
+                          <p class="text-sm font-bold text-slate-900 dark:text-slate-100">{{ t('MCP Editor Locator candidates') }}</p>
+                          <p class="text-xs text-slate-400 dark:text-slate-500">{{ t('MCP Editor Switching here updates the next MCP preview.') }}</p>
                         </div>
 
                         <div class="space-y-2">
@@ -827,15 +743,15 @@ onMounted(async () => {
                             <div class="min-w-0 flex-1">
                               <div class="flex flex-wrap items-center gap-2 text-[11px]">
                                 <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold uppercase tracking-wide text-slate-600 dark:bg-white/10 dark:text-slate-400">
-                                  {{ candidate.kind || 'locator' }}
+                                  {{ candidate.kind || t('MCP Editor locator') }}
                                 </span>
-                                <span class="text-slate-400 dark:text-slate-500">Score {{ candidate.score ?? '-' }}</span>
-                                <span class="text-slate-400 dark:text-slate-500">Strict {{ candidate.strict_match_count ?? '-' }}</span>
+                                <span class="text-slate-400 dark:text-slate-500">{{ t('MCP Editor Score') }} {{ candidate.score ?? '-' }}</span>
+                                <span class="text-slate-400 dark:text-slate-500">{{ t('MCP Editor Strict') }} {{ candidate.strict_match_count ?? '-' }}</span>
                                 <span
                                   v-if="candidate.selected"
                                   class="rounded-full bg-violet-600 px-2 py-0.5 font-semibold text-white"
                                 >
-                                  Current
+                                  {{ t('MCP Editor Current') }}
                                 </span>
                               </div>
                               <p class="mt-1 break-all font-mono text-xs text-slate-700 dark:text-slate-300">{{ formatLocator(candidate.locator) }}</p>
@@ -849,7 +765,7 @@ onMounted(async () => {
                               :disabled="candidate.selected || promotingStepIndex === idx"
                               @click.stop="promoteLocator(idx, candidateIndex)"
                             >
-                              {{ promotingStepIndex === idx ? 'Switching...' : (candidate.selected ? 'Current' : 'Use this locator') }}
+                              {{ promotingStepIndex === idx ? t('MCP Editor Switching...') : (candidate.selected ? t('MCP Editor Current') : t('MCP Editor Use this locator')) }}
                             </button>
                           </div>
                         </div>
@@ -860,10 +776,10 @@ onMounted(async () => {
               </div>
             </section>
           </template>
-          <section v-else class="rounded-3xl border border-dashed border-slate-300 bg-slate-50/70 p-8 dark:border-white/10 dark:bg-white/[0.03]">
-            <h2 class="text-lg font-black">Start from an RPA recording</h2>
+          <section v-else class="rounded-lg border border-dashed border-slate-300 bg-slate-50/70 p-8 dark:border-white/10 dark:bg-white/[0.03]">
+            <h2 class="text-lg font-black">{{ t('MCP Editor Start from an RPA recording') }}</h2>
             <p class="mt-2 max-w-2xl text-sm leading-6 text-slate-500 dark:text-slate-400">
-              This editor publishes recorded browser automation as an MCP tool. Create or open an RPA recording first, then use "Publish as MCP Tool" to hydrate this editor with the recording context.
+              {{ t('MCP Editor Empty state hint') }}
             </p>
             <div class="mt-5 flex flex-wrap items-center gap-3">
               <button
@@ -872,59 +788,185 @@ onMounted(async () => {
                 @click="router.push(buildRpaRecorderLocation())"
               >
                 <Wand2 :size="16" />
-                Open RPA Recorder
+                {{ t('MCP Editor Open RPA Recorder') }}
               </button>
               <p class="text-xs text-slate-500 dark:text-slate-400">
-                Tools is the management surface; recording remains the authoring flow.
+                {{ t('MCP Editor Tools is the management surface; recording remains the authoring flow.') }}
               </p>
             </div>
           </section>
         </section>
 
-        <aside class="space-y-4">
-          <section class="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-white/[0.04]">
-            <div class="flex items-center gap-3">
-              <div class="flex h-10 w-10 items-center justify-center rounded-2xl bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-200">
-                <Shield :size="18" />
-              </div>
+        <aside class="space-y-6 xl:sticky xl:top-6 xl:self-start">
+          <section ref="previewTestSection" class="rounded-lg border p-5 shadow-sm" :class="previewTestStatusClass">
+            <div class="flex items-start justify-between gap-4">
               <div>
-                <h2 class="text-base font-black">Sanitize report</h2>
-                <p class="text-sm text-slate-500 dark:text-slate-400">Login actions are removed before the tool is shared.</p>
+                <p class="text-sm font-black">{{ previewTestStatusLabel }}</p>
+                <p class="mt-1 text-sm opacity-90">{{ previewTestStatusDescription }}</p>
               </div>
-            </div>
-            <div v-if="preview" class="mt-4 space-y-3 text-sm">
-              <div>
-                <p class="font-semibold">Removed login steps</p>
-                <p class="text-slate-500 dark:text-slate-400">{{ preview.sanitize_report.removed_steps.join(', ') || 'None' }}</p>
-              </div>
-              <div>
-                <p class="font-semibold">Removed params</p>
-                <p class="text-slate-500 dark:text-slate-400">{{ preview.sanitize_report.removed_params.join(', ') || 'None' }}</p>
-              </div>
-              <div>
-                <p class="font-semibold">Warnings</p>
-                <ul class="list-disc pl-5 text-slate-500 dark:text-slate-400">
-                  <li v-for="warning in preview.sanitize_report.warnings" :key="warning">{{ warning }}</li>
-                  <li v-if="preview.sanitize_report.warnings.length === 0">None</li>
-                </ul>
-              </div>
+              <button
+                data-preview-test-action
+                class="inline-flex items-center gap-2 rounded-full border border-current/20 bg-white/85 px-4 py-2 text-sm font-semibold text-inherit dark:bg-[#17181d]"
+                :disabled="testing"
+                @click="runPreviewTest"
+              >
+                <Beaker :size="16" />
+                {{ testing ? t('MCP Editor Testing...') : t('MCP Editor Run preview test') }}
+              </button>
             </div>
           </section>
 
-          <section class="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-white/[0.04]">
-            <h2 class="text-base font-black">API & Schemas</h2>
+          <section class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-white/[0.04]">
+            <div class="mb-4 flex items-center gap-3">
+              <div class="flex h-10 w-10 items-center justify-center rounded-2xl bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-200">
+                <Beaker :size="18" />
+              </div>
+              <div>
+                <h2 class="text-base font-black">{{ t('MCP Editor Run & Test') }}</h2>
+                <p class="text-sm text-slate-500 dark:text-slate-400">{{ t('MCP Editor Run and test hint') }}</p>
+              </div>
+            </div>
+
+            <div class="mb-4 grid gap-3 sm:grid-cols-3">
+              <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/[0.03]">
+                <p class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">{{ t('MCP Editor steps') }}</p>
+                <p class="mt-1 text-lg font-black">{{ recordedStepSummary.total }}</p>
+              </div>
+              <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/[0.03]">
+                <p class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">{{ t('MCP Editor input fields') }}</p>
+                <p class="mt-1 text-lg font-black">{{ schemaSummary.inputFields }}</p>
+              </div>
+              <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/[0.03]">
+                <p class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">{{ t('MCP Editor output fields') }}</p>
+                <p class="mt-1 text-lg font-black">{{ schemaSummary.outputFields }}</p>
+              </div>
+            </div>
+
+            <div v-if="paramFields.length" class="grid gap-4 md:grid-cols-2">
+              <label v-for="field in paramFields" :key="field.key" class="block space-y-2">
+                <span class="text-sm font-semibold">{{ field.key }}<template v-if="field.required"> *</template></span>
+                <select v-if="field.type === 'boolean'" v-model="argumentValues[field.key]" class="w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none dark:border-white/10 dark:bg-white/5">
+                  <option :value="true">true</option>
+                  <option :value="false">false</option>
+                </select>
+                <textarea
+                  v-else-if="field.type === 'array' || field.type === 'object'"
+                  v-model="argumentValues[field.key]"
+                  class="min-h-[120px] w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none dark:border-white/10 dark:bg-white/5"
+                  :placeholder="field.type === 'array' ? '[]' : '{}'"
+                ></textarea>
+                <input
+                  v-else
+                  v-model="argumentValues[field.key]"
+                  class="w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none dark:border-white/10 dark:bg-white/5"
+                  :type="field.type === 'number' || field.type === 'integer' ? 'number' : 'text'"
+                  :placeholder="field.defaultValue !== undefined ? String(field.defaultValue) : field.key"
+                />
+                <p class="text-xs text-slate-500 dark:text-slate-400">{{ field.description || field.type }}</p>
+              </label>
+            </div>
+
+            <div v-if="preview.requires_cookies || cookieSectionOpen" class="mt-4 space-y-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-white/10 dark:bg-white/[0.03]">
+              <div class="flex items-center justify-between gap-3">
+                <div>
+                  <h3 class="text-sm font-bold">{{ t('MCP Editor Gateway test cookies') }}</h3>
+                  <p class="text-xs text-slate-500 dark:text-slate-400">
+                    {{ preview.requires_cookies ? t('MCP Editor This draft removed login steps, so cookies are required.') : t('MCP Editor Cookies are optional for this draft.') }}
+                  </p>
+                </div>
+                <button v-if="!preview.requires_cookies" class="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold dark:border-white/10" @click="cookieSectionOpen = !cookieSectionOpen">
+                  {{ cookieSectionOpen ? t('MCP Editor Hide cookie input') : t('MCP Editor Show cookie input') }}
+                </button>
+              </div>
+
+              <div class="inline-flex rounded-full border border-slate-200 bg-slate-100 p-1 dark:border-white/10 dark:bg-white/10">
+                <button class="rounded-full px-3 py-1.5 text-xs font-semibold" :class="cookieMode === 'cookie_header' ? 'bg-white text-slate-900 dark:bg-[#17181d] dark:text-white' : 'text-slate-600 dark:text-slate-300'" @click="cookieMode = 'cookie_header'">{{ t('MCP Editor Cookie header') }}</button>
+                <button class="rounded-full px-3 py-1.5 text-xs font-semibold" :class="cookieMode === 'header_value' ? 'bg-white text-slate-900 dark:bg-[#17181d] dark:text-white' : 'text-slate-600 dark:text-slate-300'" @click="cookieMode = 'header_value'">{{ t('MCP Editor Header value') }}</button>
+                <button class="rounded-full px-3 py-1.5 text-xs font-semibold" :class="cookieMode === 'playwright_json' ? 'bg-white text-slate-900 dark:bg-[#17181d] dark:text-white' : 'text-slate-600 dark:text-slate-300'" @click="cookieMode = 'playwright_json'">{{ t('MCP Editor Playwright JSON') }}</button>
+              </div>
+
+              <label v-if="cookieMode !== 'playwright_json'" class="block space-y-2">
+                <span class="text-sm font-semibold">{{ t('MCP Editor Cookie domain') }}</span>
+                <input v-model="cookieDomain" list="tool-editor-cookie-domain-list" class="w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none dark:border-white/10 dark:bg-white/5" placeholder="example.com" />
+                <datalist id="tool-editor-cookie-domain-list">
+                  <option v-for="domain in allowedCookieDomains" :key="domain" :value="domain"></option>
+                </datalist>
+              </label>
+
+              <label class="block space-y-2">
+                <span class="text-sm font-semibold">{{ t('MCP Editor Cookie input') }}</span>
+                <textarea v-model="cookieText" class="min-h-[140px] w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs outline-none dark:border-white/10 dark:bg-white/5" :placeholder="cookieInputPlaceholder"></textarea>
+                <p class="text-xs text-slate-500 dark:text-slate-400">{{ t('MCP Editor Cookie input hint') }}</p>
+              </label>
+            </div>
+
+            <div v-if="testResult" class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-white/10 dark:bg-[#101115]">
+              <div class="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <h3 class="text-sm font-bold">{{ t('MCP Editor Latest test result') }}</h3>
+                  <p class="text-xs text-slate-500 dark:text-slate-400">{{ testResult.message || '-' }}</p>
+                </div>
+                <span class="rounded-full px-3 py-1 text-xs font-bold" :class="testResult.success ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-200' : 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-200'">
+                  {{ testResult.success ? t('MCP Editor Success') : t('MCP Editor Failed') }}
+                </span>
+              </div>
+              <pre class="overflow-x-auto rounded-2xl border border-slate-200 bg-white p-3 text-xs dark:border-white/10 dark:bg-[#17181d]"><code>{{ JSON.stringify(testResult, null, 2) }}</code></pre>
+            </div>
+          </section>
+
+          <section class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-white/[0.04]">
+            <h2 class="text-base font-black">{{ t('MCP Editor API & Schemas') }}</h2>
+            <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">{{ t('MCP Editor Schema hint') }}</p>
             <div v-if="preview" class="mt-4 space-y-4">
               <div>
-                <p class="mb-2 text-sm font-semibold">Input Schema</p>
+                <div class="mb-2 flex items-center justify-between gap-3">
+                  <p class="text-sm font-semibold">{{ t('MCP Editor Input Schema') }}</p>
+                  <span class="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-slate-500 dark:bg-white/10 dark:text-slate-400">
+                    {{ schemaSummary.inputFields }} {{ t('MCP Editor fields') }}
+                  </span>
+                </div>
                 <pre class="overflow-x-auto rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs dark:border-white/10 dark:bg-[#101115]"><code>{{ JSON.stringify(preview.input_schema || {}, null, 2) }}</code></pre>
               </div>
               <div>
-                <p class="mb-2 text-sm font-semibold">Output Schema</p>
+                <div class="mb-2 flex items-center justify-between gap-3">
+                  <p class="text-sm font-semibold">{{ t('MCP Editor Output Schema') }}</p>
+                  <span class="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-slate-500 dark:bg-white/10 dark:text-slate-400">
+                    {{ schemaSummary.outputFields }} {{ t('MCP Editor fields') }}
+                  </span>
+                </div>
                 <textarea v-model="outputSchemaText" class="min-h-[260px] w-full rounded-2xl border border-slate-200 bg-slate-50 p-3 font-mono text-xs outline-none dark:border-white/10 dark:bg-[#101115]" spellcheck="false"></textarea>
               </div>
             </div>
           </section>
 
+          <section class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-white/[0.04]">
+            <div class="flex items-center gap-3">
+              <div class="flex h-10 w-10 items-center justify-center rounded-2xl bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-200">
+                <Shield :size="18" />
+              </div>
+              <div>
+                <h2 class="text-base font-black">{{ t('MCP Editor Sanitize report') }}</h2>
+                <p class="text-sm text-slate-500 dark:text-slate-400">{{ t('MCP Editor Sanitize report hint') }}</p>
+              </div>
+            </div>
+            <div v-if="preview" class="mt-4 space-y-3 text-sm">
+              <div>
+                <p class="font-semibold">{{ t('MCP Editor Removed login steps') }}</p>
+                <p class="text-slate-500 dark:text-slate-400">{{ preview.sanitize_report.removed_steps.join(', ') || t('MCP Editor None') }}</p>
+              </div>
+              <div>
+                <p class="font-semibold">{{ t('MCP Editor Removed params') }}</p>
+                <p class="text-slate-500 dark:text-slate-400">{{ preview.sanitize_report.removed_params.join(', ') || t('MCP Editor None') }}</p>
+              </div>
+              <div>
+                <p class="font-semibold">{{ t('MCP Editor Warnings') }}</p>
+                <ul class="list-disc pl-5 text-slate-500 dark:text-slate-400">
+                  <li v-for="warning in preview.sanitize_report.warnings" :key="warning">{{ warning }}</li>
+                  <li v-if="preview.sanitize_report.warnings.length === 0">{{ t('MCP Editor None') }}</li>
+                </ul>
+              </div>
+            </div>
+          </section>
         </aside>
       </div>
     </div>
