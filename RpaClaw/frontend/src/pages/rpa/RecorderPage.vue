@@ -151,7 +151,26 @@ interface ChatMessage {
   locatorSummary?: string;
   collectionSummary?: string;
   diagnostics?: string[];
+  outputText?: string;
+  extractedElement?: Record<string, any> | null;
 }
+
+const appendAssistantSteps = (incomingSteps: Record<string, any>[]) => {
+  for (const s of incomingSteps) {
+    steps.value.push({
+      id: String(steps.value.length),
+      title: s.description || s.action,
+      description: s.prompt || s.description || 'AI 操作',
+      status: 'completed',
+      source: 'ai',
+      sensitive: s.sensitive || false,
+      locatorSummary: formatLocator(s.target),
+      frameSummary: formatFramePath(s.frame_path),
+      validationStatus: s.validation?.status || '',
+      validationDetails: s.validation?.details || '',
+    });
+  }
+};
 
 const chatMessages = ref<ChatMessage[]>([]);
 const newMessage = ref('');
@@ -166,6 +185,36 @@ interface PendingConfirm {
 }
 const pendingConfirm = ref<PendingConfirm | null>(null);
 let pollInterval: any = null;
+
+const buildElementPreview = (element?: Record<string, any> | null) => {
+  if (!element) return null;
+  const lines: string[] = [];
+  if (element.role) lines.push(`角色: ${element.role}`);
+  if (element.tag) lines.push(`标签: ${element.tag}`);
+  if (element.name) lines.push(`名称: ${element.name}`);
+  if (element.text) lines.push(`文本: ${element.text}`);
+  if (element.placeholder) lines.push(`占位提示: ${element.placeholder}`);
+  if (element.semantic_kind) lines.push(`语义: ${element.semantic_kind}`);
+  if (element.type) lines.push(`类型: ${element.type}`);
+  return lines.length ? lines.join('\n') : null;
+};
+
+const attachOutputDetails = (message: ChatMessage, payload: { output?: string; output_meta?: Record<string, any> | null; step?: Record<string, any> | null }) => {
+  const outputText = payload.output;
+  const extractedElement = payload.output_meta || payload.step?.element_snapshot || null;
+  if (outputText && outputText !== 'ok' && outputText !== 'None') {
+    message.outputText = outputText;
+  }
+  if (extractedElement && Object.keys(extractedElement).length > 0) {
+    message.extractedElement = extractedElement;
+    if (!message.frameSummary && Array.isArray(extractedElement.frame_path) && extractedElement.frame_path.length > 0) {
+      message.frameSummary = extractedElement.frame_path.join(' -> ');
+    }
+    if (!message.locatorSummary && extractedElement.locator) {
+      message.locatorSummary = formatLocator(extractedElement.locator);
+    }
+  }
+};
 
 const syncAddressBar = (force = false) => {
   if (isAddressEditing.value && !force) return;
@@ -665,7 +714,7 @@ const sendMessage = async () => {
               chatMessages.value[msgIdx].frameSummary = (resolved.frame_path || []).length
                 ? (resolved.frame_path || []).join(' -> ')
                 : 'Main frame';
-              chatMessages.value[msgIdx].locatorSummary = resolved.selected_locator_kind || resolved.locator?.method || '';
+              chatMessages.value[msgIdx].locatorSummary = resolved.locator ? formatLocator(resolved.locator) : (resolved.selected_locator_kind || resolved.locator?.method || '');
               if (resolved.collection_hint?.kind) {
                 chatMessages.value[msgIdx].collectionSummary = `${resolved.collection_hint.kind}${resolved.ordinal ? ` / ${resolved.ordinal}` : ''}`;
               }
@@ -677,9 +726,12 @@ const sendMessage = async () => {
             } else if (eventType === 'result') {
               chatMessages.value[msgIdx].status = data.success ? 'done' : 'error';
               if (data.error) chatMessages.value[msgIdx].error = data.error;
-              if (data.output && data.output !== 'ok' && data.output !== 'None') {
-                chatMessages.value[msgIdx].text += `${chatMessages.value[msgIdx].text ? '\n' : ''}输出: ${data.output}`;
+              if (Array.isArray(data.steps) && data.steps.length > 0) {
+                appendAssistantSteps(data.steps);
+              } else if (data.step) {
+                appendAssistantSteps([data.step]);
               }
+              attachOutputDetails(chatMessages.value[msgIdx], data);
             } else if (eventType === 'agent_thought') {
               chatMessages.value[msgIdx].text += (chatMessages.value[msgIdx].text ? '\n' : '') + `💭 ${data.text || ''}`;
             } else if (eventType === 'agent_action') {
@@ -689,20 +741,9 @@ const sendMessage = async () => {
               chatMessages.value[msgIdx].actions!.push({ description: data.description || '', code: data.code || '', showCode: false });
             } else if (eventType === 'agent_step_done') {
               if (data.step) {
-                const s = data.step;
-                steps.value.push({
-                  id: String(steps.value.length),
-                  title: s.description || s.action,
-                  description: s.prompt || s.description || 'AI 操作',
-                  status: 'completed',
-                  source: 'ai',
-                  sensitive: s.sensitive || false,
-                });
+                appendAssistantSteps([data.step]);
               }
-              // Show output if present
-              if (data.output) {
-                chatMessages.value[msgIdx].text += `\n✓ 输出：${data.output}`;
-              }
+              attachOutputDetails(chatMessages.value[msgIdx], data);
             } else if (eventType === 'confirm_required') {
               pendingConfirm.value = data;
             } else if (eventType === 'agent_done') {
@@ -1006,6 +1047,16 @@ const sendMessage = async () => {
                 <div v-if="msg.locatorSummary">
                   <span class="font-semibold text-gray-600 dark:text-gray-400">Locator:</span>
                   <span class="ml-1">{{ msg.locatorSummary }}</span>
+                </div>
+              </div>
+              <div v-if="msg.outputText || msg.extractedElement" class="mt-3 rounded-xl border border-gray-100 dark:border-gray-700 bg-gray-50/80 dark:bg-[#1f1f20] p-3 space-y-2">
+                <div v-if="msg.outputText">
+                  <div class="text-[10px] font-semibold text-gray-600 dark:text-gray-400">输出</div>
+                  <div class="mt-1 whitespace-pre-wrap text-[11px] text-gray-800 dark:text-gray-200">{{ msg.outputText }}</div>
+                </div>
+                <div v-if="msg.extractedElement">
+                  <div class="text-[10px] font-semibold text-gray-600 dark:text-gray-400">命中元素</div>
+                  <div class="mt-1 whitespace-pre-wrap text-[11px] text-gray-700 dark:text-gray-300">{{ buildElementPreview(msg.extractedElement) }}</div>
                 </div>
               </div>
               <div v-if="msg.status === 'done' && msg.role === 'assistant' && !agentMode" class="mt-2 flex items-center gap-1 text-[10px] text-green-600 font-medium">

@@ -14,8 +14,8 @@ PLAYWRIGHT_RECORDER_RUNTIME_JS = (RPA_VENDOR_DIR / "playwright_recorder_runtime.
 
 
 EXTRACT_ELEMENTS_JS = r"""() => {
-    const INTERACTIVE = 'a,button,input,textarea,select,[role=button],[role=link],[role=menuitem],[role=menuitemradio],[role=tab],[role=checkbox],[role=radio],[contenteditable=true]';
-    const ROLE_MAP = { A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox' };
+    const INTERACTIVE = 'a,button,input,textarea,select,[role=button],[role=link],[role=menuitem],[role=menuitemradio],[role=tab],[role=checkbox],[role=radio],[role=combobox],[role=listbox],[role=option],[contenteditable=true]';
+    const ROLE_MAP = { A: 'link', BUTTON: 'button', TEXTAREA: 'textbox', SELECT: 'combobox' };
     const els = document.querySelectorAll(INTERACTIVE);
     const results = [];
     let index = 1;
@@ -39,8 +39,44 @@ EXTRACT_ELEMENTS_JS = r"""() => {
         }
         return transitions >= id.length / 4;
     }
+    function labelForControl(el) {
+        if (!el) return '';
+        const aria = (el.getAttribute('aria-label') || '').trim();
+        if (aria) return aria;
+        const labelledBy = (el.getAttribute('aria-labelledby') || '').trim();
+        if (labelledBy) {
+            const text = labelledBy
+                .split(/\s+/)
+                .map(id => document.getElementById(id))
+                .filter(Boolean)
+                .map(node => (node.innerText || node.textContent || '').trim().replace(/\s+/g, ' '))
+                .filter(Boolean)
+                .join(' ');
+            if (text) return text.substring(0, 120);
+        }
+        if (el.id) {
+            try {
+                const explicit = document.querySelector(`label[for="${cssEsc(el.id)}"]`);
+                const text = (explicit?.innerText || explicit?.textContent || '').trim().replace(/\s+/g, ' ');
+                if (text) return text.substring(0, 120);
+            } catch (e) {}
+        }
+        const wrapper = el.closest('label');
+        const wrappedText = (wrapper?.innerText || wrapper?.textContent || '').trim().replace(/\s+/g, ' ');
+        if (wrappedText) return wrappedText.substring(0, 120);
+        return '';
+    }
     function getRole(el) {
-        return el.getAttribute('role') || ROLE_MAP[el.tagName] || '';
+        if (el.getAttribute('role')) return el.getAttribute('role');
+        if (el.tagName === 'INPUT') {
+            const type = (el.getAttribute('type') || 'text').toLowerCase();
+            if (type === 'number' || type === 'range') return 'spinbutton';
+            if (type === 'checkbox') return 'checkbox';
+            if (type === 'radio') return 'radio';
+            if (type === 'button' || type === 'submit' || type === 'reset') return 'button';
+            return 'textbox';
+        }
+        return ROLE_MAP[el.tagName] || '';
     }
     function stableSelector(el) {
         const tag = el.tagName.toLowerCase();
@@ -116,22 +152,24 @@ EXTRACT_ELEMENTS_JS = r"""() => {
 
         const tag = el.tagName.toLowerCase();
         const role = getRole(el);
-        const name = (el.getAttribute('aria-label') || el.innerText || '').trim().replace(/\s+/g, ' ').substring(0, 80);
+        const label = labelForControl(el);
+        const name = (el.getAttribute('aria-label') || label || el.innerText || '').trim().replace(/\s+/g, ' ').substring(0, 80);
         const placeholder = el.getAttribute('placeholder') || '';
         const href = el.getAttribute('href') || '';
         const value = el.value || '';
         const type = el.getAttribute('type') || '';
 
-        const key = tag + role + name + placeholder + href;
+        const key = tag + role + name + label + placeholder + href;
         if (seen.has(key)) continue;
         seen.add(key);
 
         const info = { index, tag };
         if (role) info.role = role;
         if (name) info.name = name;
+        if (label) info.label = label;
         if (placeholder) info.placeholder = placeholder;
         if (href) info.href = href.substring(0, 120);
-        if (value && tag !== 'input') info.value = value.substring(0, 80);
+        if (value) info.value = value.substring(0, 80);
         if (type) info.type = type;
         const collection = findCollectionContext(el);
         if (collection) {
@@ -351,7 +389,7 @@ def resolve_collection_target(snapshot: Dict[str, Any], intent: Dict[str, Any]) 
 def _build_locator_candidates_for_element(element: Dict[str, Any]) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
     role = element.get("role")
-    name = element.get("name")
+    name = element.get("name") or element.get("label")
     placeholder = element.get("placeholder")
     href = element.get("href")
     if role and name:
@@ -618,6 +656,7 @@ def _node_search_text(node: Dict[str, Any]) -> str:
         [
             str(node.get("name") or ""),
             str(node.get("text") or ""),
+            str(node.get("label") or ""),
             str(node.get("title") or ""),
             str(node.get("placeholder") or ""),
             str(node.get("type") or ""),
@@ -625,30 +664,152 @@ def _node_search_text(node: Dict[str, Any]) -> str:
     ).lower()
 
 
-def _actionable_node_score(node: Dict[str, Any], intent: Dict[str, Any], action: str) -> Optional[int]:
+def _expected_target_hints(intent: Dict[str, Any]) -> Dict[str, str]:
     target_hint = intent.get("target_hint", {}) or {}
-    expected_role = _normalize_hint(target_hint.get("role"))
-    expected_name = _normalize_hint(target_hint.get("name") or target_hint.get("text") or target_hint.get("value"))
-    expected_tokens = _tokenize_text(expected_name)
+    return {
+        "role": _normalize_hint(target_hint.get("role")),
+        "name": _normalize_hint(target_hint.get("name")),
+        "text": _normalize_hint(target_hint.get("text")),
+        "value": _normalize_hint(target_hint.get("value")),
+        "placeholder": _normalize_hint(target_hint.get("placeholder")),
+        "label": _normalize_hint(target_hint.get("label")),
+        "title": _normalize_hint(target_hint.get("title")),
+    }
+
+
+def _score_node_against_hints(node: Dict[str, Any], intent: Dict[str, Any]) -> int:
+    expected = _expected_target_hints(intent)
+    actual = {
+        "name": _normalize_hint(node.get("name")),
+        "text": _normalize_hint(node.get("text")),
+        "value": _normalize_hint(node.get("value")),
+        "placeholder": _normalize_hint(node.get("placeholder")),
+        "label": _normalize_hint(node.get("label")),
+        "title": _normalize_hint(node.get("title")),
+    }
+
+    score = 0
+    direct_weights = {
+        "name": 12,
+        "text": 10,
+        "value": 8,
+        "placeholder": 18,
+        "label": 16,
+        "title": 10,
+    }
+    cross_fields = ("name", "text", "label", "title", "placeholder", "value")
+
+    for field, expected_value in expected.items():
+        if field == "role" or not expected_value:
+            continue
+        matched = False
+        direct_value = actual.get(field, "")
+        if direct_value:
+            if expected_value == direct_value:
+                score += direct_weights.get(field, 8)
+                matched = True
+            elif expected_value in direct_value:
+                score += max(direct_weights.get(field, 8) - 4, 3)
+                matched = True
+        if matched:
+            continue
+        for candidate_field in cross_fields:
+            candidate_value = actual.get(candidate_field, "")
+            if not candidate_value:
+                continue
+            if expected_value == candidate_value:
+                score += 6
+                matched = True
+                break
+            if expected_value in candidate_value:
+                score += 3
+                matched = True
+                break
+        if not matched:
+            score -= 4
+
+    freeform_expected = next(
+        (
+            expected[key]
+            for key in ("name", "text", "label", "title", "placeholder", "value")
+            if expected.get(key)
+        ),
+        "",
+    )
+    freeform_tokens = _tokenize_text(freeform_expected)
+    node_search_text = _node_search_text(node)
+    haystack_tokens = _tokenize_text(node_search_text)
+    if freeform_expected:
+        if freeform_expected in node_search_text:
+            score += 6
+        overlap = len(freeform_tokens & haystack_tokens)
+        score += min(overlap * 2, 6)
+        if overlap == 0 and freeform_expected not in node_search_text and freeform_tokens:
+            score -= 2
+
+    return score
+
+
+def _is_fill_value_compatible(node: Dict[str, Any], value: Any) -> bool:
+    input_type = _normalize_hint(node.get("type"))
+    if not input_type:
+        return True
+    text = str(value or "").strip()
+    if not text:
+        return True
+
+    if input_type == "date":
+        return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", text))
+    if input_type == "datetime-local":
+        return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}t\d{2}:\d{2}(:\d{2})?", text.lower()))
+    if input_type == "month":
+        return bool(re.fullmatch(r"\d{4}-\d{2}", text))
+    if input_type == "time":
+        return bool(re.fullmatch(r"\d{2}:\d{2}(:\d{2})?", text))
+    if input_type in {"number", "range"}:
+        return bool(re.fullmatch(r"[-+]?\d+(\.\d+)?", text))
+    if input_type == "email":
+        return "@" in text and "." in text.split("@")[-1]
+    if input_type == "url":
+        return text.startswith(("http://", "https://"))
+    return True
+
+
+def _fill_type_error(node: Dict[str, Any], value: Any) -> str:
+    label = (
+        node.get("label")
+        or node.get("name")
+        or node.get("placeholder")
+        or node.get("title")
+        or node.get("text")
+        or "target field"
+    )
+    return (
+        f"Resolved fill target '{label}' expects input type '{node.get('type')}', "
+        f"but received incompatible value '{value}'."
+    )
+
+
+def _actionable_node_score(node: Dict[str, Any], intent: Dict[str, Any], action: str) -> Optional[int]:
+    expected = _expected_target_hints(intent)
+    expected_role = expected.get("role", "")
     node_role = _normalize_hint(node.get("role"))
     action_kinds = {str(kind).lower() for kind in (node.get("action_kinds") or [])}
-    if action in {"click", "fill", "press"} and action_kinds and action not in action_kinds:
-        return None
+    if action in {"click", "fill", "press"} and action_kinds:
+        allowed_actions = set(action_kinds)
+        if action == "fill" and "select" in allowed_actions:
+            allowed_actions.add("fill")
+        if action not in allowed_actions:
+            return None
     if expected_role and node_role != expected_role:
+        return None
+    if action == "fill" and not _is_fill_value_compatible(node, intent.get("value", "")):
         return None
 
     score = 0
     if expected_role and node_role == expected_role:
         score += 5
-    haystack = _node_search_text(node)
-    haystack_tokens = _tokenize_text(haystack)
-    if expected_name:
-        if expected_name in haystack:
-            score += 6
-        overlap = len(expected_tokens & haystack_tokens)
-        score += min(overlap * 2, 6)
-        if overlap == 0 and expected_name not in haystack and expected_tokens:
-            score -= 2
+    score += _score_node_against_hints(node, intent)
     validation = node.get("validation") or {}
     if validation.get("status") == "ok":
         score += 4
@@ -733,7 +894,6 @@ def _collection_score(collection: Dict[str, Any], intent: Dict[str, Any]) -> int
 def resolve_structured_intent(snapshot: Dict[str, Any], intent: Dict[str, Any]) -> Dict[str, Any]:
     action = _normalize_hint(intent.get("action"))
     collection_hint = intent.get("collection_hint", {}) or {}
-    target_hint = intent.get("target_hint", {}) or {}
     ordinal = intent.get("ordinal")
 
     if action == "navigate":
@@ -806,43 +966,47 @@ def resolve_structured_intent(snapshot: Dict[str, Any], intent: Dict[str, Any]) 
                 "item_hint": {},
                 "ordinal": _normalize_ordinal(intent) if _intent_requests_ordinal(intent) else None,
                 "selected_locator_kind": selected_locator_kind,
+                "actionable_node": best_actionable,
             },
         }
 
-    expected_role = _normalize_hint(target_hint.get("role"))
-    expected_name = _normalize_hint(target_hint.get("name") or target_hint.get("text") or target_hint.get("value"))
+    expected = _expected_target_hints(intent)
+    expected_role = expected.get("role", "")
     best_match: Optional[Dict[str, Any]] = None
     best_frame_path: List[str] = []
+    best_score: Optional[int] = None
     search_nodes = list(snapshot.get("actionable_nodes") or [])
     if search_nodes:
         for element in search_nodes:
             role = _normalize_hint(element.get("role"))
-            name = _normalize_hint(element.get("name") or element.get("text"))
             if expected_role and role != expected_role:
                 continue
-            if expected_name and expected_name not in name:
+            if action == "fill" and not _is_fill_value_compatible(element, intent.get("value", "")):
                 continue
-            best_match = element
-            best_frame_path = list(element.get("frame_path") or [])
-            break
+            score = _score_node_against_hints(element, intent)
+            if best_score is None or score > best_score:
+                best_match = element
+                best_frame_path = list(element.get("frame_path") or [])
+                best_score = score
     for frame in snapshot.get("frames", []):
-        if best_match:
-            break
         for element in frame.get("elements", []):
             role = _normalize_hint(element.get("role"))
-            name = _normalize_hint(element.get("name"))
             if expected_role and role != expected_role:
                 continue
-            if expected_name and expected_name not in name:
+            if action == "fill" and not _is_fill_value_compatible(element, intent.get("value", "")):
                 continue
-            best_match = element
-            best_frame_path = frame.get("frame_path", [])
-            break
-        if best_match:
-            break
+            score = _score_node_against_hints(element, intent)
+            if best_score is None or score > best_score:
+                best_match = element
+                best_frame_path = frame.get("frame_path", [])
+                best_score = score
 
     if not best_match:
         raise ValueError("No frame-aware target matched the structured intent")
+    if any(expected.get(key) for key in ("name", "text", "label", "title", "placeholder", "value")) and (
+        best_score is None or best_score <= 0
+    ):
+        raise ValueError("No sufficiently specific target matched the structured intent")
 
     locator, locator_candidates, selected_locator_kind = _node_locator_bundle(best_match)
     return {
@@ -855,6 +1019,7 @@ def resolve_structured_intent(snapshot: Dict[str, Any], intent: Dict[str, Any]) 
             "item_hint": {},
             "ordinal": None,
             "selected_locator_kind": selected_locator_kind,
+            "actionable_node": best_match,
         },
     }
 
@@ -869,6 +1034,36 @@ def _locator_from_payload(scope, payload):
     if method == "placeholder":
         return scope.get_by_placeholder(payload["value"])
     return scope.locator(payload.get("value", ""))
+
+
+async def _select_custom_combobox_value(scope, locator, value: Any) -> None:
+    text_value = str(value)
+    await locator.click()
+
+    option_locator = scope.get_by_role("option", name=text_value)
+    try:
+        await option_locator.click()
+        return
+    except Exception:
+        pass
+
+    try:
+        await locator.fill(text_value)
+    except Exception:
+        pass
+
+    option_locator = scope.get_by_role("option", name=text_value)
+    try:
+        await option_locator.click()
+        return
+    except Exception:
+        pass
+
+    try:
+        await locator.press("Enter")
+        return
+    except Exception as exc:
+        raise ValueError(f"Unable to select combobox option '{text_value}'.") from exc
 
 
 def _build_collection_item_payload(collection_hint: Dict[str, Any], item_hint: Dict[str, Any], ordinal: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -887,10 +1082,41 @@ def _build_collection_item_payload(collection_hint: Dict[str, Any], item_hint: D
     }
 
 
+def _summarize_resolved_element(resolved: Dict[str, Any], output: Any = None) -> Dict[str, Any]:
+    node = (
+        resolved.get("content_node")
+        or resolved.get("resolved_target")
+        or resolved.get("actionable_node")
+        or {}
+    )
+    if not isinstance(node, dict):
+        node = {}
+
+    summary: Dict[str, Any] = {}
+    for key in ("tag", "role", "name", "text", "placeholder", "title", "semantic_kind", "type", "href", "value"):
+        value = node.get(key)
+        if value not in (None, "", []):
+            summary[key] = value
+
+    locator = resolved.get("locator")
+    if locator:
+        summary["locator"] = locator
+
+    frame_path = resolved.get("frame_path") or []
+    if frame_path:
+        summary["frame_path"] = frame_path
+
+    if output not in (None, "", "ok", "None"):
+        summary["output"] = output
+
+    return summary
+
+
 async def execute_structured_intent(page, intent: Dict[str, Any]) -> Dict[str, Any]:
     resolved = intent["resolved"]
     action = intent["action"]
     output = "ok"
+    output_meta: Dict[str, Any] = {}
     if action == "navigate":
         url = resolved.get("url") or intent.get("value", "")
         await page.goto(url)
@@ -928,8 +1154,25 @@ async def execute_structured_intent(page, intent: Dict[str, Any]) -> Dict[str, A
         await locator.click()
     elif action == "extract_text":
         output = await locator.inner_text()
+        output_meta = _summarize_resolved_element(resolved, output)
     elif action == "fill":
-        await locator.fill(intent.get("value", ""))
+        fill_target = resolved.get("actionable_node") or resolved.get("resolved_target") or {}
+        if isinstance(intent.get("value"), dict):
+            raise ValueError("Structured fill action expects a scalar value, but received an object.")
+        if fill_target and not _is_fill_value_compatible(fill_target, intent.get("value", "")):
+            raise ValueError(_fill_type_error(fill_target, intent.get("value", "")))
+        fill_value = intent.get("value", "")
+        target_tag = _normalize_hint(fill_target.get("tag"))
+        target_role = _normalize_hint(fill_target.get("role"))
+        if target_tag == "select":
+            try:
+                await locator.select_option(label=str(fill_value))
+            except Exception:
+                await locator.select_option(value=str(fill_value))
+        elif target_role == "combobox":
+            await _select_custom_combobox_value(scope, locator, fill_value)
+        else:
+            await locator.fill(fill_value)
     elif action == "press":
         await locator.press(intent.get("value", "Enter"))
     else:
@@ -957,10 +1200,10 @@ async def execute_structured_intent(page, intent: Dict[str, Any]) -> Dict[str, A
             "selected_locator_kind": resolved.get("selected_locator_kind", ""),
             "collection_kind": resolved.get("collection_hint", {}).get("kind", ""),
         },
+        "element_snapshot": output_meta,
         "result_key": intent.get("result_key"),
         "description": intent.get("description", action),
         "prompt": intent.get("prompt"),
         "value": intent.get("value"),
     }
-    return {"success": True, "step": step, "output": output}
-
+    return {"success": True, "step": step, "output": output, "output_meta": output_meta}

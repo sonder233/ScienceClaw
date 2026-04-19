@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 SNAPSHOT_V2_JS = r"""() => {
-    const ACTIONABLE = 'a,button,input,textarea,select,[role=button],[role=link],[role=menuitem],[role=menuitemradio],[role=tab],[role=checkbox],[role=radio],[contenteditable=true]';
+    const ACTIONABLE = 'a,button,input,textarea,select,[role=button],[role=link],[role=menuitem],[role=menuitemradio],[role=tab],[role=checkbox],[role=radio],[role=combobox],[role=listbox],[role=option],[contenteditable=true]';
     const CONTENT = 'h1,h2,h3,h4,h5,h6,th,td,dt,dd,li,p,label,[role=heading],[role=cell],[role=rowheader],[role=columnheader]';
     const recorder = globalThis.__rpaPlaywrightRecorder || null;
     const result = { actionable_nodes: [], content_nodes: [], containers: [] };
@@ -75,6 +75,8 @@ SNAPSHOT_V2_JS = r"""() => {
         }
         if (tag === 'a' && el.hasAttribute('href'))
             return 'link';
+        if (tag === 'option')
+            return 'option';
         return '';
     }
 
@@ -205,8 +207,14 @@ SNAPSHOT_V2_JS = r"""() => {
         if (tag === 'input' || tag === 'textarea' || el.isContentEditable)
             actions.add('fill');
         if (tag === 'select')
+            actions.add('fill');
+        if (tag === 'select')
             actions.add('select');
+        if (role === 'combobox' || role === 'listbox')
+            actions.add('fill');
         if (!actions.size || role === 'button' || role === 'link' || role === 'checkbox' || role === 'radio')
+            actions.add('click');
+        if (role === 'option')
             actions.add('click');
         if (role === 'textbox')
             actions.add('press');

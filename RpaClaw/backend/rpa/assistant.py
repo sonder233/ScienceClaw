@@ -13,6 +13,7 @@ from backend.rpa.assistant_runtime import (
     resolve_structured_intent,
     resolve_collection_target,
 )
+from backend.rpa.dom_flow import prepare_dom_context
 
 # Active ReAct agent instances keyed by session_id
 _active_agents: Dict[str, "RPAReActAgent"] = {}
@@ -94,9 +95,23 @@ Rules:
 2. Prefer role, label, placeholder, and structural hints over concrete titles or dynamic href values.
 3. For opening a website or navigating to a known URL, prefer `"action": "navigate"` with the URL in `value`. Do not model browser chrome such as the address bar as a page textbox.
 4. The backend resolves frame context automatically, so do not invent iframe selectors unless the user explicitly names a frame.
-5. Only output Python code for genuinely complex custom logic that cannot be expressed as one atomic structured action.
-6. If you output Python, define async def run(page): and use Playwright async API.
-7. For extract_text actions, include result_key as a short ASCII snake_case key such as latest_issue_title. Do not use Chinese, spaces, or hyphens.
+5. If the prompt includes "DOM Context For Data Extraction" and the user is asking to summarize, read, list, or extract current page information, answer directly in natural language when no extra browser interaction is needed.
+6. Only output Python code for genuinely complex custom logic that cannot be expressed as one atomic structured action.
+7. If you output Python, define async def run(page): and use Playwright async API.
+8. For extract_text actions, include result_key as a short ASCII snake_case key such as latest_issue_title. Do not use Chinese, spaces, or hyphens.
+"""
+
+DATA_EXTRACTION_SYSTEM_PROMPT = """You are an RPA page-reading assistant.
+
+Your job is to answer the user's question from the current page DOM context.
+
+Rules:
+1. If the prompt includes "DOM Context For Data Extraction", use that DOM context as the primary source of truth.
+2. Summarize the current page directly in natural language when the user asks to get, read, summarize, list, or extract current page information.
+3. Do not output JSON actions unless the user explicitly asks you to interact with the page or the answer cannot be produced from the provided DOM context.
+4. Do not invent missing fields. If a value is not present in the DOM context, say it is not visible.
+5. Prefer a structured, human-readable answer with key fields and short explanations when useful.
+6. FALLBACK_RAW_HTML is only supplementary context. Prefer the structured DOM view over fallback raw HTML.
 """
 
 async def _get_page_elements(page: Page) -> str:
@@ -235,6 +250,153 @@ def _extract_llm_chunk_fallback_text(chunk: Any) -> str:
     return ""
 
 
+def _extract_json_object_blocks(text: str) -> List[str]:
+    blocks: List[str] = []
+    start: Optional[int] = None
+    depth = 0
+    in_string = False
+    escape = False
+
+    for index, char in enumerate(text):
+        if start is None:
+            if char == "{":
+                start = index
+                depth = 1
+                in_string = False
+                escape = False
+            continue
+
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                blocks.append(text[start:index + 1])
+                start = None
+
+    return blocks
+
+
+def _normalize_hint_value(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _is_fillable_role(role: str) -> bool:
+    return role in {"textbox", "spinbutton", "combobox", "listbox"}
+
+
+def _iter_snapshot_actionable_candidates(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    for node in snapshot.get("actionable_nodes", []):
+        candidates.append(node)
+    for frame in snapshot.get("frames", []):
+        frame_path = list(frame.get("frame_path") or [])
+        for element in frame.get("elements", []):
+            candidates.append({**element, "frame_path": list(element.get("frame_path") or frame_path)})
+    return candidates
+
+
+def _field_match_score(field_name: str, node: Dict[str, Any]) -> int:
+    normalized_field = _normalize_hint_value(field_name)
+    if not normalized_field:
+        return -1
+    candidates = [
+        _normalize_hint_value(node.get("name")),
+        _normalize_hint_value(node.get("label")),
+        _normalize_hint_value(node.get("text")),
+        _normalize_hint_value(node.get("title")),
+        _normalize_hint_value(node.get("placeholder")),
+    ]
+    best = -1
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if candidate == normalized_field:
+            best = max(best, 20)
+        elif normalized_field in candidate:
+            best = max(best, 14)
+        elif candidate in normalized_field:
+            best = max(best, 10)
+    return best
+
+
+def _expand_mapping_fill_intent(snapshot: Dict[str, Any], intent: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if _normalize_hint_value(intent.get("action")) != "fill":
+        return []
+    value = intent.get("value")
+    if not isinstance(value, dict):
+        return []
+
+    expanded: List[Dict[str, Any]] = []
+    candidates = _iter_snapshot_actionable_candidates(snapshot)
+    used_node_keys: set[tuple[str, str, str]] = set()
+
+    for field_name, field_value in value.items():
+        if field_value in (None, ""):
+            continue
+
+        best_node: Optional[Dict[str, Any]] = None
+        best_score = -1
+        for node in candidates:
+            role = _normalize_hint_value(node.get("role"))
+            if not _is_fillable_role(role):
+                continue
+            action_kinds = {str(kind).lower() for kind in (node.get("action_kinds") or [])}
+            if action_kinds and "fill" not in action_kinds and "select" not in action_kinds:
+                continue
+            score = _field_match_score(str(field_name), node)
+            if score < 0:
+                continue
+            node_key = (
+                str(node.get("frame_path") or []),
+                str(node.get("name") or node.get("label") or node.get("placeholder") or ""),
+                role,
+            )
+            if node_key in used_node_keys:
+                continue
+            if score > best_score:
+                best_node = node
+                best_score = score
+
+        target_hint: Dict[str, Any] = {"name": str(field_name)}
+        if best_node:
+            role = best_node.get("role")
+            if role:
+                target_hint["role"] = role
+            if best_node.get("placeholder"):
+                target_hint["placeholder"] = best_node["placeholder"]
+            used_node_keys.add(
+                (
+                    str(best_node.get("frame_path") or []),
+                    str(best_node.get("name") or best_node.get("label") or best_node.get("placeholder") or ""),
+                    str(best_node.get("role") or ""),
+                )
+            )
+
+        expanded.append(
+            {
+                "action": "fill",
+                "description": f"填写{field_name}字段",
+                "prompt": intent.get("prompt"),
+                "target_hint": target_hint,
+                "value": str(field_value),
+            }
+        )
+
+    return expanded
+
+
 def _snapshot_frame_lines(snapshot: Dict[str, Any]) -> List[str]:
     lines: List[str] = []
     for container in snapshot.get("containers", []):
@@ -361,12 +523,18 @@ class RPAReActAgent:
                 yield {"event": "agent_aborted", "data": {"reason": "No active page available"}}
                 return
             snapshot = await build_page_snapshot(current_page, build_frame_path_from_frame)
-            obs = self._build_observation(snapshot, steps_done)
-            self._history.append({"role": "user", "content": obs})
+            _intent, dom_mode, _candidates, dom_context_block, dom_debug = await prepare_dom_context(
+                current_page,
+                goal,
+                model_config=model_config,
+            )
+            obs = self._build_observation(snapshot, steps_done, dom_mode, dom_context_block, dom_debug)
+            yield {"event": "dom_context_debug", "data": dom_debug}
 
             # Think — stream LLM response
             full_response = ""
-            async for chunk in self._stream_llm(self._history, model_config):
+            turn_messages = self._history + [{"role": "user", "content": obs}]
+            async for chunk in self._stream_llm(turn_messages, model_config):
                 full_response += chunk
 
             self._history.append({"role": "assistant", "content": full_response})
@@ -444,9 +612,10 @@ class RPAReActAgent:
                     "prompt": goal,
                 }
                 output = result.get("output", "")
+                output_meta = result.get("output_meta")
                 # If there's meaningful output, append to description for visibility
                 if output and output != "ok" and output != "None":
-                    yield {"event": "agent_step_done", "data": {"step": step_data, "output": output}}
+                    yield {"event": "agent_step_done", "data": {"step": step_data, "output": output, "output_meta": output_meta}}
                     self._history.append({"role": "user", "content": f"Step succeeded: {description}\nOutput: {output}"})
                 else:
                     yield {"event": "agent_step_done", "data": {"step": step_data}}
@@ -458,8 +627,27 @@ class RPAReActAgent:
         yield {"event": "agent_done", "data": {"total_steps": steps_done}}
 
     @staticmethod
-    def _build_observation(snapshot: Dict[str, Any], steps_done: int) -> str:
+    def _build_observation(
+        snapshot: Dict[str, Any],
+        steps_done: int,
+        dom_mode: str = "compact",
+        dom_context_block: str = "",
+        dom_debug: Optional[Dict[str, Any]] = None,
+    ) -> str:
         frame_lines = _snapshot_frame_lines(snapshot)
+        dom_section = ""
+        if dom_context_block.strip():
+            title = "当前页面 DOM 上下文（用于读取/提取数据）" if dom_mode == "full" else "当前页面 DOM 上下文（用于页面操作）"
+            dom_section = f"""
+
+{title}:
+{dom_context_block}"""
+        debug_section = ""
+        if dom_debug:
+            debug_section = f"""
+
+DOM debug:
+{json.dumps(dom_debug, ensure_ascii=False)}"""
         return f"""Current page state:
 URL: {snapshot.get('url', '')}
 Title: {snapshot.get('title', '')}
@@ -467,6 +655,8 @@ Completed steps: {steps_done}
 
 Current page snapshot:
 {chr(10).join(frame_lines) or "(no observable elements)"}
+{dom_section}
+{debug_section}
 
 Return the next JSON action."""
 
@@ -598,8 +788,13 @@ class RPAAssistant:
             return
 
         snapshot = await build_page_snapshot(current_page, build_frame_path_from_frame)
+        _intent, dom_mode, _candidates, dom_context_block, dom_debug = await prepare_dom_context(
+            current_page,
+            message,
+            model_config=model_config,
+        )
         history = self._get_history(session_id)
-        messages = self._build_messages(message, steps, snapshot, history)
+        messages = self._build_messages(message, steps, snapshot, history, dom_mode, dom_context_block, dom_debug)
 
         full_response = ""
         async for chunk_text in self._stream_llm(messages, model_config):
@@ -620,12 +815,14 @@ class RPAAssistant:
             yield {"event": "message_chunk", "data": {"text": retry_notice}}
         if resolution:
             yield {"event": "resolution", "data": {"intent": resolution}}
+        yield {"event": "dom_context_debug", "data": dom_debug}
 
         history.append({"role": "user", "content": message})
         history.append({"role": "assistant", "content": final_response})
         self._trim_history(session_id)
 
         step_data = None
+        steps_data = result.get("steps") or []
         if result["success"]:
             if result.get("step"):
                 step_data = result["step"]
@@ -645,7 +842,10 @@ class RPAAssistant:
                 "success": result["success"],
                 "error": result.get("error"),
                 "step": step_data,
+                "steps": steps_data,
                 "output": result.get("output"),
+                "output_meta": result.get("output_meta"),
+                "dom_debug": dom_debug,
             },
         }
         yield {"event": "done", "data": {}}
@@ -701,7 +901,35 @@ class RPAAssistant:
         snapshot: Dict[str, Any],
         full_response: str,
     ) -> tuple[Dict[str, Any], Optional[str], Optional[Dict[str, Any]]]:
-        structured_intent = self._extract_structured_intent(full_response)
+        structured_intents = self._extract_structured_intents(full_response)
+        if len(structured_intents) == 1:
+            expanded = _expand_mapping_fill_intent(snapshot, structured_intents[0])
+            if expanded:
+                structured_intents = expanded
+        if len(structured_intents) > 1:
+            executed_steps: List[Dict[str, Any]] = []
+            last_output = "ok"
+            last_output_meta: Dict[str, Any] = {}
+            resolved_batch: List[Dict[str, Any]] = []
+            for intent in structured_intents:
+                resolved_intent = resolve_structured_intent(snapshot, intent)
+                resolved_batch.append(resolved_intent)
+                result = await execute_structured_intent(current_page, resolved_intent)
+                if result.get("step"):
+                    executed_steps.append(result["step"])
+                if result.get("output") not in (None, ""):
+                    last_output = result["output"]
+                if result.get("output_meta"):
+                    last_output_meta = result["output_meta"]
+            return {
+                "success": True,
+                "output": last_output,
+                "output_meta": last_output_meta,
+                "steps": executed_steps,
+                "step": executed_steps[-1] if executed_steps else None,
+            }, None, {"resolved_batch": resolved_batch}
+
+        structured_intent = structured_intents[0] if structured_intents else None
         if structured_intent:
             resolved_intent = resolve_structured_intent(snapshot, structured_intent)
             result = await execute_structured_intent(current_page, resolved_intent)
@@ -709,7 +937,10 @@ class RPAAssistant:
 
         code = self._extract_code(full_response)
         if not code:
-            raise ValueError("Unable to extract structured intent or executable code from assistant response")
+            answer = full_response.strip()
+            if not answer:
+                raise ValueError("Unable to extract structured intent, executable code, or direct answer from assistant response")
+            return {"success": True, "output": answer, "output_meta": {}, "step": None}, None, None
         result = await self._execute_on_page(current_page, code)
         return result, code, None
 
@@ -719,6 +950,9 @@ class RPAAssistant:
         steps: List[Dict[str, Any]],
         snapshot: Dict[str, Any],
         history: List[Dict[str, str]],
+        dom_mode: str = "compact",
+        dom_context_block: str = "",
+        dom_debug: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, str]]:
         steps_text = ""
         if steps:
@@ -731,16 +965,33 @@ class RPAAssistant:
 
         frame_lines = _snapshot_frame_lines(snapshot)
 
+        dom_block = ""
+        if dom_context_block.strip():
+            heading = "## DOM Context For Data Extraction" if dom_mode == "full" else "## DOM Context For Operation"
+            dom_block = f"""
+
+{heading}
+{dom_context_block}"""
+        debug_block = ""
+        if dom_debug:
+            debug_block = f"""
+
+## DOM Debug
+{json.dumps(dom_debug, ensure_ascii=False)}"""
+
         context = f"""## History Steps
 {steps_text or "(none)"}
 
 ## Current Page Snapshot
 {chr(10).join(frame_lines) or "(no observable elements)"}
+{dom_block}
+{debug_block}
 
 ## User Instruction
 {user_message}"""
 
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        system_prompt = DATA_EXTRACTION_SYSTEM_PROMPT if dom_mode == "full" else SYSTEM_PROMPT
+        messages = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
         messages.append({"role": "user", "content": context})
         return messages
@@ -773,23 +1024,43 @@ class RPAAssistant:
 
     @staticmethod
     def _extract_structured_intent(text: str) -> Optional[Dict[str, Any]]:
+        intents = RPAAssistant._extract_structured_intents(text)
+        return intents[0] if intents else None
+
+    @staticmethod
+    def _extract_structured_intents(text: str) -> List[Dict[str, Any]]:
+        intents: List[Dict[str, Any]] = []
         stripped = text.strip()
         try:
             parsed = json.loads(stripped)
         except Exception:
             parsed = None
         if isinstance(parsed, dict) and parsed.get("action"):
-            return parsed
+            return [parsed]
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict) and item.get("action")]
 
         match = re.search(r"```json\s*\n(.*?)```", text, re.DOTALL)
         if match:
             try:
                 parsed = json.loads(match.group(1).strip())
             except Exception:
-                return None
+                parsed = None
             if isinstance(parsed, dict) and parsed.get("action"):
-                return parsed
-        return None
+                return [parsed]
+            if isinstance(parsed, list):
+                intents.extend(item for item in parsed if isinstance(item, dict) and item.get("action"))
+                if intents:
+                    return intents
+
+        for block in _extract_json_object_blocks(text):
+            try:
+                parsed = json.loads(block)
+            except Exception:
+                continue
+            if isinstance(parsed, dict) and parsed.get("action"):
+                intents.append(parsed)
+        return intents
 
     @staticmethod
     def _extract_code(text: str) -> Optional[str]:
@@ -831,6 +1102,3 @@ class RPAAssistant:
 
     async def _execute_on_page(self, page: Page, code: str) -> Dict[str, Any]:
         return await _execute_on_page(page, code)
-
-
-
