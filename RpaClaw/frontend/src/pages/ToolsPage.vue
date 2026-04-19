@@ -209,13 +209,32 @@
         <section class="space-y-4">
           <div class="flex flex-col gap-3 border-b border-slate-200 pb-4 dark:border-white/10 sm:flex-row sm:items-end sm:justify-between">
             <div>
-              <h2 class="text-xl font-black tracking-tight text-[var(--text-primary)]">{{ t('RPA MCP Gateway') }}</h2>
-              <p class="mt-1 text-sm text-[var(--text-tertiary)]">{{ t('Converted RPA tools exposed through the centralized gateway.') }}</p>
+              <h2 class="text-xl font-black tracking-tight text-[var(--text-primary)]">MCP Tool Studio</h2>
+              <p class="mt-1 text-sm text-[var(--text-tertiary)]">Manage published RPA-backed tools and create new MCP tools from recordings.</p>
             </div>
-            <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-[var(--text-secondary)] dark:bg-white/10">{{ t('server count summary', { count: rpaMcpTools.length }) }}</span>
+            <div class="flex items-center gap-2">
+              <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-[var(--text-secondary)] dark:bg-white/10">{{ t('server count summary', { count: rpaMcpTools.length }) }}</span>
+              <button
+                type="button"
+                class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-[var(--text-primary)] transition hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:hover:bg-white/[0.08]"
+                @click="router.push('/chat/tools/mcp/new')"
+              >
+                <Plus :size="16" />
+                New MCP Tool
+              </button>
+            </div>
           </div>
           <div v-if="rpaMcpTools.length === 0" class="rounded-3xl border border-dashed border-slate-300 bg-white/80 p-10 text-center text-sm text-[var(--text-tertiary)] dark:border-white/10 dark:bg-white/[0.04]">
-            {{ t('No converted RPA MCP tools yet.') }}
+            <p>No MCP tools published yet.</p>
+            <p class="mt-2">Create one from an RPA recording to expose it through the shared gateway.</p>
+            <button
+              type="button"
+              class="mt-5 inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-[var(--text-primary)] transition hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:hover:bg-white/[0.08]"
+              @click="router.push('/chat/tools/mcp/new')"
+            >
+              <Plus :size="16" />
+              Create from recording
+            </button>
           </div>
           <div v-else class="space-y-4">
             <article v-for="tool in rpaMcpTools" :key="tool.id" class="mcp-card">
@@ -733,10 +752,10 @@ const groupedMcpServers = computed(() => groupMcpServers(filteredMcpServers.valu
 const activeSummary = computed(() => (
   activeTab.value === 'external'
     ? t('external tools count summary', { count: externalTools.value.length })
-    : t('MCP servers count summary', { count: mcpServers.value.length })
+    : `${mcpServers.value.length} MCP servers · ${rpaMcpTools.value.length} MCP tools`
 ));
 const searchPlaceholder = computed(() => (
-  activeTab.value === 'external' ? t('Search tools...') : t('Search MCP servers...')
+  activeTab.value === 'external' ? t('Search tools...') : 'Search MCP servers or tools...'
 ));
 
 const clearGatewayArgumentValues = () => {

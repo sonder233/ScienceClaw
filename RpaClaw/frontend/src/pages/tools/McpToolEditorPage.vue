@@ -50,6 +50,7 @@ const cookieDomain = ref('');
 const previewTestSection = ref<HTMLElement | null>(null);
 const argumentValues = reactive<Record<string, unknown>>({});
 const source = computed(() => typeof route.query.source === 'string' ? route.query.source : '');
+const hasRpaSource = computed(() => Boolean(sessionId.value));
 
 const formatJsonBlock = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
 
@@ -150,7 +151,6 @@ const pageDescription = computed(() => source.value === 'rpa-session'
 
 const loadPreview = async () => {
   if (!sessionId.value) {
-    showErrorToast('Missing sessionId');
     loading.value = false;
     return;
   }
@@ -451,6 +451,25 @@ onMounted(loadPreview);
               </div>
             </section>
           </template>
+          <section v-else class="rounded-3xl border border-dashed border-slate-300 bg-slate-50/70 p-8 dark:border-white/10 dark:bg-white/[0.03]">
+            <h2 class="text-lg font-black">Start from an RPA recording</h2>
+            <p class="mt-2 max-w-2xl text-sm leading-6 text-slate-500 dark:text-slate-400">
+              This editor publishes recorded browser automation as an MCP tool. Create or open an RPA recording first, then use "Publish as MCP Tool" to hydrate this editor with the recording context.
+            </p>
+            <div class="mt-5 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                class="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-[#8930b0] to-[#004be2] px-4 py-2 text-sm font-bold text-white"
+                @click="router.push('/rpa/recorder')"
+              >
+                <Wand2 :size="16" />
+                Open RPA Recorder
+              </button>
+              <p class="text-xs text-slate-500 dark:text-slate-400">
+                Tools is the management surface; recording remains the authoring flow.
+              </p>
+            </div>
+          </section>
         </section>
 
         <aside class="space-y-4">
