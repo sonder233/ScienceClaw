@@ -7,9 +7,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
 from backend.config import settings
+from backend.deepagent.engine import get_llm_model
+from backend.storage import get_repository
 
 
 _SENSITIVE_PARAM_RE = re.compile(
@@ -38,13 +39,15 @@ class RpaMcpSemanticInferer:
     async def infer(
         self,
         *,
+        user_id: str = "",
         requested_name: str,
         requested_description: str,
         steps: list[dict[str, Any]],
         removed_step_details: list[dict[str, Any]],
         fallback_params: dict[str, Any],
     ) -> RpaMcpSemanticRecommendation:
-        if not self._can_use_model():
+        model_client, model_name = await self._resolve_model_client(user_id)
+        if model_client is None:
             return self._fallback(
                 requested_name,
                 requested_description,
@@ -55,11 +58,11 @@ class RpaMcpSemanticInferer:
         context = self._build_context(steps, removed_step_details)
         try:
             response = await asyncio.wait_for(
-                self._client().ainvoke(self._messages(requested_name, requested_description, context)),
+                model_client.ainvoke(self._messages(requested_name, requested_description, context)),
                 timeout=max(1, int(settings.rpa_mcp_semantic_timeout_seconds)),
             )
             payload = self._parse_json(str(getattr(response, "content", "") or ""))
-            return self._validate_payload(payload, requested_name, requested_description, fallback_params)
+            return self._validate_payload(payload, requested_name, requested_description, fallback_params, model_name)
         except Exception as exc:
             return self._fallback(
                 requested_name,
@@ -68,21 +71,40 @@ class RpaMcpSemanticInferer:
                 [f"Semantic inference failed: {exc.__class__.__name__}"],
             )
 
-    def _can_use_model(self) -> bool:
+    async def _resolve_model_client(self, user_id: str) -> tuple[Any | None, str]:
         if self._model_client is not None:
-            return True
-        return bool(settings.rpa_mcp_semantic_inference and settings.model_ds_api_key)
+            return self._model_client, "injected"
+        if not settings.rpa_mcp_semantic_inference:
+            return None, ""
+        if settings.model_ds_api_key:
+            return get_llm_model(config=None, max_tokens_override=2000, streaming=False), settings.model_ds_name
+        model_config = await self._resolve_configured_model(user_id)
+        if not model_config:
+            return None, ""
+        return get_llm_model(config=model_config, max_tokens_override=2000, streaming=False), str(model_config.get("model_name") or "")
 
-    def _client(self) -> Any:
-        if self._model_client is not None:
-            return self._model_client
-        return ChatOpenAI(
-            model=settings.model_ds_name,
-            base_url=settings.model_ds_base_url,
-            api_key=settings.model_ds_api_key,
-            temperature=0,
-            max_tokens=2000,
+    async def _resolve_configured_model(self, user_id: str) -> dict[str, Any] | None:
+        filter_doc: dict[str, Any] = {
+            "is_active": True,
+            "api_key": {"$nin": ["", None]},
+        }
+        if user_id:
+            filter_doc["$or"] = [{"is_system": True}, {"user_id": user_id}]
+        docs = await get_repository("models").find_many(
+            filter_doc,
+            sort=[("created_at", -1)],
+            limit=1,
         )
+        doc = docs[0] if docs else None
+        if not doc:
+            return None
+        return {
+            "provider": doc.get("provider") or "",
+            "model_name": doc.get("model_name") or "",
+            "base_url": doc.get("base_url"),
+            "api_key": doc.get("api_key"),
+            "context_window": doc.get("context_window"),
+        }
 
     def _messages(self, requested_name: str, requested_description: str, context: dict[str, Any]) -> list[Any]:
         return [
@@ -170,6 +192,7 @@ class RpaMcpSemanticInferer:
         requested_name: str,
         requested_description: str,
         fallback_params: dict[str, Any],
+        model_name: str,
     ) -> RpaMcpSemanticRecommendation:
         tool = payload.get("tool") or {}
         tool_name = self._snake_case(str(tool.get("tool_name") or requested_name or "rpa_tool"))
@@ -227,7 +250,7 @@ class RpaMcpSemanticInferer:
             params=clean_params,
             confidence=self._average_confidence(clean_params),
             warnings=warnings,
-            model=settings.model_ds_name,
+            model=model_name,
         )
 
     def _fallback(

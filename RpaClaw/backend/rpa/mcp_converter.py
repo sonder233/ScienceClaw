@@ -80,6 +80,7 @@ class RpaMcpConverter:
         sanitized_params = self._strip_login_params(params, report)
         sanitized_params = self._infer_step_params(sanitized_steps, sanitized_params)
         recommendation = await (self._semantic_inferer or RpaMcpSemanticInferer()).infer(
+            user_id=user_id,
             requested_name=name,
             requested_description=description,
             steps=sanitized_steps,
