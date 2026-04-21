@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from .extracted_fields import parse_extracted_fields
 from .assistant_snapshot_runtime import SNAPSHOT_V2_JS
 from .frame_selectors import build_frame_path
 
@@ -206,6 +207,8 @@ async def _extract_frame_snapshot_v2(frame) -> Dict[str, Any]:
             "actionable_nodes": list(data.get("actionable_nodes") or []),
             "content_nodes": list(data.get("content_nodes") or []),
             "containers": list(data.get("containers") or []),
+            "page_blocks": list(data.get("page_blocks") or []),
+            "field_pairs": list(data.get("field_pairs") or []),
         }
 
     elements = await _extract_frame_elements(frame)
@@ -213,6 +216,8 @@ async def _extract_frame_snapshot_v2(frame) -> Dict[str, Any]:
         "actionable_nodes": [],
         "content_nodes": [],
         "containers": [],
+        "page_blocks": [],
+        "field_pairs": [],
         "elements": elements,
     }
 
@@ -283,6 +288,8 @@ async def build_page_snapshot(page, frame_path_builder: Callable[[Any], Any]) ->
     actionable_nodes: List[Dict[str, Any]] = []
     content_nodes: List[Dict[str, Any]] = []
     containers: List[Dict[str, Any]] = []
+    page_blocks: List[Dict[str, Any]] = []
+    field_pairs: List[Dict[str, Any]] = []
 
     async def walk(frame) -> None:
         try:
@@ -316,6 +323,20 @@ async def build_page_snapshot(page, frame_path_builder: Callable[[Any], Any]) ->
             }
             for container in list(snapshot_v2.get("containers") or [])
         ]
+        frame_page_blocks = [
+            {
+                **block,
+                "frame_path": list(block.get("frame_path") or frame_path),
+            }
+            for block in list(snapshot_v2.get("page_blocks") or [])
+        ]
+        frame_field_pairs = [
+            {
+                **pair,
+                "frame_path": list(pair.get("frame_path") or frame_path),
+            }
+            for pair in list(snapshot_v2.get("field_pairs") or [])
+        ]
         collections = _detect_collections(elements, frame_path)
         frames.append(
             {
@@ -324,11 +345,15 @@ async def build_page_snapshot(page, frame_path_builder: Callable[[Any], Any]) ->
                 "frame_hint": "main document" if not frame_path else " -> ".join(frame_path),
                 "elements": elements or frame_actionable_nodes,
                 "collections": collections,
+                "page_blocks": frame_page_blocks,
+                "field_pairs": frame_field_pairs,
             }
         )
         actionable_nodes.extend(frame_actionable_nodes)
         content_nodes.extend(frame_content_nodes)
         containers.extend(frame_containers)
+        page_blocks.extend(frame_page_blocks)
+        field_pairs.extend(frame_field_pairs)
         for child in getattr(frame, "child_frames", []):
             await walk(child)
 
@@ -340,6 +365,8 @@ async def build_page_snapshot(page, frame_path_builder: Callable[[Any], Any]) ->
         "actionable_nodes": actionable_nodes,
         "content_nodes": content_nodes,
         "containers": containers,
+        "page_blocks": page_blocks,
+        "field_pairs": field_pairs,
     }
 
 
@@ -435,6 +462,100 @@ def _build_locator_candidates_for_element(element: Dict[str, Any]) -> List[Dict[
     return candidates
 
 
+def _field_pair_locator_bundle(field_pair: Dict[str, Any]) -> tuple[Dict[str, Any], List[Dict[str, Any]], str]:
+    value_node = field_pair.get("value_node") or {}
+    locator_candidates = list(value_node.get("locator_candidates") or [])
+    locator = value_node.get("locator")
+    if locator_candidates and locator:
+        for candidate in locator_candidates:
+            if candidate.get("selected"):
+                return locator, locator_candidates, str(candidate.get("kind") or "")
+        return locator, locator_candidates, str(locator_candidates[0].get("kind") or "")
+    fallback_candidates = _build_locator_candidates_for_element(value_node)
+    return _candidate_locator_payload(fallback_candidates), fallback_candidates, str(
+        fallback_candidates[0].get("kind") or ""
+    )
+
+
+def _extract_candidate_locator_payload(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    payload = candidate.get("locator_payload")
+    if isinstance(payload, dict) and payload:
+        return payload
+    payload = candidate.get("locator")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _locator_payload_priority(payload: Dict[str, Any]) -> int:
+    method = _normalize_hint(payload.get("method"))
+    value = str(payload.get("value") or "")
+    if method == "testid":
+        return 100
+    if method == "css":
+        if value.startswith("#"):
+            return 95
+        if "[data-testid=" in value or "[name=" in value:
+            return 90
+        return 80
+    if method == "label":
+        return 70
+    if method == "placeholder":
+        return 60
+    if method == "role":
+        return 50
+    if method == "text":
+        return 10
+    return 20
+
+
+def _playwright_expression_for_locator(payload: Dict[str, Any], scope_var: str = "page") -> str:
+    method = _normalize_hint(payload.get("method"))
+    if method == "role":
+        role = str(payload.get("role") or "button")
+        name = str(payload.get("name") or "")
+        if name:
+            escaped_name = name.replace("\\", "\\\\").replace('"', '\\"')
+            return f'{scope_var}.get_by_role("{role}", name="{escaped_name}")'
+        return f'{scope_var}.get_by_role("{role}")'
+    if method == "testid":
+        value = str(payload.get("value") or "").replace("\\", "\\\\").replace('"', '\\"')
+        return f'{scope_var}.get_by_test_id("{value}")'
+    if method == "label":
+        value = str(payload.get("value") or "").replace("\\", "\\\\").replace('"', '\\"')
+        return f'{scope_var}.get_by_label("{value}")'
+    if method == "placeholder":
+        value = str(payload.get("value") or "").replace("\\", "\\\\").replace('"', '\\"')
+        return f'{scope_var}.get_by_placeholder("{value}")'
+    if method == "text":
+        value = str(payload.get("value") or "").replace("\\", "\\\\").replace('"', '\\"')
+        return f'{scope_var}.get_by_text("{value}")'
+    value = str(payload.get("value") or "").replace("\\", "\\\\").replace('"', '\\"')
+    return f'{scope_var}.locator("{value}")'
+
+
+def _candidate_description(payload: Dict[str, Any]) -> str:
+    method = _normalize_hint(payload.get("method"))
+    if method == "testid":
+        return "按 data-testid 定位"
+    if method == "css":
+        value = str(payload.get("value") or "")
+        if value.startswith("#"):
+            return "按稳定 ID 定位"
+        if "[data-testid=" in value:
+            return "按容器 testid + 结构定位"
+        if "[name=" in value:
+            return "按 name 属性定位"
+        return "按 CSS 结构定位"
+    if method == "label":
+        return "按标签定位"
+    if method == "placeholder":
+        return "按 placeholder 定位"
+    if method == "role":
+        return "按角色定位"
+    if method == "text":
+        return "按文本值兜底"
+    return f"按 {method or 'locator'} 定位"
+
+
 def _candidate_locator_payload(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
     for candidate in candidates:
         if candidate.get("selected"):
@@ -465,6 +586,81 @@ def _resolve_content_node(snapshot: Dict[str, Any], intent: Dict[str, Any]) -> O
         ordinal_pool = [item["node"] for item in scored if item["score"] >= max_score - 1]
         return _select_ordinal_node(ordinal_pool, intent)
     return scored[0]["node"]
+
+
+def _field_pair_search_text(field_pair: Dict[str, Any]) -> str:
+    container = field_pair.get("container") or {}
+    label_node = field_pair.get("label_node") or {}
+    value_node = field_pair.get("value_node") or {}
+    bits = [
+        field_pair.get("label_text"),
+        field_pair.get("value_text"),
+        (field_pair.get("relation") or {}).get("kind"),
+        label_node.get("text"),
+        value_node.get("text"),
+        " ".join(container.get("class_tokens") or []),
+        " ".join(label_node.get("class_tokens") or []),
+        " ".join(value_node.get("class_tokens") or []),
+    ]
+    stable_values = []
+    for node in (container, label_node, value_node):
+        attrs = node.get("stable_attrs") or {}
+        stable_values.extend(str(value) for value in attrs.values() if value)
+    bits.extend(stable_values)
+    return " ".join(str(bit or "") for bit in bits).lower()
+
+
+def _field_pair_score(field_pair: Dict[str, Any], intent: Dict[str, Any]) -> int:
+    target_hint = _coerce_target_hint(intent.get("target_hint"))
+    expected_name = _normalize_hint(
+        target_hint.get("label") or target_hint.get("name") or target_hint.get("text") or target_hint.get("value")
+    )
+    prompt = " ".join(
+        part for part in [intent.get("prompt"), intent.get("description")] if isinstance(part, str) and part.strip()
+    )
+    prompt_tokens = _tokenize_text(prompt)
+    expected_tokens = _tokenize_text(expected_name)
+    haystack = _field_pair_search_text(field_pair)
+    haystack_tokens = _tokenize_text(haystack)
+    score = 0
+    if expected_name:
+        if expected_name in haystack:
+            score += 10
+        overlap = len(expected_tokens & haystack_tokens)
+        score += min(overlap * 3, 12)
+        if not overlap and expected_name not in haystack and expected_tokens:
+            score -= 4
+    prompt_overlap = len(prompt_tokens & haystack_tokens)
+    score += min(prompt_overlap * 2, 6)
+    relation_kind = _normalize_hint((field_pair.get("relation") or {}).get("kind"))
+    if relation_kind in {"siblings_same_container", "description_list_pair", "same_row_cells"}:
+        score += 4
+    confidence = (field_pair.get("relation") or {}).get("confidence")
+    if isinstance(confidence, (int, float)):
+        score += int(round(float(confidence) * 4))
+    value_node = field_pair.get("value_node") or {}
+    stable_attrs = value_node.get("stable_attrs") or {}
+    if stable_attrs.get("id") or stable_attrs.get("testid") or stable_attrs.get("name"):
+        score += 5
+    return score
+
+
+def _resolve_field_pair(snapshot: Dict[str, Any], intent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    pairs = list(snapshot.get("field_pairs") or [])
+    if not pairs:
+        return None
+    scored = [{"field_pair": pair, "score": _field_pair_score(pair, intent)} for pair in pairs]
+    scored.sort(
+        key=lambda item: (
+            -item["score"],
+            int(((item["field_pair"].get("value_node") or {}).get("bbox") or {}).get("y", 0) or 0),
+            int(((item["field_pair"].get("value_node") or {}).get("bbox") or {}).get("x", 0) or 0),
+        )
+    )
+    best = scored[0]
+    if best["score"] <= 0:
+        return None
+    return best["field_pair"]
 
 
 def _node_sort_key(node: Dict[str, Any]) -> tuple[int, int]:
@@ -541,8 +737,17 @@ def _selector_semantic_tokens(selector: Optional[str]) -> set[str]:
     return tokens
 
 
+def _coerce_target_hint(raw: Any) -> Dict[str, Any]:
+    """Normalize target_hint to a dict. Handles string shorthand from LLM responses."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw:
+        return {"text": raw}
+    return {}
+
+
 def _intent_semantic_tokens(intent: Dict[str, Any]) -> set[str]:
-    target_hint = intent.get("target_hint", {}) or {}
+    target_hint = _coerce_target_hint(intent.get("target_hint"))
     parts = [
         target_hint.get("name"),
         target_hint.get("text"),
@@ -665,7 +870,7 @@ def _node_search_text(node: Dict[str, Any]) -> str:
 
 
 def _expected_target_hints(intent: Dict[str, Any]) -> Dict[str, str]:
-    target_hint = intent.get("target_hint", {}) or {}
+    target_hint = _coerce_target_hint(intent.get("target_hint"))
     return {
         "role": _normalize_hint(target_hint.get("role")),
         "name": _normalize_hint(target_hint.get("name")),
@@ -844,7 +1049,7 @@ def _resolve_actionable_node(snapshot: Dict[str, Any], intent: Dict[str, Any], a
 
 
 def _content_node_score(node: Dict[str, Any], intent: Dict[str, Any]) -> int:
-    target_hint = intent.get("target_hint", {}) or {}
+    target_hint = _coerce_target_hint(intent.get("target_hint"))
     expected_name = _normalize_hint(target_hint.get("name") or target_hint.get("text") or target_hint.get("value"))
     expected_tokens = _tokenize_text(expected_name)
     haystack = " ".join(
@@ -870,7 +1075,7 @@ def _content_node_score(node: Dict[str, Any], intent: Dict[str, Any]) -> int:
 def _collection_score(collection: Dict[str, Any], intent: Dict[str, Any]) -> int:
     score = 0
     collection_hint = intent.get("collection_hint", {}) or {}
-    target_hint = intent.get("target_hint", {}) or {}
+    target_hint = _coerce_target_hint(intent.get("target_hint"))
     requested_kind = _normalize_hint(collection_hint.get("kind"))
     collection_kind = _normalize_hint(collection.get("kind"))
     requested_role = _normalize_hint(target_hint.get("role"))
@@ -936,6 +1141,22 @@ def resolve_structured_intent(snapshot: Dict[str, Any], intent: Dict[str, Any]) 
             pass
 
     if action == "extract_text":
+        field_pair = _resolve_field_pair(snapshot, intent)
+        if field_pair:
+            locator, locator_candidates, selected_locator_kind = _field_pair_locator_bundle(field_pair)
+            return {
+                **intent,
+                "resolved": {
+                    "frame_path": list(field_pair.get("frame_path") or []),
+                    "locator": locator,
+                    "locator_candidates": locator_candidates,
+                    "collection_hint": {},
+                    "item_hint": {},
+                    "ordinal": None,
+                    "selected_locator_kind": selected_locator_kind,
+                    "field_pair": field_pair,
+                },
+            }
         content_node = _resolve_content_node(snapshot, intent)
         if content_node:
             locator = content_node.get("locator") or {"method": "text", "value": content_node.get("text", "")}
@@ -1084,6 +1305,10 @@ def _build_collection_item_payload(collection_hint: Dict[str, Any], item_hint: D
 
 def _summarize_resolved_element(resolved: Dict[str, Any], output: Any = None) -> Dict[str, Any]:
     node = (
+        (resolved.get("field_pair") or {}).get("value_node")
+        or (resolved.get("field_pair") or {}).get("label_node")
+        or {}
+    ) or (
         resolved.get("content_node")
         or resolved.get("resolved_target")
         or resolved.get("actionable_node")
@@ -1106,10 +1331,95 @@ def _summarize_resolved_element(resolved: Dict[str, Any], output: Any = None) ->
     if frame_path:
         summary["frame_path"] = frame_path
 
+    field_pair = resolved.get("field_pair")
+    if isinstance(field_pair, dict):
+        summary["field_pair"] = {
+            "field_pair_id": field_pair.get("field_pair_id"),
+            "label_text": field_pair.get("label_text"),
+            "value_text": field_pair.get("value_text"),
+            "relation": field_pair.get("relation") or {},
+            "container": field_pair.get("container") or {},
+        }
+
     if output not in (None, "", "ok", "None"):
         summary["output"] = output
 
     return summary
+
+
+def _build_extracted_fields(intent: Dict[str, Any], resolved: Dict[str, Any], output: Any) -> List[Dict[str, Any]]:
+    field_pair = resolved.get("field_pair")
+    if isinstance(field_pair, dict):
+        value_node = field_pair.get("value_node") or {}
+        label_text = str(field_pair.get("label_text") or "").strip()
+        value_text = str(output or field_pair.get("value_text") or "").strip()
+        relation = field_pair.get("relation") or {}
+        field_name = _coerce_target_hint(intent.get("target_hint")).get("name") or label_text or intent.get("result_key") or "value"
+        normalized_name = parse_extracted_fields(
+            value_text,
+            locator=value_node.get("locator") if isinstance(value_node.get("locator"), dict) else {},
+            frame_path=resolved.get("frame_path") or [],
+            result_key=str(intent.get("result_key") or ""),
+            hint_label=label_text,
+        )
+        if normalized_name:
+            field = dict(normalized_name[0])
+        else:
+            field = {
+                "name": str(field_name),
+                "label": label_text or str(field_name),
+                "content": value_text,
+                "locator": value_node.get("locator") if isinstance(value_node.get("locator"), dict) else {},
+                "frame_path": list(resolved.get("frame_path") or []),
+                "source_result_key": str(intent.get("result_key") or ""),
+            }
+        field["locator"] = value_node.get("locator") if isinstance(value_node.get("locator"), dict) else field.get("locator", {})
+        field["frame_path"] = list(resolved.get("frame_path") or [])
+        field["relation"] = relation
+        field["container"] = field_pair.get("container") or {}
+        locator_candidates = list(value_node.get("locator_candidates") or [])
+        if locator_candidates:
+            normalized_candidates = []
+            for candidate in locator_candidates[:4]:
+                payload = candidate.get("locator")
+                if not isinstance(payload, dict) or not payload:
+                    continue
+                normalized_candidates.append(
+                    {
+                        "kind": "playwright_locator",
+                        "selected": bool(candidate.get("selected")),
+                        "expression": _playwright_expression_for_locator(payload) + ".text_content()",
+                        "description": _candidate_description(payload),
+                        "locator_payload": payload,
+                    }
+                )
+            if normalized_candidates:
+                best_index = max(
+                    range(len(normalized_candidates)),
+                    key=lambda index: (
+                        _locator_payload_priority(_extract_candidate_locator_payload(normalized_candidates[index])),
+                        1 if normalized_candidates[index].get("selected") else 0,
+                    ),
+                )
+                for index, candidate in enumerate(normalized_candidates):
+                    candidate["selected"] = index == best_index
+                best_payload = _extract_candidate_locator_payload(normalized_candidates[best_index])
+                if best_payload:
+                    field["locator"] = best_payload
+                field["extract_candidates"] = normalized_candidates
+        return [field]
+
+    locator = resolved.get("locator") if isinstance(resolved.get("locator"), dict) else {}
+    frame_path = resolved.get("frame_path") or []
+    target_hint = _coerce_target_hint(intent.get("target_hint"))
+    hint_label = str(target_hint.get("text") or target_hint.get("name") or "").strip()
+    return parse_extracted_fields(
+        output,
+        locator=locator,
+        frame_path=frame_path,
+        result_key=str(intent.get("result_key") or ""),
+        hint_label=hint_label,
+    )
 
 
 async def execute_structured_intent(page, intent: Dict[str, Any]) -> Dict[str, Any]:
@@ -1155,6 +1465,9 @@ async def execute_structured_intent(page, intent: Dict[str, Any]) -> Dict[str, A
     elif action == "extract_text":
         output = await locator.inner_text()
         output_meta = _summarize_resolved_element(resolved, output)
+        extracted_fields = _build_extracted_fields(intent, resolved, output)
+        if extracted_fields:
+            output_meta["extracted_fields"] = extracted_fields
     elif action == "fill":
         fill_target = resolved.get("actionable_node") or resolved.get("resolved_target") or {}
         if isinstance(intent.get("value"), dict):
@@ -1202,6 +1515,7 @@ async def execute_structured_intent(page, intent: Dict[str, Any]) -> Dict[str, A
         },
         "element_snapshot": output_meta,
         "result_key": intent.get("result_key"),
+        "extracted_fields": output_meta.get("extracted_fields", []),
         "description": intent.get("description", action),
         "prompt": intent.get("prompt"),
         "value": intent.get("value"),

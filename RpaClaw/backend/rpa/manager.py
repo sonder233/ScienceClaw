@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from playwright.async_api import Page, BrowserContext
 
 from .cdp_connector import get_cdp_connector
+from .extracted_fields import infer_fill_mappings
 from .frame_selectors import build_frame_path
 from .playwright_security import get_context_kwargs
 
@@ -43,6 +44,8 @@ class RPAStep(BaseModel):
     source_tab_id: Optional[str] = None
     target_tab_id: Optional[str] = None
     result_key: Optional[str] = None
+    extracted_fields: List[Dict[str, Any]] = Field(default_factory=list)
+    fill_mappings: List[Dict[str, Any]] = Field(default_factory=list)
     collection_hint: Dict[str, Any] = Field(default_factory=dict)
     item_hint: Dict[str, Any] = Field(default_factory=dict)
     ordinal: Optional[str] = None
@@ -939,6 +942,30 @@ class RPASessionManager:
         await self._broadcast_step(session_id, step)
         return step
 
+    async def select_field_extract_candidate(
+        self, session_id: str, step_index: int, field_index: int, candidate_index: int
+    ) -> "RPAStep":
+        session = self.sessions.get(session_id)
+        if not session or step_index < 0 or step_index >= len(session.steps):
+            raise ValueError("Invalid step index")
+        step = session.steps[step_index]
+        fields = list(step.extracted_fields or [])
+        if field_index < 0 or field_index >= len(fields):
+            raise ValueError("Invalid field index")
+        field = dict(fields[field_index])
+        candidates = list(field.get("extract_candidates") or [])
+        if candidate_index < 0 or candidate_index >= len(candidates):
+            raise ValueError("Invalid candidate index")
+        for i, c in enumerate(candidates):
+            c = dict(c)
+            c["selected"] = i == candidate_index
+            candidates[i] = c
+        field["extract_candidates"] = candidates
+        fields[field_index] = field
+        step.extracted_fields = fields
+        await self._broadcast_step(session_id, step)
+        return step
+
     def pause_recording(self, session_id: str):
         """Pause event recording (used during AI execution)."""
         if session_id in self.sessions:
@@ -1057,6 +1084,8 @@ class RPASessionManager:
             "signals": evt.get("signals", {}) or {},
             "element_snapshot": evt.get("element_snapshot", {}) or {},
             "value": "{{credential}}" if is_sensitive else evt.get("value", ""),
+            "extracted_fields": evt.get("extracted_fields", []) or [],
+            "fill_mappings": evt.get("fill_mappings", []) or [],
             "label": "",
             "tag": evt.get("tag", ""),
             "url": evt.get("url", ""),
@@ -1127,6 +1156,8 @@ class RPASessionManager:
             raise ValueError(f"Session {session_id} not found")
 
         session = self.sessions[session_id]
+        if step_data.get("action") in {"fill", "select"} and not step_data.get("fill_mappings"):
+            step_data["fill_mappings"] = infer_fill_mappings(session.steps, step_data.get("value", ""))
         step = RPAStep(id=str(uuid.uuid4()), **step_data)
         insert_at = len(session.steps)
         for index, existing_step in enumerate(session.steps):
@@ -1205,6 +1236,8 @@ class RPASessionManager:
         existing_step.validation = incoming_step.validation
         existing_step.signals = incoming_step.signals
         existing_step.element_snapshot = incoming_step.element_snapshot
+        existing_step.extracted_fields = incoming_step.extracted_fields
+        existing_step.fill_mappings = incoming_step.fill_mappings
         existing_step.sequence = incoming_step.sequence
         existing_step.event_timestamp_ms = incoming_step.event_timestamp_ms
         existing_step.timestamp = incoming_step.timestamp
@@ -1233,4 +1266,3 @@ class RPASessionManager:
 
 # ── Global instance ──────────────────────────────────────────────────
 rpa_manager = RPASessionManager()
-

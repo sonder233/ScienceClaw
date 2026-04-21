@@ -5,11 +5,14 @@ SNAPSHOT_V2_JS = r"""() => {
     const ACTIONABLE = 'a,button,input,textarea,select,[role=button],[role=link],[role=menuitem],[role=menuitemradio],[role=tab],[role=checkbox],[role=radio],[role=combobox],[role=listbox],[role=option],[contenteditable=true]';
     const CONTENT = 'h1,h2,h3,h4,h5,h6,th,td,dt,dd,li,p,label,[role=heading],[role=cell],[role=rowheader],[role=columnheader]';
     const recorder = globalThis.__rpaPlaywrightRecorder || null;
-    const result = { actionable_nodes: [], content_nodes: [], containers: [] };
+    const result = { actionable_nodes: [], content_nodes: [], containers: [], page_blocks: [], field_pairs: [] };
     const containerMap = new Map();
+    const blockMap = new Map();
     let actionableIndex = 1;
     let contentIndex = 1;
     let containerIndex = 1;
+    let blockIndex = 1;
+    let fieldPairIndex = 1;
 
     function normalizeText(value, limit) {
         return String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit || 160);
@@ -50,6 +53,72 @@ SNAPSHOT_V2_JS = r"""() => {
             width: Math.round(rect.width),
             height: Math.round(rect.height),
         };
+    }
+
+    function isGuidLike(value) {
+        const text = String(value || '').trim();
+        if (!text || text.length < 8)
+            return false;
+        let transitions = 0;
+        for (let i = 1; i < text.length; i++) {
+            const prev = text[i - 1];
+            const curr = text[i];
+            const prevType = /[a-z]/i.test(prev) ? 'a' : /\d/.test(prev) ? 'n' : 'x';
+            const currType = /[a-z]/i.test(curr) ? 'a' : /\d/.test(curr) ? 'n' : 'x';
+            if (prevType !== currType)
+                transitions += 1;
+        }
+        return transitions >= Math.floor(text.length / 4);
+    }
+
+    function stableAttrValue(value, limit) {
+        const text = normalizeText(value || '', limit || 120);
+        if (!text || isGuidLike(text))
+            return '';
+        return text;
+    }
+
+    function classTokens(el, limit) {
+        return Array.from(el.classList || [])
+            .map(token => stableAttrValue(token, 40))
+            .filter(Boolean)
+            .slice(0, limit || 4);
+    }
+
+    function stableAttrs(el) {
+        if (!el)
+            return {};
+        const attrs = {};
+        const id = stableAttrValue(el.getAttribute('id') || '', 80);
+        const name = stableAttrValue(el.getAttribute('name') || '', 80);
+        const testId = stableAttrValue(
+            el.getAttribute('data-testid')
+            || el.getAttribute('data-test-id')
+            || el.getAttribute('data-qa')
+            || '',
+            80
+        );
+        const labelledBy = stableAttrValue(el.getAttribute('aria-labelledby') || '', 120);
+        const describedBy = stableAttrValue(el.getAttribute('aria-describedby') || '', 120);
+        if (id)
+            attrs.id = id;
+        if (name)
+            attrs.name = name;
+        if (testId)
+            attrs.testid = testId;
+        if (labelledBy)
+            attrs.aria_labelledby = labelledBy;
+        if (describedBy)
+            attrs.aria_describedby = describedBy;
+        return attrs;
+    }
+
+    function cssEsc(value) {
+        try {
+            return CSS.escape(String(value || ''));
+        } catch (e) {
+            return String(value || '').replace(/([\\"'\[\](){}|^$.*+?])/g, '\\$1');
+        }
     }
 
     function fallbackRole(el) {
@@ -151,6 +220,56 @@ SNAPSHOT_V2_JS = r"""() => {
         return container.container_id;
     }
 
+    function detectBlockKind(el) {
+        if (!el)
+            return '';
+        const tag = el.tagName.toLowerCase();
+        const classes = classTokens(el, 6).join(' ');
+        if (tag === 'table' || tag === 'tbody')
+            return 'table_section';
+        if (tag === 'form')
+            return 'form_section';
+        if (tag === 'article')
+            return 'card';
+        if (tag === 'tr')
+            return 'table_row';
+        if (tag === 'li')
+            return 'list_item';
+        if (tag === 'dl')
+            return 'description_list';
+        if (/(detail|field|meta|info|summary|row|item)/.test(classes))
+            return 'detail_section';
+        if (tag === 'div' || tag === 'section')
+            return 'content_group';
+        return '';
+    }
+
+    function ensureBlock(el) {
+        if (!el)
+            return '';
+        if (blockMap.has(el))
+            return blockMap.get(el).block_id;
+        const rect = el.getBoundingClientRect();
+        const block = {
+            block_id: 'block-' + blockIndex++,
+            frame_path: [],
+            block_kind: detectBlockKind(el) || 'content_group',
+            tag: el.tagName.toLowerCase(),
+            stable_attrs: stableAttrs(el),
+            class_tokens: classTokens(el, 6),
+            bbox: bbox(rect),
+            text_summary: normalizeText(el.innerText || el.textContent || '', 240),
+            child_block_ids: [],
+        };
+        blockMap.set(el, block);
+        const parent = el.parentElement;
+        if (parent && blockMap.has(parent)) {
+            blockMap.get(parent).child_block_ids.push(block.block_id);
+        }
+        result.page_blocks.push(block);
+        return block.block_id;
+    }
+
     function buildFallbackLocator(el, role, name, text, placeholder, title) {
         if (role && name) {
             return {
@@ -200,6 +319,112 @@ SNAPSHOT_V2_JS = r"""() => {
         return buildFallbackLocator(el, role, name, text, placeholder, title);
     }
 
+    function appendCandidate(candidates, kind, locator, reason) {
+        if (!locator)
+            return;
+        const key = JSON.stringify(locator);
+        if (candidates.some(item => JSON.stringify(item.locator) === key))
+            return;
+        candidates.push({
+            kind,
+            selected: false,
+            locator,
+            strict_match_count: 1,
+            visible_match_count: 1,
+            reason,
+        });
+    }
+
+    function buildFieldValueLocatorBundle(containerEl, labelEl, valueEl, labelText, valueText) {
+        const candidates = [];
+        const attrs = stableAttrs(valueEl);
+        const containerAttrs = stableAttrs(containerEl);
+        const valueClasses = classTokens(valueEl, 3);
+        const containerClasses = classTokens(containerEl, 3);
+
+        if (attrs.testid) {
+            appendCandidate(candidates, 'testid', { method: 'testid', value: attrs.testid }, 'stable data-testid on value node');
+        }
+        if (attrs.id) {
+            appendCandidate(candidates, 'css', { method: 'css', value: `#${cssEsc(attrs.id)}` }, 'stable id on value node');
+        }
+        if (attrs.name) {
+            appendCandidate(
+                candidates,
+                'css',
+                { method: 'css', value: `${valueEl.tagName.toLowerCase()}[name="${cssEsc(attrs.name)}"]` },
+                'stable name on value node',
+            );
+        }
+        if (containerAttrs.id && valueClasses.length) {
+            appendCandidate(
+                candidates,
+                'css',
+                { method: 'css', value: `#${cssEsc(containerAttrs.id)} .${valueClasses.map(cssEsc).join('.')}` },
+                'stable container id with value class',
+            );
+        }
+        if (containerAttrs.testid && valueClasses.length) {
+            appendCandidate(
+                candidates,
+                'css',
+                { method: 'css', value: `[data-testid="${cssEsc(containerAttrs.testid)}"] .${valueClasses.map(cssEsc).join('.')}` },
+                'stable container testid with value class',
+            );
+        }
+        if (containerClasses.length && valueClasses.length) {
+            appendCandidate(
+                candidates,
+                'css',
+                { method: 'css', value: `.${containerClasses.map(cssEsc).join('.')} .${valueClasses.map(cssEsc).join('.')}` },
+                'container class with value class',
+            );
+        }
+        if (!candidates.length) {
+            const fallbackBundle = buildLocatorBundle(valueEl, getRole(valueEl), '', valueText, '', '');
+            if (fallbackBundle && fallbackBundle.primary) {
+                const fallbackCandidates = Array.isArray(fallbackBundle.candidates) ? fallbackBundle.candidates : [];
+                for (const candidate of fallbackCandidates) {
+                    appendCandidate(
+                        candidates,
+                        candidate.kind || (candidate.locator || {}).method || 'locator',
+                        candidate.locator,
+                        candidate.reason || 'fallback value locator',
+                    );
+                }
+            }
+        }
+        if (!candidates.length && labelText) {
+            appendCandidate(
+                candidates,
+                'css',
+                { method: 'css', value: `${labelEl.tagName.toLowerCase()} + ${valueEl.tagName.toLowerCase()}` },
+                'adjacent sibling fallback',
+            );
+        }
+        if (!candidates.length) {
+            appendCandidate(
+                candidates,
+                'text',
+                { method: 'text', value: valueText },
+                'text fallback for value node',
+            );
+        }
+        if (candidates.length) {
+            candidates[0].selected = true;
+        }
+        return {
+            primary: candidates[0] ? candidates[0].locator : { method: 'text', value: valueText },
+            candidates,
+            validation: {
+                status: candidates[0] ? 'ok' : 'fallback',
+                details: candidates[0] ? candidates[0].reason : 'value node fallback',
+                selected_candidate_index: 0,
+                selected_candidate_kind: candidates[0] ? candidates[0].kind : 'text',
+            },
+        };
+    }
+
     function actionKinds(el, role) {
         const tag = el.tagName.toLowerCase();
         const type = (el.getAttribute('type') || '').toLowerCase();
@@ -240,6 +465,157 @@ SNAPSHOT_V2_JS = r"""() => {
         return 'text';
     }
 
+    function contentLikeText(el) {
+        if (!el)
+            return '';
+        const clone = el.cloneNode(true);
+        for (const child of Array.from(clone.querySelectorAll(ACTIONABLE))) {
+            child.remove();
+        }
+        return normalizeText(clone.innerText || clone.textContent || '', 200);
+    }
+
+    function isControl(el) {
+        if (!el)
+            return false;
+        return el.matches('input,select,textarea,button,[role=button],[role=link],[role=checkbox],[role=radio],[role=combobox],[contenteditable=true]');
+    }
+
+    function labelLikeScore(el, text) {
+        if (!el || !text)
+            return 0;
+        let score = 0;
+        const tag = el.tagName.toLowerCase();
+        if (tag === 'label' || tag === 'dt' || tag === 'th')
+            score += 6;
+        if (/(：|:)$/.test(text))
+            score += 3;
+        if (text.length <= 40)
+            score += 2;
+        if (!/\d{2,}/.test(text))
+            score += 1;
+        if (/(预算|金额|单位|时间|日期|状态|名称|编号|采购|联系人|电话|地址|备注)/.test(text))
+            score += 5;
+        return score;
+    }
+
+    function valueLikeScore(el, text) {
+        if (!el || !text)
+            return 0;
+        let score = 0;
+        const tag = el.tagName.toLowerCase();
+        if (tag === 'dd' || tag === 'td')
+            score += 6;
+        if (text.length <= 120)
+            score += 2;
+        if (/\d/.test(text))
+            score += 2;
+        if (!/(：|:)$/.test(text))
+            score += 1;
+        return score;
+    }
+
+    function buildNodeDescriptor(el, role, text, locatorBundle) {
+        return {
+            tag: el.tagName.toLowerCase(),
+            text: normalizeText(text || '', 200),
+            role: role || getRole(el),
+            stable_attrs: stableAttrs(el),
+            class_tokens: classTokens(el, 4),
+            locator: locatorBundle.primary,
+            locator_candidates: locatorBundle.candidates || [],
+            bbox: bbox(el.getBoundingClientRect()),
+        };
+    }
+
+    function pushFieldPair(containerEl, labelEl, valueEl, relationKind) {
+        if (!containerEl || !labelEl || !valueEl)
+            return;
+        if (labelEl === valueEl)
+            return;
+        const labelText = contentLikeText(labelEl);
+        const valueText = contentLikeText(valueEl);
+        if (!labelText || !valueText)
+            return;
+        if (labelText === valueText)
+            return;
+        const labelScore = labelLikeScore(labelEl, labelText);
+        const valueScore = valueLikeScore(valueEl, valueText);
+        if (labelScore < 2 || valueScore < 2)
+            return;
+        const labelRole = getRole(labelEl);
+        const valueRole = getRole(valueEl);
+        const labelBundle = buildLocatorBundle(labelEl, labelRole, '', labelText, '', '');
+        const valueBundle = buildFieldValueLocatorBundle(containerEl, labelEl, valueEl, labelText, valueText);
+        const containerRect = containerEl.getBoundingClientRect();
+        const blockId = ensureBlock(containerEl);
+        const pairKey = [
+            blockId,
+            labelText,
+            valueText,
+            Math.round(containerRect.x || containerRect.left || 0),
+            Math.round(containerRect.y || containerRect.top || 0),
+        ].join('|');
+        if (result.field_pairs.some(item => item.pair_key === pairKey))
+            return;
+        result.field_pairs.push({
+            pair_key: pairKey,
+            field_pair_id: 'field-pair-' + fieldPairIndex++,
+            frame_path: [],
+            block_id: blockId,
+            container: {
+                tag: containerEl.tagName.toLowerCase(),
+                stable_attrs: stableAttrs(containerEl),
+                class_tokens: classTokens(containerEl, 6),
+                bbox: bbox(containerRect),
+            },
+            label_text: labelText,
+            value_text: valueText,
+            relation: {
+                kind: relationKind,
+                direction: 'label_to_value',
+                confidence: Math.min(0.99, 0.55 + labelScore * 0.04 + valueScore * 0.04),
+            },
+            label_node: buildNodeDescriptor(labelEl, labelRole, labelText, labelBundle),
+            value_node: buildNodeDescriptor(valueEl, valueRole, valueText, valueBundle),
+        });
+    }
+
+    function detectSiblingFieldPairs() {
+        const candidates = Array.from(document.querySelectorAll('div,section,article,li,tr,dl'));
+        for (const containerEl of candidates.slice(0, 400)) {
+            const rect = containerEl.getBoundingClientRect();
+            if (!isVisible(containerEl, rect))
+                continue;
+            const children = Array.from(containerEl.children || []).filter(child => {
+                const childRect = child.getBoundingClientRect();
+                return isVisible(child, childRect) && !isControl(child);
+            });
+            if (children.length < 2 || children.length > 6)
+                continue;
+
+            if (containerEl.tagName.toLowerCase() === 'tr') {
+                if (children.length >= 2)
+                    pushFieldPair(containerEl, children[0], children[1], 'same_row_cells');
+                continue;
+            }
+
+            if (containerEl.tagName.toLowerCase() === 'dl') {
+                const terms = Array.from(containerEl.querySelectorAll(':scope > dt'));
+                for (const term of terms) {
+                    const next = term.nextElementSibling;
+                    if (next && next.tagName.toLowerCase() === 'dd')
+                        pushFieldPair(containerEl, term, next, 'description_list_pair');
+                }
+                continue;
+            }
+
+            for (let index = 0; index < children.length - 1; index++) {
+                pushFieldPair(containerEl, children[index], children[index + 1], 'siblings_same_container');
+            }
+        }
+    }
+
     const actionableSeen = new Set();
     for (const el of Array.from(document.querySelectorAll(ACTIONABLE))) {
         const rect = el.getBoundingClientRect();
@@ -257,6 +633,7 @@ SNAPSHOT_V2_JS = r"""() => {
             continue;
         actionableSeen.add(key);
         const containerId = ensureContainer(el);
+        ensureBlock(el.closest('article,section,form,table,tbody,tr,ul,ol,li,dl,div') || el);
         const locatorBundle = buildLocatorBundle(el, role, name, text, placeholder, title);
         const node = {
             node_id: 'actionable-' + actionableIndex++,
@@ -278,6 +655,8 @@ SNAPSHOT_V2_JS = r"""() => {
             locator: locatorBundle.primary,
             locator_candidates: locatorBundle.candidates || [],
             validation: locatorBundle.validation || { status: 'fallback', details: 'locator bundle unavailable' },
+            stable_attrs: stableAttrs(el),
+            class_tokens: classTokens(el, 4),
             element_snapshot: {
                 tag: el.tagName.toLowerCase(),
                 text,
@@ -309,15 +688,21 @@ SNAPSHOT_V2_JS = r"""() => {
         contentSeen.add(key);
         const role = getRole(el);
         const containerId = ensureContainer(el);
+        const blockId = ensureBlock(el.closest('article,section,form,table,tbody,tr,ul,ol,li,dl,div') || el);
+        const locatorBundle = buildLocatorBundle(el, role, '', text, '', '');
         const node = {
             node_id: 'content-' + contentIndex++,
             frame_path: [],
             container_id: containerId,
+            block_id: blockId,
             semantic_kind: semanticKind(el, role),
             role,
             text,
             bbox: bbox(rect),
-            locator: buildFallbackLocator(el, role, '', text, '', '').primary,
+            stable_attrs: stableAttrs(el),
+            class_tokens: classTokens(el, 4),
+            locator: locatorBundle.primary,
+            locator_candidates: locatorBundle.candidates || [],
             element_snapshot: {
                 tag: el.tagName.toLowerCase(),
                 text,
@@ -332,6 +717,8 @@ SNAPSHOT_V2_JS = r"""() => {
         if (result.content_nodes.length >= 160)
             break;
     }
+
+    detectSiblingFieldPairs();
 
     return JSON.stringify(result);
 }"""

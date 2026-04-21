@@ -36,6 +36,7 @@ const route = useRoute();
 const sessionId = computed(() => route.query.sessionId as string);
 const skillName = computed(() => (route.query.skillName as string) || '录制技能');
 const skillDescription = computed(() => (route.query.skillDescription as string) || '');
+const extractionImplementation = computed(() => (route.query.extractionImplementation as string) || 'auto');
 const params = computed(() => {
   try {
     return JSON.parse((route.query.params as string) || '{}');
@@ -359,7 +360,7 @@ const runTest = async () => {
     connectScreencast(sessionId.value);
     const testPromise = apiClient.post(
       `/rpa/session/${sessionId.value}/test`,
-      { params: params.value },
+      { params: params.value, extraction_implementation: extractionImplementation.value },
       { timeout: TEST_REQUEST_TIMEOUT_MS },
     );
 
@@ -422,7 +423,7 @@ watch(failedStepIndex, (index) => {
 });
 
 const goBackToConfigure = () => {
-  router.push(`/rpa/configure?sessionId=${sessionId.value}`);
+  router.push(`/rpa/configure?sessionId=${sessionId.value}&extractionImplementation=${extractionImplementation.value}`);
 };
 
 const goBackToRecorder = () => {
@@ -447,6 +448,7 @@ const saveSkill = async () => {
       skill_name: skillName.value,
       description: skillDescription.value,
       params: params.value,
+      extraction_implementation: extractionImplementation.value,
     });
 
     if (resp.data.status === 'success') {

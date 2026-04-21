@@ -95,23 +95,25 @@ Rules:
 2. Prefer role, label, placeholder, and structural hints over concrete titles or dynamic href values.
 3. For opening a website or navigating to a known URL, prefer `"action": "navigate"` with the URL in `value`. Do not model browser chrome such as the address bar as a page textbox.
 4. The backend resolves frame context automatically, so do not invent iframe selectors unless the user explicitly names a frame.
-5. If the prompt includes "DOM Context For Data Extraction" and the user is asking to summarize, read, list, or extract current page information, answer directly in natural language when no extra browser interaction is needed.
+5. In recording mode, if the user asks to get, read, list, capture, or extract page data that may be reused later, prefer structured `extract_text` actions instead of a natural-language answer so the data becomes replayable steps.
 6. Only output Python code for genuinely complex custom logic that cannot be expressed as one atomic structured action.
 7. If you output Python, define async def run(page): and use Playwright async API.
 8. For extract_text actions, include result_key as a short ASCII snake_case key such as latest_issue_title. Do not use Chinese, spaces, or hyphens.
+9. When the user asks for multiple fields such as "采购人、预算、部门", return a JSON array with one `extract_text` action per field.
 """
 
 DATA_EXTRACTION_SYSTEM_PROMPT = """You are an RPA page-reading assistant.
 
-Your job is to answer the user's question from the current page DOM context.
+Your job is to extract data from the current page DOM context for RPA recording.
 
 Rules:
 1. If the prompt includes "DOM Context For Data Extraction", use that DOM context as the primary source of truth.
-2. Summarize the current page directly in natural language when the user asks to get, read, summarize, list, or extract current page information.
-3. Do not output JSON actions unless the user explicitly asks you to interact with the page or the answer cannot be produced from the provided DOM context.
-4. Do not invent missing fields. If a value is not present in the DOM context, say it is not visible.
-5. Prefer a structured, human-readable answer with key fields and short explanations when useful.
-6. FALLBACK_RAW_HTML is only supplementary context. Prefer the structured DOM view over fallback raw HTML.
+2. When the user asks to get, read, capture, or extract one or more page fields, return structured JSON actions using `extract_text` so the extraction is saved as replayable recording steps.
+3. If multiple fields are requested, return a JSON array with one `extract_text` action per field.
+4. Each extract action should have a concise `description`, a short ASCII `result_key`, and a semantic `target_hint` that points at the corresponding field label or value.
+5. Do not invent missing fields. If a value is not present in the DOM context, omit that field from the JSON actions and mention it briefly only if the user explicitly asked for a summary.
+6. Only answer directly in natural language when the user is clearly asking for explanation/summary only and not for a reusable recording step.
+7. FALLBACK_RAW_HTML is only supplementary context. Prefer the structured DOM view over fallback raw HTML.
 """
 
 async def _get_page_elements(page: Page) -> str:
@@ -406,6 +408,20 @@ def _snapshot_frame_lines(snapshot: Dict[str, Any]) -> List[str]:
             f"{container.get('name', '')} "
             f"(actionable={len(container.get('child_actionable_ids') or [])}, "
             f"content={len(container.get('child_content_ids') or [])})"
+        )
+    for block in snapshot.get("page_blocks", [])[:20]:
+        lines.append(
+            "Block: "
+            f"{block.get('block_kind', 'content_group')} "
+            f"{block.get('tag', '')} "
+            f"{block.get('text_summary', '')[:80]}"
+        )
+    for pair in snapshot.get("field_pairs", [])[:20]:
+        relation = pair.get("relation") or {}
+        lines.append(
+            "FieldPair: "
+            f'{pair.get("label_text", "")} -> {pair.get("value_text", "")} '
+            f'({relation.get("kind", "")}, confidence={relation.get("confidence", "")})'
         )
     for frame in snapshot.get("frames", []):
         lines.append(f"Frame: {frame.get('frame_hint', 'main document')}")
@@ -1028,6 +1044,22 @@ class RPAAssistant:
         return intents[0] if intents else None
 
     @staticmethod
+    def _normalize_extract_hint_intent(item: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert {description, result_key, target_hint} to a proper extract_text intent."""
+        target_hint = item.get("target_hint", "")
+        if isinstance(target_hint, str) and target_hint:
+            # String like "采购人 张敏" → search by text content
+            target_hint = {"text": target_hint}
+        elif not isinstance(target_hint, dict):
+            target_hint = {}
+        return {
+            "action": "extract_text",
+            "description": item.get("description", ""),
+            "result_key": item.get("result_key", ""),
+            "target_hint": target_hint,
+        }
+
+    @staticmethod
     def _extract_structured_intents(text: str) -> List[Dict[str, Any]]:
         intents: List[Dict[str, Any]] = []
         stripped = text.strip()
@@ -1035,10 +1067,26 @@ class RPAAssistant:
             parsed = json.loads(stripped)
         except Exception:
             parsed = None
-        if isinstance(parsed, dict) and parsed.get("action"):
-            return [parsed]
+
+        def _is_extract_hint(item: Any) -> bool:
+            return (
+                isinstance(item, dict)
+                and not item.get("action")
+                and (item.get("result_key") or item.get("target_hint"))
+            )
+
+        if isinstance(parsed, dict):
+            if parsed.get("action"):
+                return [parsed]
+            if _is_extract_hint(parsed):
+                return [RPAAssistant._normalize_extract_hint_intent(parsed)]
         if isinstance(parsed, list):
-            return [item for item in parsed if isinstance(item, dict) and item.get("action")]
+            with_action = [item for item in parsed if isinstance(item, dict) and item.get("action")]
+            if with_action:
+                return with_action
+            extract_hints = [item for item in parsed if _is_extract_hint(item)]
+            if extract_hints:
+                return [RPAAssistant._normalize_extract_hint_intent(item) for item in extract_hints]
 
         match = re.search(r"```json\s*\n(.*?)```", text, re.DOTALL)
         if match:
@@ -1049,9 +1097,12 @@ class RPAAssistant:
             if isinstance(parsed, dict) and parsed.get("action"):
                 return [parsed]
             if isinstance(parsed, list):
-                intents.extend(item for item in parsed if isinstance(item, dict) and item.get("action"))
-                if intents:
-                    return intents
+                with_action = [item for item in parsed if isinstance(item, dict) and item.get("action")]
+                if with_action:
+                    return with_action
+                extract_hints = [item for item in parsed if _is_extract_hint(item)]
+                if extract_hints:
+                    return [RPAAssistant._normalize_extract_hint_intent(item) for item in extract_hints]
 
         for block in _extract_json_object_blocks(text):
             try:

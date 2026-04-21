@@ -121,8 +121,16 @@ class StepExecutionError(Exception):
         super().__init__(f"STEP_FAILED:{step_index}:{original_error}")
 '''
 
-    def generate_script(self, steps: List[Dict[str, Any]], params: Dict[str, Any] = None, is_local: bool = False, test_mode: bool = False) -> str:
+    def generate_script(
+        self,
+        steps: List[Dict[str, Any]],
+        params: Dict[str, Any] = None,
+        is_local: bool = False,
+        test_mode: bool = False,
+        extraction_implementation: str = "auto",
+    ) -> str:
         params = params or {}
+        extraction_implementation = self._normalize_extraction_implementation(extraction_implementation)
         deduped = self._deduplicate_steps(steps)
         deduped = self._infer_missing_tab_transitions(deduped)
         deduped = self._normalize_step_signals(deduped)
@@ -131,6 +139,19 @@ class StepExecutionError(Exception):
         used_result_keys: Dict[str, int] = {}
 
         lines = [
+            "",
+            "def _lookup_extracted_value(results, result_key, field_name, default_value=''):",
+            "    result = results.get(result_key) or {}",
+            "    if isinstance(result, dict):",
+            "        fields = result.get('fields') or {}",
+            "        if isinstance(fields, dict):",
+            "            entry = fields.get(field_name)",
+            "            if isinstance(entry, dict) and entry.get('content') not in (None, ''):",
+            "                return str(entry.get('content'))",
+            "            for candidate in fields.values():",
+            "                if isinstance(candidate, dict) and candidate.get('label') == field_name and candidate.get('content') not in (None, ''):",
+            "                    return str(candidate.get('content'))",
+            "    return default_value",
             "",
             "async def execute_skill(page, **kwargs):",
             '    """Auto-generated skill from RPA recording."""',
@@ -302,7 +323,7 @@ class StepExecutionError(Exception):
                 step_lines.append(f"    await _dl.save_as(_dl_dest)")
                 step_lines.append(f'    _results["download_{safe_name}"] = {{"filename": _dl.suggested_filename, "path": _dl_dest}}')
             elif action == "fill":
-                fill_value = self._maybe_parameterize(value, params)
+                fill_value = self._build_fill_value_expression(step, value, params)
                 step_lines.append(f"    await {locator}.fill({fill_value})")
             elif action == "check":
                 step_lines.append(f"    await {locator}.check()")
@@ -312,14 +333,25 @@ class StepExecutionError(Exception):
                 input_files_value = self._build_input_files_value(step, value, params)
                 step_lines.append(f"    await {locator}.set_input_files({input_files_value})")
             elif action == "extract_text":
-                result_var = f"extract_text_value_{step_index + 1}"
                 result_key = self._build_extract_result_key(step, used_result_keys)
-                step_lines.append(f"    {result_var} = await {locator}.inner_text()")
-                step_lines.append(f'    _results["{result_key}"] = {result_var}')
+                step_lines.extend(
+                    self._build_extract_text_step_lines(
+                        step=step,
+                        locator=locator,
+                        scope_var=scope_var,
+                        result_key=result_key,
+                        step_index=step_index,
+                        extraction_implementation=extraction_implementation,
+                    )
+                )
             elif action == "press":
                 step_lines.append(f'    await {locator}.press("{value}")')
             elif action == "select":
-                step_lines.append(f'    await {locator}.select_option("{value}")')
+                select_value = self._build_fill_value_expression(step, value, params)
+                step_lines.append("    try:")
+                step_lines.append(f"        await {locator}.select_option(label={select_value})")
+                step_lines.append("    except Exception:")
+                step_lines.append(f"        await {locator}.select_option(value={select_value})")
 
             prev_action = action
             lines.extend(self._wrap_step_lines(step_lines, step_index, test_mode))
@@ -370,6 +402,126 @@ class StepExecutionError(Exception):
             return key
         return f"{key}_{count}"
 
+    def _build_extract_text_step_lines(
+        self,
+        *,
+        step: Dict[str, Any],
+        locator: str,
+        scope_var: str,
+        result_key: str,
+        step_index: int,
+        extraction_implementation: str,
+    ) -> List[str]:
+        extracted_fields = step.get("extracted_fields") or []
+        step_lines = [f'    _results["{result_key}"] = {{"raw": "", "fields": {{}}}}']
+        first_content_expr: Optional[str] = None
+
+        if not extracted_fields:
+            value_var = f"extract_text_value_{step_index + 1}"
+            step_lines.append(f"    {value_var} = ((await {locator}.inner_text()) or '').strip()")
+            step_lines.append(
+                f'    _results["{result_key}"]["fields"]["value"] = {{"label": "value", "content": {value_var}}}'
+            )
+            step_lines.append(f'    _results["{result_key}"]["raw"] = {value_var}')
+            return step_lines
+
+        for field_index, field in enumerate(extracted_fields, start=1):
+            field_name = str(field.get("name") or field.get("label") or f"value_{field_index}")
+            field_label = str(field.get("label") or field_name)
+            safe_var = re.sub(r"[^a-z0-9_]", "_", field_name.lower()) or "value"
+            field_var = f"_field_{safe_var}_{step_index + 1}"
+            for code_line in self._build_extract_field_value_lines(
+                step=step,
+                field=field,
+                field_var=field_var,
+                locator=locator,
+                scope_var=scope_var,
+                extraction_implementation=extraction_implementation,
+            ):
+                step_lines.append(code_line)
+
+            step_lines.append(
+                f'    _results["{result_key}"]["fields"]["{self._escape(field_name)}"] = '
+                f'{{"label": "{self._escape(field_label)}", "content": {field_var}}}'
+            )
+            if first_content_expr is None:
+                first_content_expr = field_var
+
+        if first_content_expr is not None:
+            step_lines.append(f'    _results["{result_key}"]["raw"] = {first_content_expr}')
+
+        return step_lines
+
+    def _build_extract_field_value_lines(
+        self,
+        *,
+        step: Dict[str, Any],
+        field: Dict[str, Any],
+        field_var: str,
+        locator: str,
+        scope_var: str,
+        extraction_implementation: str,
+    ) -> List[str]:
+        label = str(field.get("label") or field.get("name") or "").strip()
+        base_selector = self._extract_css_selector(step.get("target"))
+
+        # Per-field candidate takes highest priority
+        candidates = field.get("extract_candidates") or []
+        selected = next((c for c in candidates if c.get("selected")), candidates[0] if candidates else None)
+        if selected:
+            kind = selected.get("kind", "")
+            expr = str(selected.get("expression") or "")
+            locator_payload = selected.get("locator_payload")
+            if isinstance(locator_payload, dict) and locator_payload:
+                payload_expr = self._build_locator_for_page(json.dumps(locator_payload, ensure_ascii=False), scope_var)
+                return [f"    {field_var} = ((await {payload_expr}.inner_text()) or '').strip()"]
+            if expr:
+                if kind == "playwright_locator":
+                    if expr.startswith("{") and expr.endswith("}"):
+                        try:
+                            payload = json.loads(expr)
+                        except Exception:
+                            payload = None
+                        if isinstance(payload, dict):
+                            payload_expr = self._build_locator_for_page(json.dumps(payload, ensure_ascii=False), scope_var)
+                            return [f"    {field_var} = ((await {payload_expr}.inner_text()) or '').strip()"]
+                    return [
+                        f"    {field_var} = ((await {scope_var}.locator({json.dumps(expr)}).first.text_content()) or '').strip()"
+                    ]
+                if kind == "js_evaluate":
+                    return [
+                        f"    {field_var} = await {scope_var}.evaluate({self._as_python_multiline_string(expr)})",
+                        f"    {field_var} = str({field_var} or '').strip()",
+                    ]
+
+        if extraction_implementation == "locator":
+            selector = self._build_labeled_field_selector(base_selector, label)
+            if selector:
+                escaped_selector = self._escape(selector)
+                return [
+                    f'    {field_var} = ((await {scope_var}.locator("{escaped_selector}").text_content()) or \'\').strip()'
+                ]
+
+        if extraction_implementation == "js":
+            js_code = self._build_label_lookup_js(base_selector, label)
+            if js_code:
+                return [
+                    f'    {field_var} = await {scope_var}.evaluate({self._as_python_multiline_string(js_code)})',
+                    f"    {field_var} = str({field_var} or '').strip()",
+                ]
+
+        if field.get("extract_js"):
+            js_fn = str(field["extract_js"])
+            return [
+                f"    {field_var} = await {scope_var}.evaluate({self._as_python_multiline_string(js_fn)})",
+                f"    {field_var} = str({field_var} or '').strip()",
+            ]
+
+        field_locator = field.get("locator")
+        field_target = json.dumps(field_locator) if isinstance(field_locator, dict) and field_locator else None
+        field_loc_expr = self._build_locator_for_page(field_target, scope_var) if field_target else locator
+        return [f"    {field_var} = ((await {field_loc_expr}.inner_text()) or '').strip()"]
+
     def _normalize_result_key(self, raw_key: Any) -> str:
         text = str(raw_key or "").strip().lower()
         if not text:
@@ -381,6 +533,66 @@ class StepExecutionError(Exception):
         if text[0].isdigit():
             text = f"extract_{text}"
         return text[:64]
+
+    @staticmethod
+    def _normalize_extraction_implementation(value: Any) -> str:
+        normalized = str(value or "auto").strip().lower()
+        if normalized in {"locator", "js"}:
+            return normalized
+        return "auto"
+
+    @staticmethod
+    def _as_python_multiline_string(value: str) -> str:
+        escaped = str(value or "").replace('"""', '\\"\\"\\"')
+        return f'"""{escaped}"""'
+
+    @staticmethod
+    def _extract_css_selector(raw_locator: Any) -> Optional[str]:
+        payload: Any = raw_locator
+        if isinstance(raw_locator, str):
+            try:
+                payload = json.loads(raw_locator)
+            except Exception:
+                payload = None
+        if isinstance(payload, dict) and payload.get("method") == "css":
+            value = str(payload.get("value") or "").strip()
+            return value or None
+        return None
+
+    @staticmethod
+    def _build_labeled_field_selector(base_selector: Optional[str], label: str) -> Optional[str]:
+        normalized_label = str(label or "").strip()
+        normalized_base = str(base_selector or "").strip()
+        if not normalized_label or not normalized_base:
+            return None
+        escaped_label = normalized_label.replace("\\", "\\\\").replace('"', '\\"')
+        return f'{normalized_base}:has(span:text("{escaped_label}")) strong'
+
+    @staticmethod
+    def _build_label_lookup_js(base_selector: Optional[str], label: str) -> Optional[str]:
+        normalized_label = str(label or "").strip()
+        if not normalized_label:
+            return None
+        escaped_label = normalized_label.replace("\\", "\\\\").replace("'", "\\'")
+        selector = str(base_selector or ".detail-item").strip() or ".detail-item"
+        escaped_selector = selector.replace("\\", "\\\\").replace("'", "\\'")
+        return "\n".join(
+            [
+                "() => {",
+                f"    const items = Array.from(document.querySelectorAll('{escaped_selector}'));",
+                f"    const label = '{escaped_label}';",
+                "    for (const item of items) {",
+                "        const span = item.querySelector('span');",
+                "        if (!span) continue;",
+                "        const text = (span.textContent || '').trim();",
+                "        if (!text || !text.includes(label)) continue;",
+                "        const valueEl = span.nextElementSibling || item.querySelector('strong, .value, [data-value]');",
+                "        return valueEl ? (valueEl.textContent || '').trim() : null;",
+                "    }",
+                "    return null;",
+                "}",
+            ]
+        )
 
     @classmethod
     def _infer_missing_tab_transitions(cls, steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -734,6 +946,22 @@ class StepExecutionError(Exception):
                 return f"kwargs.get('{param_name}', '{value}')"
         safe = value.replace("'", "\\'")
         return f"'{safe}'"
+
+    def _build_fill_value_expression(self, step: Dict[str, Any], value: str, params: Dict[str, Any]) -> str:
+        fill_mappings = step.get("fill_mappings") or []
+        if fill_mappings:
+            mapping = fill_mappings[0]
+            result_key = str(mapping.get("source_result_key") or "")
+            field_name = str(mapping.get("param_name") or mapping.get("label") or "")
+            if result_key and field_name:
+                escaped_result_key = result_key.replace("\\", "\\\\").replace("'", "\\'")
+                escaped_field_name = field_name.replace("\\", "\\\\").replace("'", "\\'")
+                escaped_default = str(value or "").replace("\\", "\\\\").replace("'", "\\'")
+                return (
+                    f"_lookup_extracted_value(_results, '{escaped_result_key}', "
+                    f"'{escaped_field_name}', '{escaped_default}')"
+                )
+        return self._maybe_parameterize(value, params)
 
     def _build_input_files_value(self, step: Dict[str, Any], value: str, params: Dict[str, Any]) -> str:
         signals = step.get("signals")

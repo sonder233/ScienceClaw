@@ -173,6 +173,70 @@ def _serialize_script(options: dict) -> str:
     return lines.length ? ['INTERACTIVE', ...lines].join('\\n') : '';
   }};
 
+  const looksStable = (value) => {{
+    const text = normalize(value);
+    if (!text) return false;
+    if (text.length < 3) return true;
+    let transitions = 0;
+    for (let i = 1; i < text.length; i++) {{
+      const prev = /[a-z]/i.test(text[i - 1]) ? 'a' : /\\d/.test(text[i - 1]) ? 'n' : 'x';
+      const curr = /[a-z]/i.test(text[i]) ? 'a' : /\\d/.test(text[i]) ? 'n' : 'x';
+      if (prev !== curr) transitions += 1;
+    }}
+    return transitions < Math.floor(text.length / 4);
+  }};
+
+  const stableAttrs = (el) => {{
+    const bits = [];
+    const id = normalize(el.getAttribute('id') || '');
+    const name = normalize(el.getAttribute('name') || '');
+    const testId = normalize(el.getAttribute('data-testid') || el.getAttribute('data-test-id') || '');
+    if (id && looksStable(id)) bits.push(`id="${{truncate(id, 80)}}"`);
+    if (name && looksStable(name)) bits.push(`name="${{truncate(name, 80)}}"`);
+    if (testId && looksStable(testId)) bits.push(`data-testid="${{truncate(testId, 80)}}"`);
+    return bits.join(' ');
+  }};
+
+  const serializeFieldGroups = () => {{
+    const blocks = [];
+    const candidates = Array.from(document.querySelectorAll('div,section,article,tr,dl,li')).slice(0, 240);
+    let index = 1;
+    for (const el of candidates) {{
+      if (!isVisible(el)) continue;
+      const children = Array.from(el.children || []).filter(isVisible);
+      if (children.length < 2 || children.length > 6) continue;
+      const pairs = [];
+      if (el.tagName === 'DL') {{
+        for (const dt of Array.from(el.querySelectorAll(':scope > dt')).slice(0, 6)) {{
+          const dd = dt.nextElementSibling;
+          if (!dd || dd.tagName !== 'DD' || !isVisible(dd)) continue;
+          const label = truncate(dt.innerText || dt.textContent || '', 120);
+          const value = truncate(dd.innerText || dd.textContent || '', 120);
+          if (label && value && label !== value) {{
+            pairs.push(`- label="${{label}}" -> value="${{value}}" ${{stableAttrs(dd)}}`.trim());
+          }}
+        }}
+      }} else {{
+        for (let i = 0; i < children.length - 1; i++) {{
+          const left = children[i];
+          const right = children[i + 1];
+          if (!left || !right) continue;
+          const label = truncate(left.innerText || left.textContent || '', 120);
+          const value = truncate(right.innerText || right.textContent || '', 120);
+          if (!label || !value || label === value) continue;
+          if (label.length > 60 || value.length > 160) continue;
+          pairs.push(`- label="${{label}}" -> value="${{value}}" ${{stableAttrs(right)}}`.trim());
+        }}
+      }}
+      if (!pairs.length) continue;
+      const tag = el.tagName.toLowerCase();
+      const attrs = stableAttrs(el);
+      blocks.push([`FIELD_GROUP ${{index++}}`, `container=${{tag}}${{attrs ? ' ' + attrs : ''}}`, ...pairs].join('\\n'));
+      if (blocks.length >= 40) break;
+    }}
+    return blocks.join('\\n\\n');
+  }};
+
   const serializeFrame = (root, prefix, shadowDepth) => {{
     if (!root) return;
     const headings = Array.from(root.querySelectorAll ? root.querySelectorAll('h1,h2,h3,h4,h5,h6') : []).filter(isVisible).slice(0, 80);
@@ -204,6 +268,9 @@ def _serialize_script(options: dict) -> str:
 
     const interactive = serializeLinksAndButtons();
     if (interactive) pushBlock(interactive);
+
+    const fieldGroups = serializeFieldGroups();
+    if (fieldGroups) pushBlock(fieldGroups);
 
     if (shadowDepth >= maxShadowDepth) return;
     const shadowHosts = Array.from(root.querySelectorAll ? root.querySelectorAll('*') : []).filter((el) => el.shadowRoot);

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue';
+import { computed, ref, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen, Globe } from 'lucide-vue-next';
+import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen, Globe, Crosshair } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import { getBackendWsUrl } from '@/utils/sandbox';
 import {
@@ -57,7 +57,51 @@ const isAddressEditing = ref(false);
 const isNavigating = ref(false);
 const MOVE_THROTTLE = 50; // 50ms 节流
 
-const steps = ref<any[]>([
+const extractMode = ref(false);
+const extracting = ref(false);
+const extractToast = ref<string | null>(null);
+let extractToastTimer: ReturnType<typeof setTimeout> | null = null;
+
+const showExtractToast = (msg: string) => {
+  extractToast.value = msg;
+  if (extractToastTimer) clearTimeout(extractToastTimer);
+  extractToastTimer = setTimeout(() => { extractToast.value = null; }, 3000);
+};
+
+interface ExtractedField {
+  name?: string;
+  label?: string;
+  content?: string;
+  source_result_key?: string;
+  locator?: Record<string, any> | string | null;
+}
+
+interface FillMapping {
+  param_name?: string;
+  label?: string;
+  content?: string;
+  source_result_key?: string;
+}
+
+interface RecorderStepItem {
+  id: string;
+  title: string;
+  description: string;
+  status: string;
+  source: string;
+  sensitive: boolean;
+  locatorSummary: string;
+  frameSummary: string;
+  validationStatus: string;
+  validationDetails: string;
+  extractedFields: ExtractedField[];
+  fillMappings: FillMapping[];
+  action?: string;
+  stepIndex?: number;
+  groupedStepIndexes?: number[];
+}
+
+const steps = ref<RecorderStepItem[]>([
   { id: '0', title: '初始化环境', description: '正在配置沙箱录制环境...', status: 'active' }
 ]);
 
@@ -135,6 +179,11 @@ const mapServerSteps = (serverSteps: any[]) => ([
     frameSummary: formatFramePath(s.frame_path),
     validationStatus: s.validation?.status || '',
     validationDetails: s.validation?.details || '',
+    extractedFields: Array.isArray(s.extracted_fields) ? s.extracted_fields : [],
+    fillMappings: Array.isArray(s.fill_mappings) ? s.fill_mappings : [],
+    action: s.action || '',
+    stepIndex: i,
+    groupedStepIndexes: [i],
   }))
 ]);
 
@@ -153,10 +202,13 @@ interface ChatMessage {
   diagnostics?: string[];
   outputText?: string;
   extractedElement?: Record<string, any> | null;
+  extractedFields?: ExtractedField[];
+  fillMappings?: FillMapping[];
 }
 
 const appendAssistantSteps = (incomingSteps: Record<string, any>[]) => {
   for (const s of incomingSteps) {
+    const nextStepIndex = Math.max(0, steps.value.length - 1);
     steps.value.push({
       id: String(steps.value.length),
       title: s.description || s.action,
@@ -168,8 +220,80 @@ const appendAssistantSteps = (incomingSteps: Record<string, any>[]) => {
       frameSummary: formatFramePath(s.frame_path),
       validationStatus: s.validation?.status || '',
       validationDetails: s.validation?.details || '',
+      extractedFields: Array.isArray(s.extracted_fields) ? s.extracted_fields : [],
+      fillMappings: Array.isArray(s.fill_mappings) ? s.fill_mappings : [],
+      action: s.action || '',
+      stepIndex: nextStepIndex,
+      groupedStepIndexes: [nextStepIndex],
     });
   }
+};
+
+const shouldGroupExtractStep = (step: RecorderStepItem) =>
+  step.source === 'ai' && step.action === 'extract_text' && step.extractedFields.length > 0;
+
+const displaySteps = computed<RecorderStepItem[]>(() => {
+  const grouped: RecorderStepItem[] = [];
+  for (let index = 0; index < steps.value.length; index += 1) {
+    const current = steps.value[index];
+    if (!shouldGroupExtractStep(current)) {
+      grouped.push(current);
+      continue;
+    }
+
+    const bucket: RecorderStepItem[] = [current];
+    let cursor = index + 1;
+    while (cursor < steps.value.length && shouldGroupExtractStep(steps.value[cursor])) {
+      bucket.push(steps.value[cursor]);
+      cursor += 1;
+    }
+
+    if (bucket.length === 1) {
+      grouped.push(current);
+      continue;
+    }
+
+    grouped.push({
+      ...current,
+      title: '提取变量',
+      description: getExtractedFieldsSummary(bucket.flatMap((step) => step.extractedFields)),
+      locatorSummary: '',
+      frameSummary: '',
+      validationStatus: '',
+      validationDetails: '',
+      extractedFields: bucket.flatMap((step) => step.extractedFields),
+      groupedStepIndexes: bucket
+        .map((step) => step.stepIndex)
+        .filter((value): value is number => typeof value === 'number'),
+    });
+    index = cursor - 1;
+  }
+  return grouped;
+});
+
+const getExtractedFieldLabel = (field: ExtractedField) => field.label || field.name || '变量';
+
+const getExtractedFieldValuePreview = (field: ExtractedField, max = 24) => {
+  const value = String(field.content || '');
+  if (!value) return '空值';
+  return value.length > max ? `${value.slice(0, Math.max(0, max - 1))}…` : value;
+};
+
+const getExtractedFieldsSummary = (fields?: ExtractedField[]) => {
+  if (!fields?.length) return '暂无变量';
+  const names = fields.slice(0, 2).map(getExtractedFieldLabel).join('、');
+  const extraCount = fields.length - 2;
+  return extraCount > 0 ? `${names} 等 ${fields.length} 项` : `${names} 共 ${fields.length} 项`;
+};
+
+const formatExtractedFieldLocator = (field: ExtractedField) => {
+  return field.locator ? formatLocator(field.locator) : '无定位器';
+};
+
+const formatFillMappingTag = (mapping: FillMapping) => {
+  const label = mapping.label || mapping.param_name || '变量';
+  const source = mapping.source_result_key ? ` <- ${mapping.source_result_key}` : '';
+  return `${label}${source}`;
 };
 
 const chatMessages = ref<ChatMessage[]>([]);
@@ -202,11 +326,17 @@ const buildElementPreview = (element?: Record<string, any> | null) => {
 const attachOutputDetails = (message: ChatMessage, payload: { output?: string; output_meta?: Record<string, any> | null; step?: Record<string, any> | null }) => {
   const outputText = payload.output;
   const extractedElement = payload.output_meta || payload.step?.element_snapshot || null;
+  if (Array.isArray(payload.step?.fill_mappings)) {
+    message.fillMappings = payload.step.fill_mappings;
+  }
   if (outputText && outputText !== 'ok' && outputText !== 'None') {
     message.outputText = outputText;
   }
   if (extractedElement && Object.keys(extractedElement).length > 0) {
     message.extractedElement = extractedElement;
+    if (Array.isArray(extractedElement.extracted_fields)) {
+      message.extractedFields = extractedElement.extracted_fields;
+    }
     if (!message.frameSummary && Array.isArray(extractedElement.frame_path) && extractedElement.frame_path.length > 0) {
       message.frameSummary = extractedElement.frame_path.join(' -> ');
     }
@@ -547,6 +677,13 @@ const sendInputEvent = (e: Event) => {
       inputSize: screencastInputSize.value,
     });
     if (!point) return;
+
+    // In extract mode, intercept mousedown and call extract-at instead of CDP input
+    if (extractMode.value && e.type === 'mousedown' && e.button === 0) {
+      extractAtPosition(point.x, point.y);
+      return;
+    }
+
     const actionMap: Record<string, string> = {
       mousedown: 'mousePressed',
       mouseup: 'mouseReleased',
@@ -602,8 +739,32 @@ const sendInputEvent = (e: Event) => {
   }
 };
 
+const extractAtPosition = async (x: number, y: number) => {
+  if (!sessionId.value || extracting.value) return;
+  extracting.value = true;
+  try {
+    const resp = await apiClient.post(`/rpa/session/${sessionId.value}/extract-at`, { x, y });
+    const step = resp.data.step;
+    const fields: ExtractedField[] = step?.extracted_fields || [];
+    if (fields.length > 0) {
+      const summary = fields.map((f: ExtractedField) => `${f.label || f.name}: ${f.content}`).join(' / ');
+      showExtractToast(`已提取: ${summary}`);
+    } else if (step?.value) {
+      showExtractToast(`已提取: ${String(step.value).slice(0, 60)}`);
+    } else {
+      showExtractToast('提取完成');
+    }
+    const sessResp = await apiClient.get(`/rpa/session/${sessionId.value}`);
+    const serverSteps = sessResp.data.session?.steps || [];
+    if (serverSteps.length > 0) steps.value = mapServerSteps(serverSteps);
+  } catch (err: any) {
+    showExtractToast(`提取失败: ${err.response?.data?.detail || err.message}`);
+  } finally {
+    extracting.value = false;
+  }
+};
+
 const stopRecording = async () => {
-  isRecording.value = false;
   if (timerInterval.value) clearInterval(timerInterval.value);
   if (pollInterval) clearInterval(pollInterval);
 
@@ -625,10 +786,12 @@ const goToSkills = () => {
   router.push('/chat/skills');
 };
 
-const deleteStep = async (stepIndex: number) => {
+const deleteSteps = async (stepIndexes: number[]) => {
   if (!sessionId.value) return;
   try {
-    await apiClient.delete(`/rpa/session/${sessionId.value}/step/${stepIndex}`);
+    for (const stepIndex of [...stepIndexes].sort((a, b) => b - a)) {
+      await apiClient.delete(`/rpa/session/${sessionId.value}/step/${stepIndex}`);
+    }
     const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
     const serverSteps = resp.data.session?.steps || [];
     steps.value = mapServerSteps(serverSteps);
@@ -813,6 +976,17 @@ const sendMessage = async () => {
         >
           完成录制
         </button>
+        <button
+          @click="extractMode = !extractMode"
+          :disabled="!sessionId || extracting"
+          class="flex items-center gap-2 font-bold px-4 py-2 rounded-full transition-all shadow-md active:scale-95 text-sm border-2"
+          :class="extractMode
+            ? 'bg-emerald-500 text-white border-emerald-400 hover:bg-emerald-600'
+            : 'bg-white/10 text-white border-white/30 hover:bg-white/20'"
+        >
+          <Crosshair :size="16" :class="extractMode ? 'animate-pulse' : ''" />
+          {{ extractMode ? (extracting ? '提取中...' : '提取模式') : '提取数据' }}
+        </button>
       </div>
     </header>
 
@@ -822,13 +996,13 @@ const sendMessage = async () => {
       <aside class="w-80 bg-[#eff1f2] dark:bg-[#212122] border-r border-gray-200 dark:border-gray-700 p-6 overflow-y-auto flex flex-col">
         <div class="flex items-center justify-between mb-8">
           <h2 class="text-gray-900 dark:text-gray-100 font-extrabold text-lg">录制步骤</h2>
-          <span class="text-[#831bd7] text-[10px] font-bold bg-[#c384ff]/20 px-2 py-1 rounded-md">{{ steps.length }} 步</span>
+          <span class="text-[#831bd7] text-[10px] font-bold bg-[#c384ff]/20 px-2 py-1 rounded-md">{{ displaySteps.length }} 步</span>
         </div>
 
         <div class="space-y-4">
           <div
-            v-for="(step, index) in steps"
-            :key="step.id"
+            v-for="(step, index) in displaySteps"
+            :key="`${step.id}-${(step.groupedStepIndexes || []).join('-')}`"
             class="bg-white dark:bg-[#272728] p-4 rounded-xl shadow-sm border-l-4 transition-all group relative"
             :class="[ step.source === 'ai' ? 'border-[#ac0089]' : (step.status === 'active' ? 'border-[#831bd7]' : 'border-gray-200 dark:border-gray-700 opacity-70') ]"
           >
@@ -841,8 +1015,8 @@ const sendMessage = async () => {
               </div>
               <div class="flex items-center gap-1">
                 <button
-                  v-if="index > 0"
-                  @click="deleteStep(index - 1)"
+                  v-if="index > 0 && step.groupedStepIndexes?.length"
+                  @click="deleteSteps(step.groupedStepIndexes)"
                   class="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-red-50 rounded"
                   title="删除步骤"
                 >
@@ -872,6 +1046,49 @@ const sendMessage = async () => {
                 </span>
                 <span v-if="step.validationDetails" class="ml-1">{{ step.validationDetails }}</span>
               </p>
+            </div>
+            <details v-if="step.extractedFields?.length" class="mt-3 rounded-xl border border-emerald-100 bg-emerald-50/60 dark:border-emerald-900/40 dark:bg-emerald-900/10">
+              <summary class="cursor-pointer list-none px-2.5 py-2">
+                <div class="flex items-center justify-between gap-3">
+                  <div class="min-w-0">
+                    <p class="text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">提取变量</p>
+                    <p class="mt-0.5 truncate text-[10px] text-emerald-700/80 dark:text-emerald-300/80">
+                      {{ getExtractedFieldsSummary(step.extractedFields) }}
+                    </p>
+                  </div>
+                  <span class="shrink-0 rounded-full bg-white/80 dark:bg-emerald-950/50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300">
+                    {{ step.extractedFields.length }} 项
+                  </span>
+                </div>
+              </summary>
+              <div class="space-y-1.5 px-2.5 pb-2.5">
+                <div
+                  v-for="(field, fieldIndex) in step.extractedFields"
+                  :key="`${step.id}-field-${fieldIndex}`"
+                  class="rounded-lg bg-white/80 dark:bg-emerald-950/30 px-2 py-1.5 text-[10px] text-emerald-800 dark:text-emerald-200"
+                >
+                  <div class="flex items-center gap-1.5">
+                    <span class="font-semibold">{{ getExtractedFieldLabel(field) }}</span>
+                    <span class="text-emerald-500">:</span>
+                    <span class="truncate">{{ getExtractedFieldValuePreview(field) }}</span>
+                  </div>
+                  <div class="mt-0.5 break-all font-mono text-[9px] text-emerald-800/70 dark:text-emerald-200/70">
+                    {{ formatExtractedFieldLocator(field) }}
+                  </div>
+                </div>
+              </div>
+            </details>
+            <div v-if="step.fillMappings?.length" class="mt-3">
+              <p class="text-[10px] font-semibold text-gray-600 dark:text-gray-400">变量映射</p>
+              <div class="mt-1 flex flex-wrap gap-1.5">
+                <span
+                  v-for="(mapping, mappingIndex) in step.fillMappings"
+                  :key="`${step.id}-mapping-${mappingIndex}`"
+                  class="rounded-full bg-sky-50 dark:bg-sky-900/30 px-2 py-1 text-[10px] text-sky-700 dark:text-sky-300"
+                >
+                  {{ formatFillMappingTag(mapping) }}
+                </span>
+              </div>
             </div>
           </div>
 
@@ -925,7 +1142,8 @@ const sendMessage = async () => {
             <canvas
               v-if="sessionId"
               ref="canvasRef"
-              class="w-full h-full object-contain cursor-default"
+              class="w-full h-full object-contain"
+              :class="extractMode ? 'cursor-crosshair' : 'cursor-default'"
               tabindex="0"
               @click="focusCanvas"
               @mousedown="sendInputEvent"
@@ -949,6 +1167,25 @@ const sendMessage = async () => {
               <Radio class="text-red-400 animate-pulse" :size="14" />
               <span class="text-white text-[10px] font-bold tracking-wider uppercase">实时 CDP 串流</span>
             </div>
+
+            <!-- Extract mode banner -->
+            <div
+              v-if="extractMode"
+              class="absolute top-0 inset-x-0 flex items-center justify-center gap-2 py-2 bg-emerald-500/80 backdrop-blur-sm text-white text-xs font-bold"
+            >
+              <Crosshair :size="14" class="animate-pulse" />
+              提取模式: 点击页面元素以录制提取步骤，再次点击按钮退出
+            </div>
+
+            <!-- Extract toast notification -->
+            <Transition name="toast">
+              <div
+                v-if="extractToast"
+                class="absolute top-12 left-1/2 -translate-x-1/2 max-w-xs bg-gray-900/90 text-white text-[11px] px-4 py-2.5 rounded-xl shadow-lg border border-emerald-500/40 z-20"
+              >
+                {{ extractToast }}
+              </div>
+            </Transition>
           </div>
         </div>
 
@@ -1058,6 +1295,49 @@ const sendMessage = async () => {
                   <div class="text-[10px] font-semibold text-gray-600 dark:text-gray-400">命中元素</div>
                   <div class="mt-1 whitespace-pre-wrap text-[11px] text-gray-700 dark:text-gray-300">{{ buildElementPreview(msg.extractedElement) }}</div>
                 </div>
+                <details v-if="msg.extractedFields?.length" class="rounded-xl border border-emerald-100 bg-emerald-50/60 dark:border-emerald-900/40 dark:bg-emerald-900/10">
+                  <summary class="cursor-pointer list-none px-2.5 py-2">
+                    <div class="flex items-center justify-between gap-3">
+                      <div class="min-w-0">
+                        <div class="text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">提取变量</div>
+                        <div class="mt-0.5 truncate text-[10px] text-emerald-700/80 dark:text-emerald-300/80">
+                          {{ getExtractedFieldsSummary(msg.extractedFields) }}
+                        </div>
+                      </div>
+                      <span class="shrink-0 rounded-full bg-white/80 dark:bg-emerald-950/50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300">
+                        {{ msg.extractedFields.length }} 项
+                      </span>
+                    </div>
+                  </summary>
+                  <div class="space-y-1.5 px-2.5 pb-2.5">
+                    <div
+                      v-for="(field, fieldIndex) in msg.extractedFields"
+                      :key="`${msg.time}-field-${fieldIndex}`"
+                      class="rounded-lg bg-white/80 dark:bg-emerald-950/30 px-2 py-1.5 text-[10px] text-emerald-800 dark:text-emerald-200"
+                    >
+                      <div class="flex items-center gap-1.5">
+                        <span class="font-semibold">{{ getExtractedFieldLabel(field) }}</span>
+                        <span class="text-emerald-500">:</span>
+                        <span class="truncate">{{ getExtractedFieldValuePreview(field) }}</span>
+                      </div>
+                      <div class="mt-0.5 break-all font-mono text-[9px] text-emerald-800/70 dark:text-emerald-200/70">
+                        {{ formatExtractedFieldLocator(field) }}
+                      </div>
+                    </div>
+                  </div>
+                </details>
+                <div v-if="msg.fillMappings?.length">
+                  <div class="text-[10px] font-semibold text-gray-600 dark:text-gray-400">变量映射</div>
+                  <div class="mt-1 flex flex-wrap gap-1.5">
+                    <span
+                      v-for="(mapping, mappingIndex) in msg.fillMappings"
+                      :key="`${msg.time}-mapping-${mappingIndex}`"
+                      class="rounded-full bg-sky-50 dark:bg-sky-900/30 px-2 py-1 text-[10px] text-sky-700 dark:text-sky-300"
+                    >
+                      {{ formatFillMappingTag(mapping) }}
+                    </span>
+                  </div>
+                </div>
               </div>
               <div v-if="msg.status === 'done' && msg.role === 'assistant' && !agentMode" class="mt-2 flex items-center gap-1 text-[10px] text-green-600 font-medium">
                 <CheckCircle :size="10" /> 执行成功
@@ -1111,3 +1391,15 @@ const sendMessage = async () => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.toast-enter-active,
+.toast-leave-active {
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.toast-enter-from,
+.toast-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(-8px);
+}
+</style>

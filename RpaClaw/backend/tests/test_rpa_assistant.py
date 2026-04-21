@@ -450,6 +450,22 @@ class RPAReActAgentTests(unittest.IsolatedAsyncioTestCase):
                     "child_content_ids": ["c-1", "c-2"],
                 }
             ],
+            "page_blocks": [
+                {
+                    "block_id": "block-1",
+                    "block_kind": "detail_section",
+                    "tag": "div",
+                    "text_summary": "项目名称 预算（元） 采购人",
+                }
+            ],
+            "field_pairs": [
+                {
+                    "field_pair_id": "pair-1",
+                    "label_text": "预算（元）",
+                    "value_text": "6800",
+                    "relation": {"kind": "siblings_same_container", "confidence": 0.97},
+                }
+            ],
         }
 
         content = ASSISTANT_MODULE.RPAReActAgent._build_observation(snapshot, 0)
@@ -457,6 +473,8 @@ class RPAReActAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Container: table 合同列表", content)
         self.assertIn("actionable=2", content)
         self.assertIn("content=2", content)
+        self.assertIn("Block: detail_section div 项目名称 预算（元） 采购人", content)
+        self.assertIn("FieldPair: 预算（元） -> 6800", content)
 
     async def test_react_agent_build_observation_includes_dom_context_block_for_full_mode(self):
         snapshot = {
@@ -630,6 +648,45 @@ class RPAAssistantFrameAwareSnapshotTests(unittest.IsolatedAsyncioTestCase):
                             "child_content_ids": ["content-1"],
                         }
                     ],
+                    "page_blocks": [
+                        {
+                            "block_id": "block-1",
+                            "frame_path": [],
+                            "block_kind": "table_section",
+                            "tag": "table",
+                            "text_summary": "合同下载列表 已归档",
+                        }
+                    ],
+                    "field_pairs": [
+                        {
+                            "field_pair_id": "pair-1",
+                            "frame_path": [],
+                            "label_text": "状态",
+                            "value_text": "已归档",
+                            "relation": {"kind": "same_row_cells", "confidence": 0.84},
+                            "container": {"tag": "tr", "stable_attrs": {}, "class_tokens": []},
+                            "label_node": {
+                                "tag": "th",
+                                "text": "状态",
+                                "role": "",
+                                "stable_attrs": {},
+                                "class_tokens": [],
+                                "locator": {"method": "text", "value": "状态"},
+                                "locator_candidates": [{"kind": "text", "selected": True, "locator": {"method": "text", "value": "状态"}}],
+                                "bbox": {"x": 200, "y": 20, "width": 80, "height": 24},
+                            },
+                            "value_node": {
+                                "tag": "td",
+                                "text": "已归档",
+                                "role": "",
+                                "stable_attrs": {"id": "status-value"},
+                                "class_tokens": ["detail-value"],
+                                "locator": {"method": "css", "value": "#status-value"},
+                                "locator_candidates": [{"kind": "css", "selected": True, "locator": {"method": "css", "value": "#status-value"}}],
+                                "bbox": {"x": 300, "y": 20, "width": 80, "height": 24},
+                            },
+                        }
+                    ],
                 }
             ),
         ):
@@ -641,9 +698,13 @@ class RPAAssistantFrameAwareSnapshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("actionable_nodes", snapshot)
         self.assertIn("content_nodes", snapshot)
         self.assertIn("containers", snapshot)
+        self.assertIn("page_blocks", snapshot)
+        self.assertIn("field_pairs", snapshot)
         self.assertEqual(snapshot["actionable_nodes"][0]["locator"]["method"], "role")
         self.assertEqual(snapshot["content_nodes"][0]["semantic_kind"], "cell")
         self.assertEqual(snapshot["containers"][0]["container_kind"], "table")
+        self.assertEqual(snapshot["page_blocks"][0]["block_kind"], "table_section")
+        self.assertEqual(snapshot["field_pairs"][0]["value_node"]["locator"]["value"], "#status-value")
 
     async def test_build_page_snapshot_includes_iframe_elements_and_collections(self):
         iframe = _FakeSnapshotFrame(
@@ -929,6 +990,7 @@ class RPAAssistantStructuredExecutionTests(unittest.IsolatedAsyncioTestCase):
                 }
             ],
             "containers": [],
+            "field_pairs": [],
         }
 
         resolved = ASSISTANT_MODULE.resolve_structured_intent(
@@ -944,6 +1006,123 @@ class RPAAssistantStructuredExecutionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(resolved["resolved"]["locator"]["method"], "text")
         self.assertEqual(resolved["resolved"]["content_node"]["semantic_kind"], "heading")
+
+    async def test_resolve_structured_intent_extract_text_prefers_field_pairs_value_locator(self):
+        snapshot = {
+            "frames": [],
+            "actionable_nodes": [],
+            "content_nodes": [
+                {
+                    "node_id": "content-1",
+                    "frame_path": [],
+                    "container_id": "detail-1",
+                    "semantic_kind": "text",
+                    "role": "",
+                    "text": "预算（元） 6800",
+                    "bbox": {"x": 20, "y": 20, "width": 200, "height": 24},
+                    "locator": {"method": "text", "value": "预算（元） 6800"},
+                    "element_snapshot": {"tag": "div", "text": "预算（元） 6800"},
+                }
+            ],
+            "containers": [],
+            "field_pairs": [
+                {
+                    "field_pair_id": "pair-budget",
+                    "frame_path": [],
+                    "label_text": "预算（元）",
+                    "value_text": "6800",
+                    "relation": {"kind": "siblings_same_container", "confidence": 0.97},
+                    "container": {
+                        "tag": "div",
+                        "stable_attrs": {"id": "budget-field"},
+                        "class_tokens": ["detail-item"],
+                    },
+                    "label_node": {
+                        "tag": "div",
+                        "text": "预算（元）",
+                        "role": "",
+                        "stable_attrs": {"id": "budget-label"},
+                        "class_tokens": ["detail-label"],
+                        "locator": {"method": "css", "value": "#budget-label"},
+                        "locator_candidates": [{"kind": "css", "selected": True, "locator": {"method": "css", "value": "#budget-label"}}],
+                        "bbox": {"x": 20, "y": 20, "width": 80, "height": 24},
+                    },
+                    "value_node": {
+                        "tag": "div",
+                        "text": "6800",
+                        "role": "",
+                        "stable_attrs": {"id": "budget-value"},
+                        "class_tokens": ["detail-value"],
+                        "locator": {"method": "css", "value": "#budget-value"},
+                        "locator_candidates": [
+                            {"kind": "text", "selected": False, "locator": {"method": "text", "value": "6800"}},
+                            {"kind": "css", "selected": True, "locator": {"method": "css", "value": "#budget-value"}},
+                        ],
+                        "bbox": {"x": 120, "y": 20, "width": 80, "height": 24},
+                    },
+                }
+            ],
+        }
+
+        resolved = ASSISTANT_MODULE.resolve_structured_intent(
+            snapshot,
+            {
+                "action": "extract_text",
+                "description": "提取预算",
+                "prompt": "获取当前页面的预算",
+                "target_hint": {"name": "预算"},
+                "result_key": "budget",
+            },
+        )
+
+        self.assertEqual(resolved["resolved"]["locator"], {"method": "css", "value": "#budget-value"})
+        self.assertEqual(resolved["resolved"]["field_pair"]["field_pair_id"], "pair-budget")
+
+    async def test_execute_structured_extract_text_builds_field_candidates_with_stable_locator_preferred(self):
+        page = _FakeActionPage()
+        page.scope.locator_obj.text = "张敏"
+        intent = {
+            "action": "extract_text",
+            "description": "提取采购人",
+            "prompt": "获取当前页面的采购人",
+            "result_key": "requester",
+            "resolved": {
+                "frame_path": [],
+                "locator": {"method": "css", "value": "#requester-value"},
+                "locator_candidates": [
+                    {"kind": "text", "selected": False, "locator": {"method": "text", "value": "张敏"}},
+                    {"kind": "css", "selected": True, "locator": {"method": "css", "value": "#requester-value"}},
+                ],
+                "collection_hint": {},
+                "item_hint": {},
+                "ordinal": None,
+                "selected_locator_kind": "css",
+                "field_pair": {
+                    "field_pair_id": "pair-requester",
+                    "label_text": "采购人",
+                    "value_text": "张敏",
+                    "relation": {"kind": "siblings_same_container", "confidence": 0.96},
+                    "container": {"tag": "div", "stable_attrs": {"id": "requester-field"}, "class_tokens": ["detail-item"]},
+                    "value_node": {
+                        "locator": {"method": "css", "value": "#requester-value"},
+                        "locator_candidates": [
+                            {"kind": "text", "selected": False, "locator": {"method": "text", "value": "张敏"}},
+                            {"kind": "css", "selected": True, "locator": {"method": "css", "value": "#requester-value"}},
+                        ],
+                    },
+                },
+            },
+        }
+
+        result = await ASSISTANT_MODULE.execute_structured_intent(page, intent)
+
+        field = result["step"]["extracted_fields"][0]
+        self.assertEqual(field["locator"], {"method": "css", "value": "#requester-value"})
+        self.assertEqual(field["extract_candidates"][0]["expression"], 'page.get_by_text("张敏").text_content()')
+        self.assertEqual(field["extract_candidates"][1]["expression"], 'page.locator("#requester-value").text_content()')
+        selected = next(candidate for candidate in field["extract_candidates"] if candidate["selected"])
+        self.assertEqual(selected["locator_payload"], {"method": "css", "value": "#requester-value"})
+        self.assertEqual(field["name"], "requester")
 
     async def test_execute_structured_click_does_not_mark_local_expansion_in_single_pass_mode(self):
         page = _FakeActionPage()
@@ -1579,8 +1758,8 @@ class RPAAssistantPromptFormattingTests(unittest.TestCase):
     def test_system_prompt_allows_direct_answer_for_data_extraction_dom_context(self):
         prompt = ASSISTANT_MODULE.SYSTEM_PROMPT
 
-        self.assertIn("DOM Context For Data Extraction", prompt)
-        self.assertIn("answer directly in natural language", prompt)
+        self.assertIn("extract_text", prompt)
+        self.assertIn("replayable steps", prompt)
 
     def test_data_extraction_mode_uses_dedicated_system_prompt(self):
         assistant = ASSISTANT_MODULE.RPAAssistant()
@@ -1596,7 +1775,7 @@ class RPAAssistantPromptFormattingTests(unittest.TestCase):
 
         self.assertEqual(messages[0]["role"], "system")
         self.assertIn("RPA page-reading assistant", messages[0]["content"])
-        self.assertIn("Summarize the current page directly in natural language", messages[0]["content"])
+        self.assertIn("return structured JSON actions using `extract_text`", messages[0]["content"])
 
     def test_build_messages_lists_frames_and_collections(self):
         assistant = ASSISTANT_MODULE.RPAAssistant()

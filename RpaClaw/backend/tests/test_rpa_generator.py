@@ -637,10 +637,13 @@ class PlaywrightGeneratorTests(unittest.TestCase):
         script = generator.generate_script(steps, is_local=True)
 
         self.assertIn(
-            'extract_text_value_1 = await current_page.get_by_role("link", name="Issue Title", exact=True).inner_text()',
+            'extract_text_value_1 = ((await current_page.get_by_role("link", name="Issue Title", exact=True).inner_text()) or \'\').strip()',
             script,
         )
-        self.assertIn('_results["latest_issue_title"] = extract_text_value_1', script)
+        self.assertIn('_results["latest_issue_title"]["fields"]["value"] = {"label": "value", "content": extract_text_value_1}', script)
+        self.assertIn('_results["latest_issue_title"]["raw"] = extract_text_value_1', script)
+        self.assertNotIn("_parse_runtime_extracted_fields", script)
+        self.assertNotIn("_normalize_extracted_text", script)
 
     def test_generate_script_extract_text_step_uses_stable_suffix_for_duplicate_result_keys(self):
         generator = PlaywrightGenerator()
@@ -665,8 +668,8 @@ class PlaywrightGeneratorTests(unittest.TestCase):
 
         script = generator.generate_script(steps, is_local=True)
 
-        self.assertIn('_results["latest_issue_title"] = extract_text_value_1', script)
-        self.assertIn('_results["latest_issue_title_2"] = extract_text_value_2', script)
+        self.assertIn('_results["latest_issue_title"]["raw"] = extract_text_value_1', script)
+        self.assertIn('_results["latest_issue_title_2"]["raw"] = extract_text_value_2', script)
 
     def test_generate_script_extract_text_step_falls_back_to_default_key_without_result_key(self):
         generator = PlaywrightGenerator()
@@ -682,7 +685,119 @@ class PlaywrightGeneratorTests(unittest.TestCase):
 
         script = generator.generate_script(steps, is_local=True)
 
-        self.assertIn('_results["extract_text_1"] = extract_text_value_1', script)
+        self.assertIn('_results["extract_text_1"]["raw"] = extract_text_value_1', script)
+
+    def test_generate_script_extract_text_step_uses_direct_locator_fields(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "extract_text",
+                "target": json.dumps({"method": "css", "value": ".card"}),
+                "description": "提取卡片里的标题和作者",
+                "result_key": "card_info",
+                "url": "https://example.com/cards",
+                "source": "ai",
+                "extracted_fields": [
+                    {
+                        "name": "title",
+                        "label": "Title",
+                        "locator": {"method": "css", "value": "h2"},
+                    },
+                    {
+                        "name": "author",
+                        "label": "Author",
+                        "locator": {"method": "css", "value": ".author"},
+                    },
+                ],
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn('_field_title_1 = ((await current_page.locator("h2").inner_text()) or \'\').strip()', script)
+        self.assertIn('_field_author_1 = ((await current_page.locator(".author").inner_text()) or \'\').strip()', script)
+        self.assertIn('_results["card_info"]["fields"]["title"] = {"label": "Title", "content": _field_title_1}', script)
+        self.assertIn('_results["card_info"]["fields"]["author"] = {"label": "Author", "content": _field_author_1}', script)
+        self.assertIn('_results["card_info"]["raw"] = _field_title_1', script)
+
+    def test_generate_script_extract_text_step_uses_direct_js_fields(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "extract_text",
+                "target": json.dumps({"method": "css", "value": ".card"}),
+                "description": "用 js 提取统计值",
+                "result_key": "stats",
+                "url": "https://example.com/cards",
+                "source": "ai",
+                "extracted_fields": [
+                    {
+                        "name": "count",
+                        "label": "Count",
+                        "extract_js": "() => document.querySelector('.count')?.textContent || ''",
+                    }
+                ],
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn('_field_count_1 = await current_page.evaluate', script)
+        self.assertIn("_field_count_1 = str(_field_count_1 or '').strip()", script)
+        self.assertIn('_results["stats"]["fields"]["count"] = {"label": "Count", "content": _field_count_1}', script)
+
+    def test_generate_script_extract_text_step_supports_locator_implementation(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "extract_text",
+                "target": json.dumps({"method": "css", "value": "div.detail-item"}),
+                "description": "提取预算",
+                "result_key": "detail_info",
+                "url": "https://example.com/detail",
+                "source": "ai",
+                "extracted_fields": [
+                    {
+                        "name": "budget",
+                        "label": "预算（元）",
+                        "locator": {"method": "css", "value": "div.detail-item"},
+                    }
+                ],
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True, extraction_implementation="locator")
+
+        self.assertIn(
+            '_field_budget_1 = ((await current_page.locator("div.detail-item:has(span:text(\\"预算（元）\\")) strong").text_content()) or \'\').strip()',
+            script,
+        )
+
+    def test_generate_script_extract_text_step_supports_js_implementation(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "extract_text",
+                "target": json.dumps({"method": "css", "value": ".detail-item"}),
+                "description": "提取部门",
+                "result_key": "detail_info",
+                "url": "https://example.com/detail",
+                "source": "ai",
+                "extracted_fields": [
+                    {
+                        "name": "department",
+                        "label": "部门",
+                        "locator": {"method": "css", "value": ".detail-item"},
+                    }
+                ],
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True, extraction_implementation="js")
+
+        self.assertIn("_field_department_1 = await current_page.evaluate", script)
+        self.assertIn("document.querySelectorAll('.detail-item')", script)
+        self.assertIn("text.includes(label)", script)
 
 
     def test_generate_script_test_mode_wraps_click_in_try_except(self):

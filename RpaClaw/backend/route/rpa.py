@@ -1,9 +1,10 @@
 import json
 import logging
 import asyncio
+import re
 from pathlib import Path
 from urllib.parse import urlparse
-from typing import Dict, Any
+from typing import Dict, Any, List
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -42,12 +43,14 @@ class StartSessionRequest(BaseModel):
 
 class GenerateRequest(BaseModel):
     params: Dict[str, Any] = {}
+    extraction_implementation: str = "auto"
 
 
 class SaveSkillRequest(BaseModel):
     skill_name: str
     description: str
     params: Dict[str, Any] = {}
+    extraction_implementation: str = "auto"
 
 
 class ChatRequest(BaseModel):
@@ -65,6 +68,15 @@ class NavigateRequest(BaseModel):
 
 class PromoteLocatorRequest(BaseModel):
     candidate_index: int
+
+
+class PromoteExtractCandidateRequest(BaseModel):
+    candidate_index: int
+
+
+class ExtractAtRequest(BaseModel):
+    x: float
+    y: float
 
 
 async def _get_ws_user(websocket: WebSocket) -> User | None:
@@ -384,6 +396,191 @@ async def promote_step_locator(
     return {"status": "success", "step": step}
 
 
+@router.post("/session/{session_id}/step/{step_index}/field/{field_index}/extract-candidate")
+async def promote_field_extract_candidate(
+    session_id: str,
+    step_index: int,
+    field_index: int,
+    request: PromoteExtractCandidateRequest,
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    try:
+        step = await rpa_manager.select_field_extract_candidate(
+            session_id,
+            step_index,
+            field_index,
+            request.candidate_index,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {"status": "success", "step": step}
+
+
+async def _suggest_field_names(fields: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Call LLM to suggest English snake_case parameter names for extracted fields."""
+    if not fields:
+        return fields
+    labels = [f.get("label") or f.get("name") or "value" for f in fields]
+    prompt = (
+        "For each field label below, suggest a concise English snake_case parameter name.\n"
+        f"Labels: {json.dumps(labels, ensure_ascii=False)}\n"
+        "Return ONLY a JSON array of snake_case strings, same length as input, no explanation.\n"
+        'Example: ["operator_name", "department"]'
+    )
+    try:
+        from langchain_core.messages import HumanMessage
+        from backend.deepagent.engine import get_llm_model
+        model = get_llm_model(streaming=False)
+        resp = await model.ainvoke([HumanMessage(content=prompt)])
+        text = (resp.content or "").strip()
+        match = re.search(r"\[.*?\]", text, re.DOTALL)
+        if match:
+            names = json.loads(match.group())
+            if isinstance(names, list) and len(names) == len(fields):
+                result = []
+                used_names: set[str] = set()
+                for field, name in zip(fields, names):
+                    candidate_name = ""
+                    if name and isinstance(name, str) and re.match(r"^[a-z][a-z0-9_]*$", name):
+                        candidate_name = name[:64]
+                    elif isinstance(field.get("name"), str):
+                        candidate_name = str(field.get("name") or "")[:64]
+                    if candidate_name:
+                        base_name = candidate_name
+                        suffix = 2
+                        while candidate_name in used_names:
+                            candidate_name = f"{base_name}_{suffix}"[:64]
+                            suffix += 1
+                        used_names.add(candidate_name)
+                        field = dict(field)
+                        field["name"] = candidate_name
+                    result.append(field)
+                return result
+    except Exception as exc:
+        logger.warning(f"LLM field name suggestion failed: {exc}")
+    return fields
+
+
+_EXTRACT_AT_JS = """
+([x, y]) => {
+    const el = document.elementFromPoint(x, y);
+    if (!el) return null;
+
+    // Walk up to find an element with meaningful text
+    let target = el;
+    for (let i = 0; i < 5 && target && target !== document.body; i++) {
+        const t = (target.innerText || target.textContent || '').trim();
+        if (t) break;
+        target = target.parentElement;
+    }
+    if (!target || target === document.body) return null;
+    const text = (target.innerText || target.textContent || '').trim();
+    if (!text) return null;
+
+    const ariaLabel = target.getAttribute('aria-label') || '';
+    const testId = (
+        target.getAttribute('data-testid') ||
+        target.getAttribute('data-test-id') ||
+        target.getAttribute('data-qa') || ''
+    );
+    const id = target.id && !/^[a-f0-9\\-]{20,}$/i.test(target.id) ? target.id : '';
+    const tagName = target.tagName.toLowerCase();
+    const role = target.getAttribute('role') || '';
+
+    // Look for a nearby label text (previous sibling or wrapping label)
+    let labelText = '';
+    const prev = target.previousElementSibling;
+    if (prev && ['label','span','dt','th','td','p','div','li'].includes(prev.tagName.toLowerCase())) {
+        const prevText = (prev.innerText || prev.textContent || '').trim();
+        if (prevText && prevText !== text && prevText.length < 60) {
+            labelText = prevText;
+        }
+    }
+    if (!labelText) {
+        const wrappingLabel = target.closest('label');
+        if (wrappingLabel) {
+            labelText = (wrappingLabel.innerText || '').replace(text, '').trim();
+        }
+    }
+
+    return { text, ariaLabel, testId, id, tagName, role, labelText };
+}
+"""
+
+
+@router.post("/session/{session_id}/extract-at")
+async def extract_at_position(
+    session_id: str,
+    request: ExtractAtRequest,
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    page = rpa_manager.get_page(session_id)
+    if not page:
+        raise HTTPException(status_code=400, detail="No active page for this session")
+
+    try:
+        info = await page.evaluate(_EXTRACT_AT_JS, [request.x, request.y])
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Page evaluate failed: {exc}") from exc
+
+    if not info:
+        raise HTTPException(status_code=400, detail="No element found at position")
+
+    text: str = (info.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Element has no text content")
+
+    # Build a locator object in the format used by generator.py
+    locator: Dict[str, Any] = {}
+    test_id = info.get("testId", "")
+    aria_label = info.get("ariaLabel", "")
+    label_text = info.get("labelText", "")
+    el_id = info.get("id", "")
+    tag = info.get("tagName", "span")
+    role = info.get("role", "")
+
+    if test_id:
+        locator = {"method": "testid", "value": test_id}
+    elif aria_label:
+        locator = {"method": "role", "role": role or tag, "name": aria_label}
+    elif label_text:
+        locator = {"method": "label", "value": label_text}
+    elif el_id:
+        locator = {"method": "css", "value": f"#{el_id}"}
+    else:
+        locator = {"method": "css", "value": tag}
+
+    from backend.rpa.extracted_fields import parse_extracted_fields
+    result_key = f"extract_{len(session.steps) + 1}"
+    fields = parse_extracted_fields(text, locator=locator, result_key=result_key)
+    fields = await _suggest_field_names(fields)
+
+    step_data: Dict[str, Any] = {
+        "action": "extract_text",
+        "target": json.dumps(locator),
+        "value": text,
+        "extracted_fields": fields,
+        "result_key": result_key,
+        "description": f"提取数据: {text[:40].replace(chr(10), ' ')}{'…' if len(text) > 40 else ''}",
+        "source": "record",
+    }
+    step = await rpa_manager.add_step(session_id, step_data)
+    return {"status": "success", "step": step.model_dump()}
+
+
 @router.post("/session/{session_id}/generate")
 async def generate_script(
     session_id: str,
@@ -395,7 +592,12 @@ async def generate_script(
         raise HTTPException(status_code=404, detail="Session not found")
 
     steps = [step.model_dump() for step in session.steps]
-    script = generator.generate_script(steps, request.params, is_local=(settings.storage_backend == "local"))
+    script = generator.generate_script(
+        steps,
+        request.params,
+        is_local=(settings.storage_backend == "local"),
+        extraction_implementation=request.extraction_implementation,
+    )
     return {"status": "success", "script": script}
 
 
@@ -410,7 +612,13 @@ async def test_script(
         raise HTTPException(status_code=404, detail="Session not found")
 
     steps = [step.model_dump() for step in session.steps]
-    script = generator.generate_script(steps, request.params, is_local=(settings.storage_backend == "local"), test_mode=True)
+    script = generator.generate_script(
+        steps,
+        request.params,
+        is_local=(settings.storage_backend == "local"),
+        test_mode=True,
+        extraction_implementation=request.extraction_implementation,
+    )
 
     logs = []
     browser = await get_cdp_connector().get_browser(
@@ -511,7 +719,12 @@ async def save_skill(
         raise HTTPException(status_code=404, detail="Session not found")
 
     steps = [step.model_dump() for step in session.steps]
-    script = generator.generate_script(steps, request.params, is_local=(settings.storage_backend == "local"))
+    script = generator.generate_script(
+        steps,
+        request.params,
+        is_local=(settings.storage_backend == "local"),
+        extraction_implementation=request.extraction_implementation,
+    )
 
     skill_name = await exporter.export_skill(
         user_id=str(current_user.id),
@@ -590,8 +803,12 @@ async def chat_with_assistant(
                 ):
                     evt_type = event.get("event", "message")
                     evt_data = event.get("data", {})
-                    if evt_type == "result" and evt_data.get("success") and evt_data.get("step"):
-                        await rpa_manager.add_step(session_id, evt_data["step"])
+                    if evt_type == "result" and evt_data.get("success"):
+                        if isinstance(evt_data.get("steps"), list) and evt_data["steps"]:
+                            for step_data in evt_data["steps"]:
+                                await rpa_manager.add_step(session_id, step_data)
+                        elif evt_data.get("step"):
+                            await rpa_manager.add_step(session_id, evt_data["step"])
                     yield {
                         "event": evt_type,
                         "data": json.dumps(evt_data, ensure_ascii=False),

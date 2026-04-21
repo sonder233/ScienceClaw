@@ -9,6 +9,7 @@ import {
   Tag,
   ChevronDown,
   ChevronUp,
+  GitBranch,
 } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -48,6 +49,30 @@ interface StepValidation {
   details?: string;
 }
 
+interface ExtractCandidate {
+  kind?: string;
+  selected?: boolean;
+  expression?: string;
+  description?: string;
+  locator_payload?: ParsedLocator | string | null;
+}
+
+interface ExtractedField {
+  name?: string;
+  label?: string;
+  content?: string;
+  source_result_key?: string;
+  locator?: ParsedLocator | string | null;
+  extract_candidates?: ExtractCandidate[];
+}
+
+interface FillMapping {
+  param_name?: string;
+  label?: string;
+  content?: string;
+  source_result_key?: string;
+}
+
 interface StepItem {
   id: string;
   action: string;
@@ -60,6 +85,8 @@ interface StepItem {
   label?: string;
   sensitive?: boolean;
   url?: string;
+  extracted_fields?: ExtractedField[];
+  fill_mappings?: FillMapping[];
 }
 
 interface ParamItem {
@@ -86,9 +113,48 @@ const skillDescription = ref('');
 const generatedScript = ref('');
 const params = ref<ParamItem[]>([]);
 const credentials = ref<CredentialItem[]>([]);
+const extractionImplementation = ref(
+  typeof route.query.extractionImplementation === 'string' ? route.query.extractionImplementation : 'auto'
+);
 const promotingStepIndex = ref<number | null>(null);
+const promotingFieldKey = ref<string | null>(null);
 const expandedStepIndex = ref<number | null>(null);
 const isScriptDrawerOpen = ref(false);
+
+interface DataFlowItem {
+  extractStepIdx: number;
+  extractStepTitle: string;
+  fields: ExtractedField[];
+  usedByFillSteps: Array<{ stepIdx: number; stepTitle: string; mappings: FillMapping[] }>;
+}
+
+const dataFlowItems = computed<DataFlowItem[]>(() => {
+  const items: DataFlowItem[] = [];
+  steps.value.forEach((step, idx) => {
+    if (step.action !== 'extract_text' || !step.extracted_fields?.length) return;
+    const usedBy: DataFlowItem['usedByFillSteps'] = [];
+    steps.value.forEach((fillStep, fillIdx) => {
+      if (!fillStep.fill_mappings?.length) return;
+      const matching = fillStep.fill_mappings.filter(
+        (m) => step.extracted_fields?.some((f) => f.name === m.param_name || f.source_result_key === m.source_result_key)
+      );
+      if (matching.length > 0) {
+        usedBy.push({
+          stepIdx: fillIdx,
+          stepTitle: getStepTitle(fillStep),
+          mappings: matching,
+        });
+      }
+    });
+    items.push({
+      extractStepIdx: idx,
+      extractStepTitle: getStepTitle(step),
+      fields: step.extracted_fields,
+      usedByFillSteps: usedBy,
+    });
+  });
+  return items;
+});
 
 const parseLocator = (raw: unknown): ParsedLocator | null => {
   if (!raw) return null;
@@ -105,6 +171,21 @@ const parseLocator = (raw: unknown): ParsedLocator | null => {
 const shortenText = (value: string, max = 48): string => {
   if (!value) return '';
   return value.length > max ? `${value.slice(0, Math.max(0, max - 1))}…` : value;
+};
+
+const getExtractedFieldLabel = (field: ExtractedField) => field.label || field.name || '变量';
+
+const getExtractedFieldValuePreview = (field: ExtractedField, max = 20) => {
+  const value = String(field.content || '');
+  if (!value) return '空值';
+  return shortenText(value, max);
+};
+
+const getExtractedFieldsSummary = (fields?: ExtractedField[]) => {
+  if (!fields?.length) return '暂无变量';
+  const names = fields.slice(0, 2).map(getExtractedFieldLabel).join('、');
+  const extraCount = fields.length - 2;
+  return extraCount > 0 ? `${names} 等 ${fields.length} 项` : `${names} 共 ${fields.length} 项`;
 };
 
 const getNthBaseLocator = (locator: ParsedLocator) => locator.locator || locator.base;
@@ -162,6 +243,7 @@ const getActionLabel = (action: string) => {
   const map: Record<string, string> = {
     click: '点击',
     fill: '输入',
+    extract_text: '提取数据',
     press: '按键',
     select: '选择',
     navigate: '打开页面',
@@ -181,6 +263,7 @@ const getActionColor = (action: string) => {
   const map: Record<string, string> = {
     click: 'bg-sky-100 dark:bg-sky-900/40 text-sky-700 dark:text-sky-400',
     fill: 'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-400',
+    extract_text: 'bg-cyan-100 dark:bg-cyan-900/40 text-cyan-700 dark:text-cyan-400',
     press: 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400',
     select: 'bg-fuchsia-100 dark:bg-fuchsia-900/40 text-fuchsia-700 dark:text-fuchsia-400',
     navigate: 'bg-orange-100 dark:bg-orange-900/40 text-orange-700 dark:text-orange-400',
@@ -197,6 +280,9 @@ const getActionColor = (action: string) => {
 };
 
 const getValuePreview = (step: StepItem) => {
+  if (step.action === 'extract_text' && step.extracted_fields?.length) {
+    return shortenText(`内容: ${step.extracted_fields.map((field) => field.content || '').filter(Boolean).join(' / ')}`, 40);
+  }
   if (!step.value) return '';
   const display = step.sensitive ? '******' : String(step.value);
   return shortenText(`值: ${display}`, 28);
@@ -256,6 +342,18 @@ const getStepTitle = (step: StepItem) => {
 
 const getStepLocatorSummary = (step: StepItem) => shortenText(formatLocator(step.target || step.label || ''), 72);
 
+const shouldShowStepLocatorCandidates = (step: StepItem) => {
+  if (!step.locator_candidates?.length) return false;
+  if (step.action !== 'extract_text') return true;
+  const hasFieldLevelCandidates = !!step.extracted_fields?.some((field) => field.extract_candidates?.length);
+  return !hasFieldLevelCandidates;
+};
+
+const formatExtractedFieldLocator = (field: ExtractedField) => {
+  const locator = field.locator || null;
+  return locator ? formatLocator(locator) : '无定位器';
+};
+
 const toggleStep = (index: number) => {
   expandedStepIndex.value = expandedStepIndex.value === index ? null : index;
 };
@@ -275,6 +373,32 @@ const promoteLocator = async (stepIndex: number, candidateIndex: number) => {
   } finally {
     promotingStepIndex.value = null;
   }
+};
+
+const promoteExtractCandidate = async (stepIndex: number, fieldIndex: number, candidateIndex: number) => {
+  const key = `${stepIndex}-${fieldIndex}`;
+  if (!sessionId.value || promotingFieldKey.value !== null) return;
+  promotingFieldKey.value = key;
+  error.value = null;
+  try {
+    await apiClient.post(
+      `/rpa/session/${sessionId.value}/step/${stepIndex}/field/${fieldIndex}/extract-candidate`,
+      { candidate_index: candidateIndex },
+    );
+    await loadSession();
+    expandedStepIndex.value = stepIndex;
+  } catch (err: any) {
+    error.value = `切换提取方式失败: ${err.response?.data?.detail || err.message}`;
+  } finally {
+    promotingFieldKey.value = null;
+  }
+};
+
+const updateExtractFieldName = (stepId: string, fieldIndex: number, newName: string) => {
+  const step = steps.value.find((s) => s.id === stepId);
+  if (!step?.extracted_fields) return;
+  const field = step.extracted_fields[fieldIndex];
+  if (field) field.name = newName.trim() || field.name;
 };
 
 const loadCredentials = async () => {
@@ -341,7 +465,7 @@ const loadSession = async () => {
 
     const usedNames = new Set<string>();
     params.value = steps.value
-      .filter((step) => step.action === 'fill' || step.action === 'select')
+      .filter((step) => (step.action === 'fill' || step.action === 'select') && !(step.fill_mappings?.length))
       .map((step, index) => {
         let label = `参数${index + 1}`;
         let semanticName = '';
@@ -415,6 +539,7 @@ const generateScript = async () => {
     error.value = null;
     const resp = await apiClient.post(`/rpa/session/${sessionId.value}/generate`, {
       params: buildParamMap(),
+      extraction_implementation: extractionImplementation.value,
     });
     generatedScript.value = resp.data.script || '';
     isScriptDrawerOpen.value = true;
@@ -433,6 +558,7 @@ const goToTest = () => {
       skillName: skillName.value,
       skillDescription: skillDescription.value,
       params: JSON.stringify(buildParamMap()),
+      extractionImplementation: extractionImplementation.value,
     },
   });
 };
@@ -558,6 +684,47 @@ onMounted(() => {
                       <span v-if="getValuePreview(step)">{{ getValuePreview(step) }}</span>
                       <span v-if="getCandidateSummary(step)">{{ getCandidateSummary(step) }}</span>
                     </div>
+
+                    <details v-if="step.extracted_fields?.length" class="mt-3 rounded-2xl border border-emerald-100 bg-emerald-50/70 dark:border-emerald-900/40 dark:bg-emerald-900/10">
+                      <summary class="cursor-pointer list-none px-3 py-2">
+                        <div class="flex items-center justify-between gap-3">
+                          <div class="min-w-0">
+                            <p class="text-[10px] font-bold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">提取变量</p>
+                            <p class="mt-0.5 truncate text-[11px] text-emerald-700/80 dark:text-emerald-300/80">
+                              {{ getExtractedFieldsSummary(step.extracted_fields) }}
+                            </p>
+                          </div>
+                          <span class="shrink-0 rounded-full bg-white/80 dark:bg-emerald-950/40 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">
+                            {{ step.extracted_fields.length }} 项
+                          </span>
+                        </div>
+                      </summary>
+                      <div class="space-y-1.5 px-3 pb-3">
+                        <div
+                          v-for="(field, fieldIndex) in step.extracted_fields"
+                          :key="`${step.id}-field-${fieldIndex}`"
+                          class="rounded-xl bg-white/85 dark:bg-emerald-950/25 px-2.5 py-1.5 text-[10px] text-emerald-800 dark:text-emerald-200"
+                        >
+                          <div class="flex items-center gap-1.5">
+                            <span class="font-semibold">{{ getExtractedFieldLabel(field) }}</span>
+                            <span class="text-emerald-500">:</span>
+                            <span class="truncate">{{ getExtractedFieldValuePreview(field) }}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </details>
+
+                    <div v-if="step.fill_mappings?.length" class="mt-3 space-y-1">
+                      <div
+                        v-for="(mapping, mappingIndex) in step.fill_mappings"
+                        :key="`${step.id}-mapping-${mappingIndex}`"
+                        class="inline-flex items-center gap-1.5 rounded-full bg-sky-50 dark:bg-sky-900/30 px-2.5 py-1 text-[10px] font-medium text-sky-700 dark:text-sky-300"
+                      >
+                        <span class="font-bold">{{ mapping.label || mapping.param_name }}</span>
+                        <span class="text-sky-400">←</span>
+                        <span class="font-mono">{{ String(mapping.content || '').slice(0, 24) }}</span>
+                      </div>
+                    </div>
                   </div>
 
                   <button
@@ -577,7 +744,7 @@ onMounted(() => {
                 @click.stop
               >
                 <div class="grid gap-3 rounded-2xl bg-white dark:bg-[#272728] p-4 ring-1 ring-[#831bd7]/10">
-                  <div class="grid gap-2 text-sm text-gray-600 dark:text-gray-400">
+                    <div class="grid gap-2 text-sm text-gray-600 dark:text-gray-400">
                     <div class="grid gap-1 sm:grid-cols-[92px_minmax(0,1fr)]">
                       <span class="text-xs font-bold uppercase tracking-wide text-gray-400 dark:text-gray-500">主定位器</span>
                       <span class="break-all font-mono text-xs text-gray-700 dark:text-gray-300">{{ formatLocator(step.target) }}</span>
@@ -599,9 +766,81 @@ onMounted(() => {
                         <span class="text-xs text-gray-600 dark:text-gray-400">{{ step.validation?.details || '无额外说明' }}</span>
                       </div>
                     </div>
-                  </div>
+                    </div>
 
-                  <div v-if="step.locator_candidates?.length" class="space-y-2">
+                    <div v-if="step.extracted_fields?.length" class="grid gap-1 sm:grid-cols-[92px_minmax(0,1fr)]">
+                      <span class="text-xs font-bold uppercase tracking-wide text-gray-400 dark:text-gray-500">提取变量</span>
+                      <div class="space-y-2">
+                        <div
+                          v-for="(field, fieldIndex) in step.extracted_fields"
+                          :key="`${step.id}-expanded-field-${fieldIndex}`"
+                          class="rounded-2xl bg-emerald-50 dark:bg-emerald-900/20 px-3 py-2 text-[11px]"
+                        >
+                          <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+                            <span class="text-emerald-700 dark:text-emerald-300 font-semibold">{{ getExtractedFieldLabel(field) }}</span>
+                            <span class="text-emerald-600 dark:text-emerald-400 font-mono">= {{ field.content || '空值' }}</span>
+                          </div>
+                          <div class="mt-1.5 flex items-center gap-1.5">
+                            <span class="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold">参数名:</span>
+                            <input
+                              :value="field.name"
+                              @change="updateExtractFieldName(step.id, fieldIndex, ($event.target as HTMLInputElement).value)"
+                              class="flex-1 rounded-lg bg-white dark:bg-[#272728] border border-emerald-200 dark:border-emerald-800 px-2 py-0.5 text-[10px] font-mono text-emerald-900 dark:text-emerald-200 outline-none focus:border-[#831bd7]"
+                            />
+                          </div>
+                          <div v-if="field.extract_candidates?.length" class="mt-2 space-y-1.5">
+                            <p class="text-[10px] font-bold text-emerald-600 dark:text-emerald-400">提取方式候选</p>
+                            <div
+                              v-for="(candidate, candidateIndex) in field.extract_candidates"
+                              :key="`cand-${step.id}-${fieldIndex}-${candidateIndex}`"
+                              class="flex items-start gap-2 rounded-xl border px-2.5 py-2"
+                              :class="candidate.selected ? 'border-[#831bd7]/30 bg-[#fbf7ff] dark:bg-[#3d3250]' : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-[#272728]'"
+                            >
+                              <div class="min-w-0 flex-1">
+                                <div class="flex flex-wrap items-center gap-1.5 text-[10px]">
+                                  <span class="rounded bg-gray-100 dark:bg-[#444345] px-1.5 py-0.5 font-semibold uppercase text-gray-600 dark:text-gray-400">{{ candidate.kind }}</span>
+                                  <span v-if="candidate.selected" class="rounded bg-[#831bd7] px-1.5 py-0.5 font-semibold text-white">当前使用</span>
+                                  <span v-if="candidate.description" class="text-gray-400 dark:text-gray-500">{{ candidate.description }}</span>
+                                </div>
+                                <p class="mt-1 break-all font-mono text-[10px] text-gray-700 dark:text-gray-300">{{ candidate.expression }}</p>
+                              </div>
+                              <button
+                                type="button"
+                                class="shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-semibold transition-colors"
+                                :class="candidate.selected ? 'cursor-default border-gray-200 dark:border-gray-700 text-gray-400 dark:text-gray-500' : 'border-[#831bd7]/25 text-[#831bd7] hover:bg-[#831bd7]/5'"
+                                :disabled="candidate.selected || promotingFieldKey !== null"
+                                @click.stop="promoteExtractCandidate(idx, fieldIndex, candidateIndex)"
+                              >
+                                {{ promotingFieldKey === `${idx}-${fieldIndex}` ? '切换中...' : (candidate.selected ? '当前使用' : '使用此方式') }}
+                              </button>
+                            </div>
+                          </div>
+                          <div v-else class="mt-1 break-all font-mono text-[10px] text-emerald-700/70 dark:text-emerald-300/70">
+                            定位器: {{ formatExtractedFieldLocator(field) }}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div v-if="step.fill_mappings?.length" class="grid gap-1 sm:grid-cols-[92px_minmax(0,1fr)]">
+                      <span class="text-xs font-bold uppercase tracking-wide text-gray-400 dark:text-gray-500">变量来源</span>
+                      <div class="space-y-1.5">
+                        <div
+                          v-for="(mapping, mappingIndex) in step.fill_mappings"
+                          :key="`${step.id}-expanded-mapping-${mappingIndex}`"
+                          class="flex items-center gap-2 rounded-2xl bg-sky-50 dark:bg-sky-900/30 px-3 py-2 text-[11px]"
+                        >
+                          <span class="font-semibold text-sky-700 dark:text-sky-300">{{ mapping.label || mapping.param_name }}</span>
+                          <span class="text-sky-500 dark:text-sky-400">←</span>
+                          <span class="font-mono text-sky-600 dark:text-sky-300">{{ mapping.content }}</span>
+                          <span v-if="mapping.source_result_key" class="ml-auto text-[10px] text-sky-400 dark:text-sky-500">
+                            来自 {{ mapping.source_result_key }}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                  <div v-if="shouldShowStepLocatorCandidates(step)" class="space-y-2">
                     <div class="flex items-center justify-between">
                       <p class="text-sm font-bold text-gray-900 dark:text-gray-100">候选定位器</p>
                       <p class="text-xs text-gray-400 dark:text-gray-500">只在当前展开步骤中显示完整列表</p>
@@ -655,6 +894,61 @@ onMounted(() => {
         </section>
 
         <aside class="space-y-4 xl:sticky xl:top-24 xl:self-start">
+
+          <!-- 数据流面板 -->
+          <section v-if="dataFlowItems.length > 0" class="rounded-3xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#272728] p-5 shadow-sm">
+            <div class="flex items-center gap-3 mb-4">
+              <div class="flex h-10 w-10 items-center justify-center rounded-2xl bg-[#eaf4ff] text-sky-600 dark:text-sky-400">
+                <GitBranch :size="18" />
+              </div>
+              <div>
+                <h2 class="text-base font-extrabold">数据流</h2>
+                <p class="text-xs text-gray-500 dark:text-gray-400">提取变量 → 填充对应关系</p>
+              </div>
+            </div>
+            <div class="space-y-4">
+              <div v-for="item in dataFlowItems" :key="item.extractStepIdx" class="rounded-2xl border border-emerald-100 dark:border-emerald-900/40 overflow-hidden">
+                <!-- Extract step header -->
+                <div class="bg-emerald-50 dark:bg-emerald-900/20 px-3 py-2">
+                  <p class="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wide">
+                    步骤 {{ item.extractStepIdx + 1 }} · 提取数据
+                  </p>
+                  <div class="mt-1.5 flex flex-wrap gap-1">
+                    <span
+                      v-for="field in item.fields"
+                      :key="field.name"
+                      class="inline-flex items-center gap-1 rounded-full bg-white dark:bg-[#272728] border border-emerald-200 dark:border-emerald-800 px-2 py-0.5 text-[10px]"
+                    >
+                      <span class="font-mono font-bold text-emerald-700 dark:text-emerald-300">{{ field.name }}</span>
+                      <span class="text-gray-400">=</span>
+                      <span class="text-gray-700 dark:text-gray-300">{{ String(field.content || '').slice(0, 16) }}</span>
+                    </span>
+                  </div>
+                </div>
+                <!-- Fill steps that use this extract -->
+                <div v-if="item.usedByFillSteps.length > 0" class="divide-y divide-gray-100 dark:divide-gray-800">
+                  <div v-for="fill in item.usedByFillSteps" :key="fill.stepIdx" class="px-3 py-2">
+                    <p class="text-[10px] text-gray-400 dark:text-gray-500 font-semibold">步骤 {{ fill.stepIdx + 1 }} · 填充</p>
+                    <div class="mt-1 flex flex-wrap gap-1">
+                      <span
+                        v-for="m in fill.mappings"
+                        :key="m.param_name"
+                        class="inline-flex items-center gap-1 rounded-full bg-sky-50 dark:bg-sky-900/30 px-2 py-0.5 text-[10px] text-sky-700 dark:text-sky-300"
+                      >
+                        <span class="font-mono font-bold">{{ m.param_name }}</span>
+                        <span class="text-sky-400">→</span>
+                        <span>{{ String(m.content || '').slice(0, 16) }}</span>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <div v-else class="px-3 py-2 text-[10px] text-gray-400 dark:text-gray-500">
+                  暂无关联填充步骤
+                </div>
+              </div>
+            </div>
+          </section>
+
           <section class="rounded-3xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#272728] p-5 shadow-sm">
             <div class="flex items-center gap-3">
               <div class="flex h-10 w-10 items-center justify-center rounded-2xl bg-[#f4eaff] text-[#831bd7]">
@@ -680,6 +974,20 @@ onMounted(() => {
                   rows="3"
                   class="w-full resize-none rounded-2xl border border-gray-200 dark:border-gray-700 bg-[#fafafa] dark:bg-[#383739] px-3 py-2.5 text-sm outline-none transition-colors focus:border-[#831bd7] focus:bg-white"
                 />
+              </div>
+              <div class="space-y-1.5">
+                <label class="text-xs font-semibold text-gray-500 dark:text-gray-400">提取代码实现</label>
+                <select
+                  v-model="extractionImplementation"
+                  class="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-[#fafafa] dark:bg-[#383739] px-3 py-2.5 text-sm outline-none transition-colors focus:border-[#831bd7] focus:bg-white"
+                >
+                  <option value="auto">自动选择</option>
+                  <option value="locator">Playwright Locator</option>
+                  <option value="js">JavaScript</option>
+                </select>
+                <p class="text-[11px] text-gray-400 dark:text-gray-500">
+                  保存技能时，提取字段会优先按这个风格生成。
+                </p>
               </div>
             </div>
           </section>
