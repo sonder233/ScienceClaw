@@ -1355,12 +1355,16 @@ def _build_extracted_fields(intent: Dict[str, Any], resolved: Dict[str, Any], ou
         value_text = str(output or field_pair.get("value_text") or "").strip()
         relation = field_pair.get("relation") or {}
         field_name = _coerce_target_hint(intent.get("target_hint")).get("name") or label_text or intent.get("result_key") or "value"
+        
+        element_snapshot = _build_element_snapshot_from_resolved(resolved)
+        
         normalized_name = parse_extracted_fields(
             value_text,
             locator=value_node.get("locator") if isinstance(value_node.get("locator"), dict) else {},
             frame_path=resolved.get("frame_path") or [],
             result_key=str(intent.get("result_key") or ""),
             hint_label=label_text,
+            element_snapshot=element_snapshot,
         )
         if normalized_name:
             field = dict(normalized_name[0])
@@ -1413,13 +1417,69 @@ def _build_extracted_fields(intent: Dict[str, Any], resolved: Dict[str, Any], ou
     frame_path = resolved.get("frame_path") or []
     target_hint = _coerce_target_hint(intent.get("target_hint"))
     hint_label = str(target_hint.get("text") or target_hint.get("name") or "").strip()
+    
+    element_snapshot = _build_element_snapshot_from_resolved(resolved)
+    
     return parse_extracted_fields(
         output,
         locator=locator,
         frame_path=frame_path,
         result_key=str(intent.get("result_key") or ""),
         hint_label=hint_label,
+        element_snapshot=element_snapshot,
     )
+
+
+def _build_element_snapshot_from_resolved(resolved: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot: Dict[str, Any] = {}
+
+    field_pair = resolved.get("field_pair") if isinstance(resolved.get("field_pair"), dict) else {}
+    value_node_hint = field_pair.get("value_node") if isinstance(field_pair.get("value_node"), dict) else {}
+    label_node_hint = field_pair.get("label_node") if isinstance(field_pair.get("label_node"), dict) else {}
+
+    node = (
+        value_node_hint
+        or label_node_hint
+        or resolved.get("content_node")
+        or resolved.get("resolved_target")
+        or resolved.get("actionable_node")
+        or {}
+    )
+
+    if not isinstance(node, dict):
+        node = {}
+
+    snapshot["tagName"] = node.get("tag", "")
+    snapshot["role"] = node.get("role", "")
+    snapshot["classList"] = list(node.get("class_tokens") or [])
+
+    if node.get("name"):
+        snapshot["name"] = node["name"]
+    if node.get("placeholder"):
+        snapshot["placeholder"] = node["placeholder"]
+    if node.get("type"):
+        snapshot["type"] = node["type"]
+    if node.get("id"):
+        snapshot["id"] = node["id"]
+    if node.get("htmlFor"):
+        snapshot["htmlFor"] = node["htmlFor"]
+
+    value_attrs = value_node_hint.get("stable_attrs") if isinstance(value_node_hint.get("stable_attrs"), dict) else {}
+    label_attrs = label_node_hint.get("stable_attrs") if isinstance(label_node_hint.get("stable_attrs"), dict) else {}
+    if value_attrs:
+        snapshot["valueAttrs"] = value_attrs
+    if label_attrs:
+        snapshot["labelAttrs"] = label_attrs
+
+    container = field_pair.get("container") or {}
+    if isinstance(container, dict) and container.get("tag"):
+        snapshot["containerTag"] = container["tag"]
+        snapshot["containerClasses"] = container.get("class_tokens") or container.get("classes", [])
+        container_attrs = container.get("stable_attrs")
+        if isinstance(container_attrs, dict) and container_attrs:
+            snapshot["containerAttrs"] = container_attrs
+
+    return snapshot
 
 
 async def execute_structured_intent(page, intent: Dict[str, Any]) -> Dict[str, Any]:

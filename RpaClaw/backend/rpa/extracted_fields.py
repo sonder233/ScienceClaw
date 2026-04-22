@@ -2,6 +2,11 @@ import json
 import re
 from typing import Any, Dict, List
 
+from backend.rpa.pattern_engine import (
+    analyze_dom_for_pattern,
+    build_enhanced_extract_candidates,
+)
+
 
 def _normalize_whitespace(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
@@ -78,8 +83,16 @@ def build_label_extract_js(label: str) -> str:
     )
 
 
-def build_extract_candidates(label: str) -> List[Dict[str, Any]]:
-    """Build the two standard extraction candidates for a field label."""
+def build_extract_candidates(
+    label: str,
+    element_snapshot: Dict[str, Any] | None = None,
+) -> List[Dict[str, Any]]:
+    if element_snapshot:
+        dom_info = analyze_dom_for_pattern(element_snapshot)
+        enhanced_candidates = build_enhanced_extract_candidates(label, dom_info)
+        if enhanced_candidates:
+            return enhanced_candidates
+    
     return [
         {
             "kind": "playwright_locator",
@@ -136,6 +149,7 @@ def parse_extracted_fields(
     frame_path: List[str] | None = None,
     result_key: str = "",
     hint_label: str = "",
+    element_snapshot: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     text = _normalize_whitespace(output)
     if not text:
@@ -167,7 +181,10 @@ def parse_extracted_fields(
         }
         if cleaned_label and normalized_label != name:
             field["extract_js"] = build_label_extract_js(cleaned_label)
-            field["extract_candidates"] = build_extract_candidates(cleaned_label)
+            field["extract_candidates"] = build_extract_candidates(
+                cleaned_label,
+                element_snapshot=element_snapshot,
+            )
         fields.append(field)
 
     try:

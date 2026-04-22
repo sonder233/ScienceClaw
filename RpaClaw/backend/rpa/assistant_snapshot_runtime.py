@@ -110,6 +110,17 @@ SNAPSHOT_V2_JS = r"""() => {
             attrs.aria_labelledby = labelledBy;
         if (describedBy)
             attrs.aria_describedby = describedBy;
+
+        const schemaAttrNames = ['data-prop', 'data-prop-id', 'data-field', 'data-field-id', 'data-schema-id', 'prop', 'fieldid', 'fieldname'];
+        for (const attrName of schemaAttrNames) {
+            const val = stableAttrValue(el.getAttribute(attrName) || '', 80);
+            if (val && !/\s/.test(val) && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val)) {
+                attrs[attrName] = val;
+            }
+        }
+        const forAttr = stableAttrValue(el.getAttribute('for') || '', 80);
+        if (forAttr)
+            attrs['for'] = forAttr;
         return attrs;
     }
 

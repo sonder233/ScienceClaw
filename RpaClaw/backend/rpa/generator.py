@@ -262,6 +262,12 @@ class StepExecutionError(Exception):
             if not locator:
                 # Parse the locator object from target (stored as JSON string)
                 locator = self._build_locator_for_page(target, scope_var)
+            
+            # Enhance text-based locators to handle multi-match scenarios (e.g., form fields with fake inputs)
+            if 'get_by_text(' in locator or 'get_by_text("' in locator:
+                enhanced_locator = self._enhance_locator_for_robustness(locator, scope_var, action)
+                if enhanced_locator != locator:
+                    locator = enhanced_locator
 
             popup_signal = self._popup_signal(step)
             download_signal = self._download_signal(step)
@@ -418,7 +424,20 @@ class StepExecutionError(Exception):
 
         if not extracted_fields:
             value_var = f"extract_text_value_{step_index + 1}"
-            step_lines.append(f"    {value_var} = ((await {locator}.inner_text()) or '').strip()")
+            if 'get_by_text(' in locator or 'get_by_text("' in locator:
+                step_lines.append("    try:")
+                step_lines.append(f"        {value_var} = ((await {locator}.first.inner_text()) or '').strip()")
+                step_lines.append("    except Exception as _e:")
+                safe_locator = locator.replace("'", "\\'")
+                step_lines.append(f"        elements = await {scope_var}.locator('{safe_locator}').count()")
+                step_lines.append(f"        {value_var} = ''")
+                step_lines.append("        for i in range(min(elements, 3)):")
+                step_lines.append(f"            el_text = ((await {scope_var}.locator('{safe_locator}').nth(i).inner_text()) or '').strip()")
+                step_lines.append("            if el_text and not any(x in str(el_text).lower() for x in ['fake', 'hidden', 'placeholder']):")
+                step_lines.append(f"                {value_var} = el_text")
+                step_lines.append("                break")
+            else:
+                step_lines.append(f"    {value_var} = ((await {locator}.inner_text()) or '').strip()")
             step_lines.append(
                 f'    _results["{result_key}"]["fields"]["value"] = {{"label": "value", "content": {value_var}}}'
             )
@@ -878,12 +897,146 @@ class StepExecutionError(Exception):
         return f'page.locator("{val}")'
 
     def _build_locator_for_page(self, target: str, page_var: str) -> str:
-        locator = self._build_locator(target)
+        locator = PlaywrightGenerator._build_locator(target)
         if page_var == "page":
             return locator
         if locator.startswith("page."):
             return f"{page_var}.{locator[len('page.'):]}"
         return locator
+
+    @staticmethod
+    def _enhance_locator_for_robustness(locator_expr: str, scope_var: str, action: str = "") -> str:
+        """Enhance locators to use abstract/semantic strategies instead of concrete values.
+        
+        This method detects when a locator contains specific business data values
+        (like names, IDs, phone numbers) and replaces them with abstract semantic
+        lookups that remain valid even when the data changes.
+        """
+        import re as _re
+        
+        text_match = _re.search(r'get_by_text\(["\']([^"\']+)["\']\)', locator_expr)
+        if not text_match:
+            return locator_expr
+        
+        search_text = text_match.group(1)
+        
+        if _PlaywrightGenerator._is_concrete_data_value(search_text):
+            if action == "extract_text":
+                abstract_js = _PlaywrightGenerator._build_abstract_extract_js(search_text, scope_var)
+                return f"await {scope_var}.evaluate({abstract_js})"
+            else:
+                abstract_locator = _PlaywrightGenerator._build_abstract_click_locator(search_text, scope_var)
+                return abstract_locator
+        
+        click_enhanced = f"""{scope_var}.locator('div:not([class*="fake"]):not([class*="hidden"]):not([style*="display: none"]).filter(has_text="{search_text}").first"""
+        return click_enhanced
+
+    @staticmethod
+    def _is_concrete_data_value(text: str) -> bool:
+        """Detect if text looks like concrete business data rather than a label.
+        
+        Returns True for:
+        - Chinese names (张伟, 李四, etc.)
+        - Employee IDs (WX1383818, EMP001, etc.)
+        - Phone numbers
+        - Email addresses
+        - Any text that's likely to change between sessions
+        
+        Returns False for:
+        - Field labels (直接主管, 姓名, 电话, etc.)
+        - UI text (提交, 取消, 确认, etc.)
+        - Static labels
+        """
+        import re as _re
+        
+        patterns = [
+            r'^[\u4e00-\u9fa5]{2,4}$',  # Chinese names (2-4 chars)
+            r'^[A-Z]{2}\d{6,}$',  # Employee IDs like WX1383818
+            r'^1[3-9]\d{9}$',  # Phone numbers
+            r'^[\w.-]+@[\w.-]+\.\w+$',  # Emails
+            r'^\d{4}-\d{2}-\d{2}',  # Dates
+            r'^[A-Za-z0-9]{10,}$',  # Long alphanumeric codes
+        ]
+        
+        label_indicators = [
+            '直接主管', '姓名', '电话', '邮箱', '地址', '部门',
+            '职位', '状态', '类型', '编号', '日期', '时间',
+            '提交', '取消', '确认', '保存', '删除', '编辑',
+            '查询', '搜索', '重置', '返回', '首页', '登录',
+            '注册', '下一步', '上一步', '完成',
+        ]
+        
+        is_label = any(indicator in text for indicator in label_indicators)
+        if is_label:
+            return False
+        
+        for pattern in patterns:
+            if _re.match(pattern, text):
+                return True
+        
+        return False
+
+    @staticmethod
+    def _build_abstract_extract_js(concrete_value: str, scope_var: str) -> str:
+        """Build JS code that extracts value using semantic/structural lookup.
+        
+        Instead of using get_by_text("张伟"), this generates code that:
+        1. Finds the field by its label or structural position
+        2. Extracts whatever value is currently there
+        """
+        escaped = concrete_value.replace('\\', '\\\\').replace("'", "\\'").replace('"', '\\"')
+        
+        js_code = f'''() => {{
+    const targetValue = '{escaped}';
+    
+    const formContainers = document.querySelectorAll(
+        '[class*="form-item"], [class*="form-group"], [class*="field"], ' +
+        '[data-prop], fieldset'
+    );
+    
+    for (const container of formContainers) {{
+        const valueEl = container.querySelector(
+            '[class*="display-only__content"], [class*="__content"], ' +
+            '[class*="value"], input:not([type="hidden"]), textarea, select'
+        );
+        
+        if (!valueEl) continue;
+        
+        const currentValue = (valueEl.value || valueEl.textContent || '').trim();
+        if (currentValue) return currentValue;
+    }}
+    
+    const allElements = document.querySelectorAll('*');
+    let bestMatch = null;
+    let bestScore = 0;
+    
+    for (const el of allElements) {{
+        if (el.childElementCount > 0) continue;
+        const text = (el.textContent || '').trim();
+        if (!text) continue;
+        
+        const parent = el.closest('[class*="content"], [class*="control"], [class*="value"]');
+        if (parent && text.length > 0 && text.length < 200) {{
+            if (!bestMatch || text.length < bestScore) {{
+                bestMatch = text;
+                bestScore = text.length;
+            }}
+        }}
+    }}
+    
+    return bestMatch || '';
+}}'''
+        
+        return js_code
+
+    @staticmethod
+    def _build_abstract_click_locator(concrete_value: str, scope_var: str) -> str:
+        """Build an abstract locator for clicking that doesn't rely on specific values."""
+        import re as _re
+        
+        escaped = concrete_value.replace('"', '\\"')
+        
+        return f"""{scope_var}.locator('button, [role="button"], [type="submit"], [type="button"], a[href]').filter(has_text=/{escaped}/).first"""
 
     def _build_adaptive_locator_for_step(self, step: Dict[str, Any], page_var: str) -> Optional[str]:
         ordinal = step.get("ordinal")

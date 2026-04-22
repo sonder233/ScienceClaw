@@ -5518,6 +5518,9 @@ var kAltTextScore = 160;
 var kTextScore = 180;
 var kTitleScore = 200;
 var kTextScoreRegex = 250;
+var kSemanticContainerScore = 90;
+var kRelativePathScore = 130;
+var kAttributeMapScore = 110;
 var kPlaceholderScoreExact = kPlaceholderScore + kExactPenalty;
 var kLabelScoreExact = kLabelScore + kExactPenalty;
 var kRoleWithNameScoreExact = kRoleWithNameScore + kExactPenalty;
@@ -5661,6 +5664,110 @@ function generateSelectorFor(cache, injectedScript, targetElement, options) {
   }
   return result;
 }
+
+function _detectFormDataValuePenalty(element) {
+  const kFormDataPenalty = 9999;
+  
+  const formContainer = element.closest(
+    '[class*="form-item"], [class*="form-group"], [class*="field"], ' +
+    '[data-prop], fieldset, [class*="detail-item"], [class*="info-item"]'
+  );
+  
+  if (!formContainer) return 0;
+  
+  const hasLabelSibling = !!formContainer.querySelector(
+    'label, [class*="label"], [class*="__label"], .field-header, legend, dt, th'
+  );
+  
+  const isInValueArea = (
+    element.closest('[class*="content"], [class*="control"], [class*="__content"], [class*="value"]') ||
+    element.closest('[class*="display-only"], [class*="input"]') ||
+    (element.nodeName !== 'LABEL' && !element.matches('[class*="label"]'))
+  );
+  
+  const hasDataProp = !!formContainer.getAttribute('data-prop');
+  
+  if (hasLabelSibling && isInValueArea) {
+    return kFormDataPenalty;
+  }
+  
+  if (hasDataProp && isInValueArea) {
+    return kFormDataPenalty - 100;
+  }
+  
+  return 0;
+}
+
+function buildSemanticContainerCandidates(element) {
+  const candidates = [];
+  
+  const formItemContainer = element.closest('[class*="form-item"], [class*="form-group"], [class*="field"], [data-prop], fieldset');
+  if (formItemContainer) {
+    const dataProp = formItemContainer.getAttribute('data-prop');
+    if (dataProp) {
+      candidates.push({
+        engine: "css",
+        selector: `[data-prop="${quoteCSSAttributeValue(dataProp)}"]`,
+        score: kAttributeMapScore,
+        metadata: { pattern: "business-attribute" }
+      });
+    }
+    
+    const labelInContainer = formItemContainer.querySelector('label[for], .label, [class*="__label"], .field-header > span, legend');
+    if (labelInContainer) {
+      const labelText = (labelInContainer.textContent || '').trim();
+      if (labelText && labelText.length <= 80) {
+        const escapedLabel = escapeForAttributeSelector(labelText, true);
+        candidates.push({
+          engine: "semantic",
+          selector: `${escapeNodeName(formItemContainer)}:has(${labelInContainer.nodeName === 'LABEL' ? 'label' : '[class*="label"], span'}:text("${escapedLabel}"))`,
+          score: kSemanticContainerScore,
+          metadata: { pattern: "form-field-label-value", labelText }
+        });
+      }
+    }
+    
+    const contentArea = formItemContainer.querySelector('[class*="content"], [class*="control"], [class*="__content"]');
+    if (contentArea) {
+      const valueSelectors = [
+        'span[class*="display-only__content"]',
+        'input:not([type="hidden"])',
+        'textarea',
+        '[class*="input"]',
+        '[class*="value"]'
+      ];
+      
+      for (const valueSel of valueSelectors) {
+        const valueEl = contentArea.querySelector(valueSel);
+        if (valueEl === element || element.contains(valueEl) || valueEl.contains(element)) {
+          candidates.push({
+            engine: "css",
+            selector: `${escapeNodeName(formItemContainer)} ${valueSel}`,
+            score: kRelativePathScore,
+            metadata: { pattern: "container-relative-path" }
+          });
+          break;
+        }
+      }
+    }
+  }
+  
+  const labelForAttr = document.querySelector(`label[for="${element.id}"]`);
+  if (labelForAttr) {
+    const labelText = (labelForAttr.textContent || '').trim();
+    if (labelText && labelText.length <= 80) {
+      candidates.push({
+        engine: "internal:label",
+        selector: escapeForTextSelector(labelText, true),
+        score: kLabelScoreExact - 5,
+        metadata: { pattern: "label-for-association" }
+      });
+    }
+  }
+  
+  return candidates;
+}
+
 function buildNoTextCandidates(injectedScript, element, options) {
   const candidates = [];
   {
@@ -5713,6 +5820,10 @@ function buildNoTextCandidates(injectedScript, element, options) {
   }
   if (["INPUT", "TEXTAREA", "SELECT"].includes(element.nodeName) && element.getAttribute("type") !== "hidden")
     candidates.push({ engine: "css", selector: escapeNodeName(element), score: kCSSInputTypeNameScore + 1 });
+  
+  const semanticCandidates = buildSemanticContainerCandidates(element);
+  candidates.push(...semanticCandidates);
+  
   penalizeScoreForLength([candidates]);
   return candidates;
 }
@@ -5720,33 +5831,36 @@ function buildTextCandidates(injectedScript, element, isTargetNode) {
   if (element.nodeName === "SELECT")
     return [];
   const candidates = [];
+  
+  const formDataPenalty = _detectFormDataValuePenalty(element);
+  
   const title = element.getAttribute("title");
   if (title) {
-    candidates.push([{ engine: "internal:attr", selector: `[title=${escapeForAttributeSelector(title, true)}]`, score: kTitleScoreExact }]);
+    candidates.push([{ engine: "internal:attr", selector: `[title=${escapeForAttributeSelector(title, true)}]`, score: kTitleScoreExact + formDataPenalty }]);
     for (const alternative of suitableTextAlternatives(title))
-      candidates.push([{ engine: "internal:attr", selector: `[title=${escapeForAttributeSelector(alternative.text, false)}]`, score: kTitleScore - alternative.scoreBonus }]);
+      candidates.push([{ engine: "internal:attr", selector: `[title=${escapeForAttributeSelector(alternative.text, false)}]`, score: kTitleScore - alternative.scoreBonus + formDataPenalty }]);
   }
   const alt = element.getAttribute("alt");
   if (alt && ["APPLET", "AREA", "IMG", "INPUT"].includes(element.nodeName)) {
-    candidates.push([{ engine: "internal:attr", selector: `[alt=${escapeForAttributeSelector(alt, true)}]`, score: kAltTextScoreExact }]);
+    candidates.push([{ engine: "internal:attr", selector: `[alt=${escapeForAttributeSelector(alt, true)}]`, score: kAltTextScoreExact + formDataPenalty }]);
     for (const alternative of suitableTextAlternatives(alt))
-      candidates.push([{ engine: "internal:attr", selector: `[alt=${escapeForAttributeSelector(alternative.text, false)}]`, score: kAltTextScore - alternative.scoreBonus }]);
+      candidates.push([{ engine: "internal:attr", selector: `[alt=${escapeForAttributeSelector(alternative.text, false)}]`, score: kAltTextScore - alternative.scoreBonus + formDataPenalty }]);
   }
   const text = elementText(injectedScript._evaluator._cacheText, element).normalized;
   const textAlternatives = text ? suitableTextAlternatives(text) : [];
   if (text) {
     if (isTargetNode) {
       if (text.length <= 80)
-        candidates.push([{ engine: "internal:text", selector: escapeForTextSelector(text, true), score: kTextScoreExact }]);
+        candidates.push([{ engine: "internal:text", selector: escapeForTextSelector(text, true), score: kTextScoreExact + formDataPenalty, metadata: { ...(candidates[candidates.length-1]?.[0]?.metadata || {}), isFormDataValue: formDataPenalty > 0 } }]);
       for (const alternative of textAlternatives)
-        candidates.push([{ engine: "internal:text", selector: escapeForTextSelector(alternative.text, false), score: kTextScore - alternative.scoreBonus }]);
+        candidates.push([{ engine: "internal:text", selector: escapeForTextSelector(alternative.text, false), score: kTextScore - alternative.scoreBonus + formDataPenalty }]);
     }
     const cssToken = { engine: "css", selector: escapeNodeName(element), score: kCSSTagNameScore };
     for (const alternative of textAlternatives)
-      candidates.push([cssToken, { engine: "internal:has-text", selector: escapeForTextSelector(alternative.text, false), score: kTextScore - alternative.scoreBonus }]);
+      candidates.push([cssToken, { engine: "internal:has-text", selector: escapeForTextSelector(alternative.text, false), score: kTextScore - alternative.scoreBonus + formDataPenalty }]);
     if (isTargetNode && text.length <= 80) {
       const re = new RegExp("^" + escapeRegExp(text) + "$");
-      candidates.push([cssToken, { engine: "internal:has-text", selector: escapeForTextSelector(re, false), score: kTextScoreRegex }]);
+      candidates.push([cssToken, { engine: "internal:has-text", selector: escapeForTextSelector(re, false), score: kTextScoreRegex + formDataPenalty }]);
     }
   }
   const ariaRole = getAriaRole(element);
