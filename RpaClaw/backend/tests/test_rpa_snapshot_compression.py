@@ -224,17 +224,28 @@ def test_compact_recording_snapshot_uses_clean_mode_when_full_details_fit_budget
     assert compact["mode"] == "clean_snapshot"
     assert compact["sampled_regions"] == []
     assert len(compact["expanded_regions"]) == len(regions)
-    assert {region["region_id"] for region in compact["expanded_regions"]} == {
+    assert {region["internal_ref"]["region_id"] for region in compact["expanded_regions"]} == {
         region["region_id"] for region in regions
     }
+    assert all("region_id" not in region for region in compact["expanded_regions"])
+    assert all("container_id" not in region for region in compact["expanded_regions"])
 
     label_value_region = next(region for region in compact["expanded_regions"] if region["kind"] == "label_value_group")
     assert label_value_region["title"] == "单据基本信息"
-    pairs = label_value_region["pairs"]
+    pairs = label_value_region["evidence"]["pairs"]
     assert any(pair["label"] == "购买人" and pair["value"] == "李雨晨" for pair in pairs)
     assert any(pair["label"] == "使用部门" and pair["value"] == "研发效能组" for pair in pairs)
     assert all("value_locator" in pair for pair in pairs)
     assert any(region["kind"] == "action_group" for region in compact["region_catalogue"])
+
+    table_region = next(region for region in compact["expanded_regions"] if region["kind"] == "table")
+    assert table_region["evidence"]["headers"] == ["物品名称", "数量"]
+    assert table_region["evidence"]["sample_rows"] == [["显示器", "2"]]
+    assert table_region["locator_hints"]
+    assert table_region["locator_hints"][0]["source"] == "table_header"
+    assert "page.locator" in table_region["locator_hints"][0]["expression"]
+    assert "region_id" not in table_region
+    assert "container_id" not in table_region
 
 
 def test_default_char_budget_keeps_medium_detail_snapshot_clean():
@@ -271,7 +282,7 @@ def test_default_char_budget_keeps_medium_detail_snapshot_clean():
             ]
         )
 
-    assert compact_recording_snapshot(snapshot, "提取单据基本信息中的信息", char_budget=12000)["mode"] == "tiered_snapshot"
+    assert compact_recording_snapshot(snapshot, "提取单据基本信息中的信息", char_budget=10000)["mode"] == "tiered_snapshot"
     assert compact_recording_snapshot(snapshot, "提取单据基本信息中的信息")["mode"] == "clean_snapshot"
 
 
@@ -336,12 +347,13 @@ def test_sampled_region_keeps_kind_specific_details():
     sampled_action = _sampled_region(action_region)
     sampled_text = _sampled_region(text_region)
 
-    assert sampled_label_value["pairs"][0]["value_locator"]["method"] == "css"
-    assert sampled_label_value["pairs"][0]["value_locator"]["value"] == '[data-field="buyer"]'
-    assert sampled_table["headers"] == ["鐗╁搧鍚嶇О", "鏁伴噺", "鍗曚綅"]
-    assert sampled_table["sample_rows"] == [["鏄剧ず鍣?", "2", "鍙?"]]
-    assert sampled_action["actions"][0]["locator"]["name"] == "杩斿洖鍒楄〃"
-    assert sampled_text["excerpt"] == "杩欐槸涓€涓櫘閫氭枃鏈钀?"
+    assert sampled_label_value["evidence"]["pairs"][0]["value_locator"]["method"] == "css"
+    assert sampled_label_value["evidence"]["pairs"][0]["value_locator"]["value"] == '[data-field="buyer"]'
+    assert sampled_table["evidence"]["headers"] == ["鐗╁搧鍚嶇О", "鏁伴噺", "鍗曚綅"]
+    assert sampled_table["evidence"]["sample_rows"] == [["鏄剧ず鍣?", "2", "鍙?"]]
+    assert sampled_table["locator_hints"][0]["source"] == "table_header"
+    assert sampled_action["evidence"]["actions"][0]["locator"]["name"] == "杩斿洖鍒楄〃"
+    assert sampled_text["evidence"]["excerpt"] == "杩欐槸涓€涓櫘閫氭枃鏈钀?"
 
 
 def test_region_catalogue_keeps_all_regions_as_summaries():
@@ -595,15 +607,15 @@ def test_tiered_compaction_keeps_full_tier1_details():
 
     assert compact["mode"] == "tiered_snapshot"
     expanded = next(region for region in compact["expanded_regions"] if region["kind"] == "label_value_group")
-    assert expanded["pairs"]
-    assert any(pair["label"] == "购买人" and pair["value"] == "李雨晨" for pair in expanded["pairs"])
-    assert any(pair["label"] == "使用部门" and pair["value"] == "研发效能组" for pair in expanded["pairs"])
+    assert expanded["evidence"]["pairs"]
+    assert any(pair["label"] == "购买人" and pair["value"] == "李雨晨" for pair in expanded["evidence"]["pairs"])
+    assert any(pair["label"] == "使用部门" and pair["value"] == "研发效能组" for pair in expanded["evidence"]["pairs"])
     assert compact["sampled_regions"]
     assert any(
-        "headers" in region or "pairs" in region or "actions" in region or "excerpt" in region
+        {"headers", "pairs", "actions", "excerpt"} & set((region.get("evidence") or {}).keys())
         for region in compact["sampled_regions"]
     )
-    assert {region["region_id"] for region in compact["sampled_regions"]}.isdisjoint(
+    assert {region["internal_ref"]["region_id"] for region in compact["sampled_regions"]}.isdisjoint(
         {region["region_id"] for region in tiers["tier3"]}
     )
     assert all("summary" in region for region in compact["region_catalogue"])

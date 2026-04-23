@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import inspect
 import json
+import linecache
 import logging
 import os
 import re
+import traceback
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
@@ -20,6 +22,9 @@ from .trace_models import RPAAcceptedTrace, RPAAIExecution, RPAPageState, RPATra
 
 
 logger = logging.getLogger(__name__)
+
+
+_GENERATED_CODE_FILENAME = "<recording_runtime_agent>"
 
 
 RECORDING_RUNTIME_SYSTEM_PROMPT = """You operate exactly one RPA recording command.
@@ -40,6 +45,16 @@ Rules:
 - Use expected_effect="navigate" when the user asks to open, go to, enter, visit, or navigate to a target.
 - Use expected_effect="extract" when the user only asks to find, collect, summarize, or return data without opening it.
 - If code is returned, it must define async def run(page, results).
+- 结果返回规则：
+  - `results` 是普通 Python dict，只包含之前已成功步骤的输出结果。
+  - 可以从 `results` 读取历史结果，用于跨步骤引用、整合、过滤、改写或汇总。
+  - 不要在 `run()` 内原地修改 `results`，也不要把当前步骤输出直接写入 `results`。
+  - 如果需要基于已有结果产生新结果，应读取 `results`，使用局部变量构造新的 Python 值，并通过 `return` 返回该新值。
+  - 禁止调用 `results.set(...)`、`results.write(...)`、`results.update(...)` 来保存当前步骤结果。
+  - 禁止通过 `results[...] = ...` 保存当前步骤结果。
+  - 当前步骤产生的数据只能通过 `return` 从 `run(page, results)` 返回。
+  - `output_key` 只是给后置 trace compiler 使用的元数据，不要在生成代码中根据 `output_key` 实现结果存储。
+  - 最终 `_results[output_key] = _result` 由 skill 编译阶段自动生成，录制阶段代码不要实现这件事。
 - Use Python Playwright async APIs.
 - Prefer Playwright locators and page.locator/query_selector_all over page.evaluate.
 - Avoid page.evaluate unless the snippet is short, read-only, and necessary.
@@ -52,11 +67,21 @@ Rules:
 - If an expanded region is a label_value_group and the user asks for field names or values, keep extraction focused on that region or supporting locator evidence instead of scanning every table.
 - Avoid treating tables as the default fallback for field extraction when a more relevant label_value_group is present.
 - snapshot.region_catalogue is page context only.
+- Snapshot 结构契约：
+  - `evidence` 是页面事实，用于理解当前区域的文本、字段、表头、样例行或可操作项。
+  - `locator_hints`、`locator`、`label_locator`、`value_locator`、`actions[].locator` 是可执行定位线索，生成 Playwright 代码时应优先使用这些字段。
+  - `ref`、`internal_ref`、`region_id`、`container_id`、`node_id` 是系统内部引用，只用于诊断和回溯 snapshot，不是 DOM id、CSS selector 或 Playwright locator。
+  - 不要把内部引用改写成 `#...`、`[id=...]` 或其他 selector。
+  - 对表格提取任务，优先使用 `locator_hints`、可见表头、标题文本或角色语义来定位表格，不要使用内部引用作为 selector。
 - Do not include a separate done-check.
 - If extracting data, return structured JSON-serializable Python values.
 - For extract-only commands, do not return null/empty output unless the user explicitly allows empty results.
 - Set allow_empty_output=true only when the user explicitly says no result, empty list, or empty output is acceptable.
 - During repair, treat raw error logs and current page facts as authoritative. Any failure_analysis.hint is advisory only.
+- 修复规则：
+  - 修复时必须优先参考原始错误日志、异常类型、traceback 行号和当前页面事实。
+  - 修复前先判断失败类型：如果失败来自 Python 代码错误，应优先修复对应代码行；如果失败来自页面状态、定位器、空数据或目标区域选择错误，再调整 selector 或取数策略。
+  - 修复时应保持用户原始目标不变，不要把一次局部代码错误扩展成无关的页面流程重写。
 - During repair after a fill/click actionability failure, inspect the page after failure and visible candidates before retrying the selector.
 """
 
@@ -129,7 +154,7 @@ class RecordingRuntimeAgent:
             page_state=before.model_dump(mode="json"),
             plan=first_plan,
             execution_result=first_result,
-            failure_analysis=None if first_result.get("success") else _classify_recording_failure(first_result.get("error")),
+            failure_analysis=None if first_result.get("success") else _known_failure_analysis(first_result.get("error")),
             debug_context=debug_context,
         )
         if first_result.get("success"):
@@ -153,12 +178,25 @@ class RecordingRuntimeAgent:
         failed_snapshot = await _safe_page_snapshot(page)
         compact_failed_snapshot = _compact_snapshot(failed_snapshot, instruction)
         first_error = str(first_result.get("error") or "recording command failed")
+        first_error_type = str(first_result.get("error_type") or "").strip()
+        first_traceback = str(first_result.get("traceback") or "").strip()
         first_failure_analysis = _classify_recording_failure(first_error)
+        first_known_failure_analysis = _known_failure_analysis(first_error)
         logger.warning(
             "[RPA] recording command first attempt failed type=%s error=%s",
             first_failure_analysis.get("type", "unknown"),
             first_error[:300],
         )
+        repair_snapshot_extra = {
+            "failed_plan": _safe_jsonable(first_plan),
+            "error": first_error,
+        }
+        if first_error_type:
+            repair_snapshot_extra["error_type"] = first_error_type
+        if first_traceback:
+            repair_snapshot_extra["traceback"] = first_traceback
+        if first_known_failure_analysis:
+            repair_snapshot_extra["failure_analysis"] = first_known_failure_analysis
         _write_recording_snapshot_debug(
             "repair",
             instruction=instruction,
@@ -167,35 +205,43 @@ class RecordingRuntimeAgent:
             compact_snapshot=compact_failed_snapshot,
             runtime_results=runtime_results,
             debug_context=debug_context,
-            extra={
-                "failed_plan": _safe_jsonable(first_plan),
-                "error": first_error,
-                "failure_analysis": first_failure_analysis,
-            },
+            extra=repair_snapshot_extra,
         )
+        diagnostic_raw = {
+            "plan": _safe_jsonable(first_plan),
+            "result": _safe_jsonable(first_result),
+            "page_after_failure": failed_page.model_dump(mode="json"),
+            "snapshot_after_failure": _safe_jsonable(compact_failed_snapshot),
+        }
+        if first_error_type:
+            diagnostic_raw["error_type"] = first_error_type
+        if first_traceback:
+            diagnostic_raw["traceback"] = first_traceback
+        if first_known_failure_analysis:
+            diagnostic_raw["failure_analysis"] = first_known_failure_analysis
         diagnostics = [
             RPATraceDiagnostic(
                 source="ai",
                 message=first_error,
-                raw={
-                    "plan": _safe_jsonable(first_plan),
-                    "result": _safe_jsonable(first_result),
-                    "page_after_failure": failed_page.model_dump(mode="json"),
-                    "snapshot_after_failure": _safe_jsonable(compact_failed_snapshot),
-                    "failure_analysis": first_failure_analysis,
-                },
+                raw=diagnostic_raw,
             )
         ]
 
+        repair_context = {
+            "error": first_error,
+            "failed_plan": first_plan,
+            "page_after_failure": failed_page.model_dump(mode="json"),
+            "snapshot_after_failure": compact_failed_snapshot,
+        }
+        if first_error_type:
+            repair_context["error_type"] = first_error_type
+        if first_traceback:
+            repair_context["traceback"] = first_traceback
+        if first_known_failure_analysis:
+            repair_context["failure_analysis"] = first_known_failure_analysis
         repair_payload = {
             **payload,
-            "repair": {
-                "error": first_error,
-                "failed_plan": first_plan,
-                "page_after_failure": failed_page.model_dump(mode="json"),
-                "snapshot_after_failure": compact_failed_snapshot,
-                "failure_analysis": first_failure_analysis,
-            },
+            "repair": repair_context,
         }
         repair_plan = await self.planner(repair_payload)
         repair_result = await self.executor(page, repair_plan, runtime_results)
@@ -212,7 +258,7 @@ class RecordingRuntimeAgent:
             page_state=failed_page.model_dump(mode="json"),
             plan=repair_plan,
             execution_result=repair_result,
-            failure_analysis=None if repair_result.get("success") else _classify_recording_failure(repair_result.get("error")),
+            failure_analysis=None if repair_result.get("success") else _known_failure_analysis(repair_result.get("error")),
             debug_context=debug_context,
         )
         if repair_result.get("success"):
@@ -234,21 +280,30 @@ class RecordingRuntimeAgent:
             )
 
         repair_error = str(repair_result.get("error") or "recording command repair failed")
+        repair_error_type = str(repair_result.get("error_type") or "").strip()
+        repair_traceback = str(repair_result.get("traceback") or "").strip()
         repair_failure_analysis = _classify_recording_failure(repair_error)
+        repair_known_failure_analysis = _known_failure_analysis(repair_error)
         logger.warning(
             "[RPA] recording command repair failed type=%s error=%s",
             repair_failure_analysis.get("type", "unknown"),
             repair_error[:300],
         )
+        repair_diagnostic_raw = {
+            "plan": _safe_jsonable(repair_plan),
+            "result": _safe_jsonable(repair_result),
+        }
+        if repair_error_type:
+            repair_diagnostic_raw["error_type"] = repair_error_type
+        if repair_traceback:
+            repair_diagnostic_raw["traceback"] = repair_traceback
+        if repair_known_failure_analysis:
+            repair_diagnostic_raw["failure_analysis"] = repair_known_failure_analysis
         diagnostics.append(
             RPATraceDiagnostic(
                 source="ai",
                 message=repair_error,
-                raw={
-                    "plan": _safe_jsonable(repair_plan),
-                    "result": _safe_jsonable(repair_result),
-                    "failure_analysis": repair_failure_analysis,
-                },
+                raw=repair_diagnostic_raw,
             )
         )
         return RecordingAgentResult(
@@ -339,7 +394,8 @@ class RecordingRuntimeAgent:
             if "async def run(page, results)" not in code:
                 return {"success": False, "error": "plan missing async def run(page, results)", "output": ""}
             namespace: Dict[str, Any] = {}
-            exec(compile(code, "<recording_runtime_agent>", "exec"), namespace, namespace)
+            _cache_generated_code_for_traceback(code)
+            exec(compile(code, _GENERATED_CODE_FILENAME, "exec"), namespace, namespace)
             runner = namespace.get("run")
             if not callable(runner):
                 return {"success": False, "error": "No run(page, results) function defined", "output": ""}
@@ -377,7 +433,13 @@ class RecordingRuntimeAgent:
                 response["navigation_history"] = navigation_history
             return response
         except Exception as exc:
-            return {"success": False, "error": str(exc), "output": ""}
+            return {
+                "success": False,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "traceback": _format_exception_for_repair(exc),
+                "output": "",
+            }
 
 
 def _extract_text(response: Any) -> str:
@@ -505,6 +567,21 @@ def _classify_recording_failure(error: Any) -> Dict[str, str]:
         }
 
     return {"type": "unknown"}
+
+
+def _known_failure_analysis(error: Any) -> Optional[Dict[str, str]]:
+    analysis = _classify_recording_failure(error)
+    return analysis if analysis.get("type") != "unknown" else None
+
+
+def _cache_generated_code_for_traceback(code: str) -> None:
+    lines = [line if line.endswith("\n") else f"{line}\n" for line in code.splitlines()]
+    linecache.cache[_GENERATED_CODE_FILENAME] = (len(code), None, lines, _GENERATED_CODE_FILENAME)
+
+
+def _format_exception_for_repair(exc: BaseException) -> str:
+    formatted = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
+    return formatted or str(exc)
 
 
 def _normalize_result_key(value: Any) -> Optional[str]:

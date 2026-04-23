@@ -29,6 +29,35 @@ def test_compiler_renders_navigation_trace():
     assert "https://github.com/trending" in script
 
 
+def test_compiler_wraps_each_trace_with_trace_level_logging():
+    script = TraceSkillCompiler().generate_script(
+        [
+            RPAAcceptedTrace(
+                trace_type=RPATraceType.NAVIGATION,
+                description="打开趋势页",
+                after_page=RPAPageState(url="https://github.com/trending"),
+            ),
+            RPAAcceptedTrace(
+                trace_type=RPATraceType.DATA_CAPTURE,
+                description="读取标题",
+                output_key="title",
+                output="GitHub Trending",
+            ),
+        ],
+        is_local=True,
+    )
+    body = _execute_body(script)
+
+    assert "_trace_logger = kwargs.get('_on_log')" in body
+    assert "_trace_started_at = _trace_start(_trace_logger, 0, '打开趋势页', current_page)" in body
+    assert "_trace_started_at = _trace_start(_trace_logger, 1, '读取标题', current_page)" in body
+    assert "_trace_error(_trace_logger, 0, '打开趋势页', current_page, _trace_started_at, _trace_exc)" in body
+    assert "_trace_done(_trace_logger, 1, '读取标题', current_page, _trace_started_at)" in body
+    assert "TRACE_START" in script
+    assert "TRACE_DONE" in script
+    assert "TRACE_ERROR" in script
+
+
 def test_compiler_generalizes_highest_star_trace_instead_of_hardcoding_url():
     script = TraceSkillCompiler().generate_script(
         [

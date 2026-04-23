@@ -57,6 +57,41 @@ class TraceSkillCompiler:
             "    if not isinstance(value, list) or not value:",
             "        raise RuntimeError(f'AI trace output {key} is empty')",
             "",
+            "def _trace_page_url(page):",
+            "    try:",
+            "        return str(getattr(page, 'url', '') or '')",
+            "    except Exception:",
+            "        return ''",
+            "",
+            "def _trace_emit(logger, event, index, description, page, started_at=None, error=None):",
+            "    if not callable(logger):",
+            "        return",
+            "    prefix = {'START': 'TRACE_START', 'DONE': 'TRACE_DONE', 'ERROR': 'TRACE_ERROR'}.get(event, f'TRACE_{event}')",
+            "    parts = [f'{prefix} {index}: {description}']",
+            "    if started_at is not None:",
+            "        parts.append(f'duration_ms={(time.perf_counter() - started_at) * 1000:.1f}')",
+            "    page_url = _trace_page_url(page)",
+            "    if page_url:",
+            "        parts.append(f'url={page_url}')",
+            "    if error is not None:",
+            "        message = str(error).replace('\\n', ' ')[:300]",
+            "        parts.append(f'error={type(error).__name__}: {message}')",
+            "    try:",
+            "        logger(' | '.join(parts))",
+            "    except Exception:",
+            "        pass",
+            "",
+            "def _trace_start(logger, index, description, page):",
+            "    started_at = time.perf_counter()",
+            "    _trace_emit(logger, 'START', index, description, page)",
+            "    return started_at",
+            "",
+            "def _trace_done(logger, index, description, page, started_at):",
+            "    _trace_emit(logger, 'DONE', index, description, page, started_at)",
+            "",
+            "def _trace_error(logger, index, description, page, started_at, error):",
+            "    _trace_emit(logger, 'ERROR', index, description, page, started_at, error)",
+            "",
             "def _abs_github_url(href):",
             "    if not href:",
             "        return ''",
@@ -110,12 +145,44 @@ class TraceSkillCompiler:
             '    """Auto-generated skill from RPA trace recording."""',
             "    _results = {}",
             "    current_page = page",
+            "    _trace_logger = kwargs.get('_on_log')",
         ]
         used_output_keys: Dict[str, int] = {}
         for index, trace in enumerate(traces):
-            lines.extend(self._render_trace(index, trace, traces[:index], used_output_keys))
+            trace_lines = self._render_trace(index, trace, traces[:index], used_output_keys)
+            lines.extend(self._wrap_trace_logging(index, trace, trace_lines))
         lines.append("    return _results")
         return lines
+
+    def _wrap_trace_logging(
+        self,
+        index: int,
+        trace: RPAAcceptedTrace,
+        trace_lines: List[str],
+    ) -> List[str]:
+        description = self._trace_log_description(trace)
+        wrapped = [
+            "",
+            f"    _trace_started_at = _trace_start(_trace_logger, {index}, {description!r}, current_page)",
+            "    try:",
+        ]
+        for line in trace_lines:
+            wrapped.append(f"    {line}" if line else "")
+        wrapped.extend(
+            [
+                "    except Exception as _trace_exc:",
+                f"        _trace_error(_trace_logger, {index}, {description!r}, current_page, _trace_started_at, _trace_exc)",
+                "        raise",
+                "    else:",
+                f"        _trace_done(_trace_logger, {index}, {description!r}, current_page, _trace_started_at)",
+            ]
+        )
+        return wrapped
+
+    @staticmethod
+    def _trace_log_description(trace: RPAAcceptedTrace) -> str:
+        text = trace.description or trace.user_instruction or trace.action or trace.trace_type.value
+        return " ".join(str(text or "").split())[:160]
 
     def _render_trace(
         self,
@@ -705,6 +772,7 @@ import asyncio
 import json as _json
 import re
 import sys
+import time
 from playwright.async_api import async_playwright
 
 {execute_skill_func}
@@ -744,6 +812,7 @@ import asyncio
 import json as _json
 import re
 import sys
+import time
 import httpx
 from playwright.async_api import async_playwright
 

@@ -356,31 +356,54 @@ def _build_summary(container: Dict[str, Any], nodes: Sequence[Dict[str, Any]], t
 
 
 def _summary_region(region: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "region_id": region.get("region_id", ""),
-        "container_id": region.get("container_id", ""),
-        "kind": region.get("kind", ""),
-        "title": region.get("title", ""),
-        "summary": region.get("summary", ""),
-        "frame_path": list(region.get("frame_path") or []),
-        "container_kind": region.get("container_kind", ""),
-    }
+    return _llm_region_base(region)
 
 
 def _expanded_region(region: Dict[str, Any]) -> Dict[str, Any]:
-    result = dict(region)
+    result = _llm_region_base(region)
+    result["evidence"] = _region_evidence(region, limit=None)
+    locator_hints = _locator_hints(region)
+    if locator_hints:
+        result["locator_hints"] = locator_hints
     result["mode"] = "expanded"
     return result
 
 
 def _sampled_region(region: Dict[str, Any]) -> Dict[str, Any]:
-    sampled = _summary_region(region)
+    sampled = _llm_region_base(region)
+    sampled["evidence"] = _region_evidence(region, limit=3)
+    locator_hints = _locator_hints(region)
+    if locator_hints:
+        sampled["locator_hints"] = locator_hints[:2]
     sampled["mode"] = "sampled"
+    return sampled
+
+
+def _llm_region_base(region: Dict[str, Any]) -> Dict[str, Any]:
+    region_id = str(region.get("region_id") or "")
+    container_id = str(region.get("container_id") or "")
+    return {
+        "ref": f"region:{region_id}" if region_id else "region:unknown",
+        "kind": region.get("kind", ""),
+        "title": region.get("title", ""),
+        "summary": region.get("summary", ""),
+        "frame_path": list(region.get("frame_path") or []),
+        "internal_ref": {
+            "region_id": region_id,
+            "container_id": container_id,
+        },
+    }
+
+
+def _region_evidence(region: Dict[str, Any], *, limit: Optional[int]) -> Dict[str, Any]:
     kind = _normalize_kind(region.get("kind"))
     if kind == "label_value_group":
-        sampled["pairs"] = []
-        for pair in list(region.get("pairs") or [])[:3]:
-            sampled["pairs"].append(
+        pairs = []
+        pair_items = list(region.get("pairs") or [])
+        if limit is not None:
+            pair_items = pair_items[:limit]
+        for pair in pair_items:
+            pairs.append(
                 {
                     "label": pair.get("label", ""),
                     "value": pair.get("value", ""),
@@ -388,28 +411,83 @@ def _sampled_region(region: Dict[str, Any]) -> Dict[str, Any]:
                     "value_locator": pair.get("value_locator") or {},
                 }
             )
-        return sampled
+        return {"pairs": pairs}
 
     if kind == "table":
-        sampled["headers"] = list(region.get("headers") or [])[:6]
-        sampled["sample_rows"] = [list(row)[:6] for row in list(region.get("sample_rows") or [])[:3]]
-        return sampled
+        row_items = list(region.get("sample_rows") or [])
+        if limit is not None:
+            row_items = row_items[:limit]
+        return {
+            "headers": list(region.get("headers") or [])[:6],
+            "sample_rows": [list(row)[:6] for row in row_items],
+        }
 
     if kind == "action_group":
-        sampled["actions"] = []
-        for action in list(region.get("actions") or [])[:3]:
-            sampled["actions"].append(
+        actions = []
+        action_items = list(region.get("actions") or [])
+        if limit is not None:
+            action_items = action_items[:limit]
+        for action in action_items:
+            actions.append(
                 {
                     "label": action.get("label", ""),
                     "locator": action.get("locator") or {},
                 }
             )
-        return sampled
+        return {"actions": actions}
 
     excerpt = _clean_text(region.get("summary") or region.get("title") or "")
     if excerpt:
-        sampled["excerpt"] = excerpt[:160]
-    return sampled
+        return {"excerpt": excerpt[:160]}
+    return {}
+
+
+def _locator_hints(region: Dict[str, Any]) -> List[Dict[str, Any]]:
+    kind = _normalize_kind(region.get("kind"))
+    if kind == "table":
+        return _table_locator_hints(region)
+    return []
+
+
+def _table_locator_hints(region: Dict[str, Any]) -> List[Dict[str, Any]]:
+    hints: List[Dict[str, Any]] = []
+    headers = [_clean_text(header) for header in list(region.get("headers") or []) if _clean_text(header)]
+    title = _clean_text(region.get("title") or "")
+
+    if headers:
+        primary_header = headers[0]
+        hints.append(
+            {
+                "kind": "playwright",
+                "method": "locator_filter",
+                "expression": f"page.locator('table').filter(has_text={primary_header!r})",
+                "source": "table_header",
+                "purpose": "scope a native table by visible header text",
+            }
+        )
+        if len(headers) > 1:
+            hints.append(
+                {
+                    "kind": "playwright",
+                    "method": "locator_filter",
+                    "expression": f"page.locator('table').filter(has_text={headers[1]!r})",
+                    "source": "table_header",
+                    "purpose": "secondary header fallback for similar tables",
+                }
+            )
+
+    if title and title.lower() not in {"table", "text_section"}:
+        hints.append(
+            {
+                "kind": "playwright",
+                "method": "role",
+                "expression": f"page.get_by_role('table', name={title!r})",
+                "source": "region_title",
+                "purpose": "prefer an accessible table name when the page exposes one",
+            }
+        )
+
+    return hints
 
 
 def _region_relevance(region: Dict[str, Any], instruction: str) -> float:

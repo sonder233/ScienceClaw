@@ -8,6 +8,7 @@ import pytest
 
 from backend.rpa.recording_runtime_agent import (
     RecordingRuntimeAgent,
+    RECORDING_RUNTIME_SYSTEM_PROMPT,
     _classify_recording_failure,
     _parse_json_object,
     _resolve_recording_snapshot_debug_dir,
@@ -42,7 +43,7 @@ def _find_region_with_pair(snapshot, label, value):
     for region in snapshot.get("expanded_regions") or []:
         if region.get("kind") != "label_value_group":
             continue
-        for pair in region.get("pairs") or []:
+        for pair in (region.get("evidence") or {}).get("pairs") or []:
             if pair.get("label") == label and pair.get("value") == value:
                 return region
     return None
@@ -78,6 +79,16 @@ def test_recording_runtime_agent_module_import_does_not_require_llm_stack(monkey
     spec.loader.exec_module(module)
 
     assert hasattr(module, "RecordingRuntimeAgent")
+
+
+def test_recording_runtime_prompt_defines_result_return_contract():
+    assert "`results` 是普通 Python dict" in RECORDING_RUNTIME_SYSTEM_PROMPT
+    assert "只能通过 `return`" in RECORDING_RUNTIME_SYSTEM_PROMPT
+    assert "禁止调用 `results.set(...)`" in RECORDING_RUNTIME_SYSTEM_PROMPT
+    assert "`output_key` 只是给后置 trace compiler 使用的元数据" in RECORDING_RUNTIME_SYSTEM_PROMPT
+    assert "internal_ref" in RECORDING_RUNTIME_SYSTEM_PROMPT
+    assert "不是 DOM id、CSS selector 或 Playwright locator" in RECORDING_RUNTIME_SYSTEM_PROMPT
+    assert "locator_hints" in RECORDING_RUNTIME_SYSTEM_PROMPT
 
 
 def test_recording_snapshot_debug_dir_falls_back_to_backend_settings(monkeypatch):
@@ -146,6 +157,52 @@ async def test_recording_runtime_agent_repairs_once_after_failure():
     assert len(calls) == 2
     assert result.trace.ai_execution.repair_attempted is True
     assert result.diagnostics[0].message == "boom"
+
+
+@pytest.mark.asyncio
+async def test_recording_runtime_agent_repair_payload_has_traceback_and_omits_unknown_failure_analysis():
+    calls = []
+
+    async def planner(payload):
+        calls.append(payload)
+        if "repair" not in payload:
+            return {
+                "description": "Broken result write",
+                "action_type": "run_python",
+                "expected_effect": "extract",
+                "code": (
+                    "async def run(page, results):\n"
+                    "    details = [{'name': 'paper'}]\n"
+                    "    results.set('purchase_details', details)\n"
+                    "    return details"
+                ),
+            }
+        return {
+            "description": "Return extracted result",
+            "action_type": "run_python",
+            "expected_effect": "extract",
+            "output_key": "purchase_details",
+            "code": (
+                "async def run(page, results):\n"
+                "    details = [{'name': 'paper'}]\n"
+                "    return details"
+            ),
+        }
+
+    result = await RecordingRuntimeAgent(planner=planner).run(
+        page=_FakePage(),
+        instruction="extract purchase details",
+        runtime_results={},
+    )
+
+    repair_payload = calls[1]["repair"]
+    assert result.success is True
+    assert "failure_analysis" not in repair_payload
+    assert repair_payload["error"] == "'dict' object has no attribute 'set'"
+    assert repair_payload["error_type"] == "AttributeError"
+    assert "Traceback (most recent call last)" in repair_payload["traceback"]
+    assert "results.set('purchase_details', details)" in repair_payload["traceback"]
+    assert result.diagnostics[0].message == repair_payload["error"]
 
 
 @pytest.mark.asyncio
