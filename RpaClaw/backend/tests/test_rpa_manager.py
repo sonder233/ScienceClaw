@@ -55,7 +55,6 @@ class _FakePage:
         self._title = title
         self.context = context or _FakeContext()
         self.main_frame = SimpleNamespace(url=url)
-        self.frames = []
         self.handlers = {}
         self.bring_to_front_calls = 0
         self.goto_calls = []
