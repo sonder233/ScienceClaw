@@ -63,6 +63,7 @@ class _FakePage:
         self.closed = False
         self.expose_function_calls = []
         self.evaluate_calls = []
+        self.add_init_script_calls = []
 
     async def title(self):
         return self._title
@@ -73,6 +74,10 @@ class _FakePage:
 
     async def evaluate(self, _script):
         self.evaluate_calls.append(_script)
+        return None
+
+    async def add_init_script(self, script=None, path=None):
+        self.add_init_script_calls.append({"script": script, "path": path})
         return None
 
     async def goto(self, url):
@@ -918,6 +923,19 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("var ROLE_MAP =", js)
         self.assertNotIn("function testUnique(", js)
 
+    def test_capture_js_prefers_page_tab_id_payload_when_available(self):
+        js = MANAGER_MODULE.CAPTURE_JS
+        emit_block = js.split("function emit(evt)", 1)[1].split("function emitAction", 1)[0]
+        self.assertIn("if (!evt.tab_id && window.__rpa_tab_id)", emit_block)
+        self.assertIn("evt.tab_id = window.__rpa_tab_id;", emit_block)
+
+    def test_capture_js_uses_document_scoped_install_guard(self):
+        js = MANAGER_MODULE.CAPTURE_JS
+        self.assertIn("var docMarker = '__rpa_capture_installed__';", js)
+        self.assertIn("if (document[docMarker]) return;", js)
+        self.assertIn("document[docMarker] = true;", js)
+        self.assertNotIn("window.__rpa_injected", js)
+
     def test_action_runtime_does_not_immediately_toggle_label_associated_checkbox_clicks(self):
         js = MANAGER_MODULE.PLAYWRIGHT_RECORDER_ACTIONS_PATH.read_text(encoding="utf-8")
         click_block = js.split("addListener('click'", 1)[1].split("addListener('input'", 1)[0]
@@ -962,10 +980,20 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.init_scripts[1]["path"], str(MANAGER_MODULE.PLAYWRIGHT_RECORDER_ACTIONS_PATH))
         self.assertIsNone(context.init_scripts[1]["script"])
         self.assertEqual(context.init_scripts[2]["script"], MANAGER_MODULE.CAPTURE_JS)
+        self.assertEqual(len(first_page.add_init_script_calls), 1)
         self.assertEqual(first_page.expose_function_calls, [])
         self.assertEqual(first_page.evaluate_calls, [])
         self.assertEqual(second_page.expose_function_calls, [])
-        self.assertEqual(second_page.evaluate_calls, [])
+        self.assertEqual(len(second_page.add_init_script_calls), 1)
+        self.assertEqual(
+            second_page.evaluate_calls,
+            [
+                second_page.add_init_script_calls[0]["script"],
+                MANAGER_MODULE.PLAYWRIGHT_RECORDER_RUNTIME_JS,
+                MANAGER_MODULE.PLAYWRIGHT_RECORDER_ACTIONS_JS,
+                MANAGER_MODULE.CAPTURE_JS,
+            ],
+        )
 
     async def test_context_binding_callback_derives_frame_path_from_source_frame(self):
         context = _FakeContext()
@@ -1626,6 +1654,23 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.steps[-1].source_tab_id, source_tab_id)
         self.assertEqual(self.session.steps[-1].target_tab_id, target_tab_id)
         self.assertEqual(self.session.steps[-1].signals["popup"]["target_tab_id"], target_tab_id)
+
+    async def test_register_context_page_bootstraps_current_page_recorder_runtime(self):
+        source_page = _FakePage("https://example.com", "Example")
+        target_page = _FakePage("https://example.com/new", "Popup", context=source_page.context)
+
+        await self.manager.register_page(self.session.id, source_page, make_active=True)
+        await self.manager.register_context_page(self.session.id, target_page, make_active=True)
+
+        self.assertEqual(
+            target_page.evaluate_calls,
+            [
+                target_page.add_init_script_calls[0]["script"],
+                MANAGER_MODULE.PLAYWRIGHT_RECORDER_RUNTIME_JS,
+                MANAGER_MODULE.PLAYWRIGHT_RECORDER_ACTIONS_JS,
+                MANAGER_MODULE.CAPTURE_JS,
+            ],
+        )
 
     async def test_navigation_after_popup_signal_click_is_skipped(self):
         source_page = _FakePage("https://example.com", "Example")
