@@ -17,6 +17,9 @@ from backend.rpa.generator import PlaywrightGenerator
 from backend.rpa.executor import ScriptExecutor
 from backend.rpa.skill_exporter import SkillExporter
 from backend.rpa.assistant import RPAAssistant, RPAReActAgent, _active_agents
+from backend.rpa.recording_runtime_agent import RecordingRuntimeAgent, RecordingAgentResult
+from backend.rpa.trace_recorder import recorded_action_to_trace
+from backend.rpa.trace_skill_compiler import TraceSkillCompiler
 from backend.rpa.cdp_connector import get_cdp_connector
 from backend.rpa.screencast import SessionScreencastController
 from backend.user.dependencies import get_current_user, User
@@ -34,6 +37,7 @@ generator = PlaywrightGenerator()
 executor = ScriptExecutor()
 exporter = SkillExporter()
 assistant = RPAAssistant()
+trace_compiler = TraceSkillCompiler()
 
 
 class StartSessionRequest(BaseModel):
@@ -65,6 +69,59 @@ class NavigateRequest(BaseModel):
 
 class PromoteLocatorRequest(BaseModel):
     candidate_index: int
+
+
+def _generate_session_script(session, params: Dict[str, Any], *, test_mode: bool = False) -> str:
+    if getattr(session, "recorded_actions", None):
+        derived_manual_traces = {
+            trace.trace_id: trace
+            for trace in (recorded_action_to_trace(action) for action in session.recorded_actions)
+        }
+        traces_for_compile = []
+        for trace in getattr(session, "traces", None) or []:
+            if trace.source == "manual" and trace.trace_id in derived_manual_traces:
+                traces_for_compile.append(derived_manual_traces.pop(trace.trace_id))
+            else:
+                traces_for_compile.append(trace)
+        traces_for_compile.extend(derived_manual_traces.values())
+        return trace_compiler.generate_script(
+            traces_for_compile,
+            params,
+            is_local=(settings.storage_backend == "local"),
+            test_mode=test_mode,
+        )
+    if getattr(session, "traces", None):
+        return trace_compiler.generate_script(
+            session.traces,
+            params,
+            is_local=(settings.storage_backend == "local"),
+            test_mode=test_mode,
+        )
+    steps = [step.model_dump() for step in session.steps]
+    return generator.generate_script(
+        steps,
+        params,
+        is_local=(settings.storage_backend == "local"),
+        test_mode=test_mode,
+    )
+
+
+def _ensure_no_unresolved_manual_diagnostics(session) -> None:
+    diagnostics = getattr(session, "recording_diagnostics", None) or []
+    if diagnostics:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{len(diagnostics)} unresolved diagnostics must be resolved before generation",
+        )
+
+
+async def _apply_recording_agent_result(session_id: str, result: RecordingAgentResult) -> None:
+    for diagnostic in result.diagnostics:
+        await rpa_manager.append_trace_diagnostic(session_id, diagnostic)
+    if result.trace:
+        await rpa_manager.append_trace(session_id, result.trace)
+    if result.output_key:
+        rpa_manager.write_runtime_result(session_id, result.output_key, result.output)
 
 
 async def _get_ws_user(websocket: WebSocket) -> User | None:
@@ -390,12 +447,13 @@ async def generate_script(
     request: GenerateRequest = GenerateRequest(),
     current_user: User = Depends(get_current_user),
 ):
+    await rpa_manager.wait_for_pending_events(session_id)
     session = await rpa_manager.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    steps = [step.model_dump() for step in session.steps]
-    script = generator.generate_script(steps, request.params, is_local=(settings.storage_backend == "local"))
+    _ensure_no_unresolved_manual_diagnostics(session)
+    script = _generate_session_script(session, request.params)
     return {"status": "success", "script": script}
 
 
@@ -405,12 +463,14 @@ async def test_script(
     request: GenerateRequest = GenerateRequest(),
     current_user: User = Depends(get_current_user),
 ):
+    await rpa_manager.wait_for_pending_events(session_id)
     session = await rpa_manager.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    _ensure_no_unresolved_manual_diagnostics(session)
     steps = [step.model_dump() for step in session.steps]
-    script = generator.generate_script(steps, request.params, is_local=(settings.storage_backend == "local"), test_mode=True)
+    script = _generate_session_script(session, request.params, test_mode=True)
 
     logs = []
     browser = await get_cdp_connector().get_browser(
@@ -431,6 +491,7 @@ async def test_script(
             browser,
             script,
             on_log=lambda msg: logs.append(msg),
+            timeout=RPA_TEST_TIMEOUT_S,
             session_id=session_id,
             page_registry=rpa_manager._pages,
             session_manager=rpa_manager,
@@ -449,6 +510,7 @@ async def test_script(
             browser,
             script,
             on_log=lambda msg: logs.append(msg),
+            timeout=RPA_TEST_TIMEOUT_S,
             session_id=session_id,
             page_registry=rpa_manager._pages,
             session_manager=rpa_manager,
@@ -506,12 +568,12 @@ async def save_skill(
     request: SaveSkillRequest,
     current_user: User = Depends(get_current_user),
 ):
+    await rpa_manager.wait_for_pending_events(session_id)
     session = await rpa_manager.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    steps = [step.model_dump() for step in session.steps]
-    script = generator.generate_script(steps, request.params, is_local=(settings.storage_backend == "local"))
+    script = _generate_session_script(session, request.params)
 
     skill_name = await exporter.export_skill(
         user_id=str(current_user.id),
@@ -552,7 +614,7 @@ async def chat_with_assistant(
         try:
             rpa_manager.pause_recording(session_id)
 
-            if request.mode == "react":
+            if request.mode == "legacy_react":
                 # Reuse existing agent for this session to preserve history across turns
                 agent = _active_agents.get(session_id)
                 if agent is None:
@@ -580,7 +642,7 @@ async def chat_with_assistant(
                 except Exception:
                     _active_agents.pop(session_id, None)
                     raise
-            else:
+            elif request.mode == "legacy_chat":
                 async for event in assistant.chat(
                     session_id=session_id,
                     page=page,
@@ -596,6 +658,69 @@ async def chat_with_assistant(
                     yield {
                         "event": evt_type,
                         "data": json.dumps(evt_data, ensure_ascii=False),
+                    }
+            else:
+                yield {
+                    "event": "agent_thought",
+                    "data": json.dumps({"text": "Planning one trace-first recording command."}, ensure_ascii=False),
+                }
+                agent = RecordingRuntimeAgent(model_config=model_config)
+                result = await agent.run(
+                    page=page,
+                    instruction=request.message,
+                    runtime_results=session.runtime_results.values,
+                    debug_context={"session_id": session_id},
+                )
+                await _apply_recording_agent_result(session_id, result)
+
+                if result.trace:
+                    code = result.trace.ai_execution.code if result.trace.ai_execution else ""
+                    yield {
+                        "event": "agent_action",
+                        "data": json.dumps(
+                            {"description": result.trace.description, "code": code},
+                            ensure_ascii=False,
+                        ),
+                    }
+                    yield {
+                        "event": "trace_added",
+                        "data": json.dumps(result.trace.model_dump(mode="json"), ensure_ascii=False),
+                    }
+                    yield {
+                        "event": "agent_step_done",
+                        "data": json.dumps(
+                            {
+                                "success": result.success,
+                                "description": result.trace.description,
+                                "output": result.output,
+                                "trace": result.trace.model_dump(mode="json"),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+
+                if result.success:
+                    yield {
+                        "event": "agent_done",
+                        "data": json.dumps(
+                            {
+                                "message": result.message,
+                                "total_steps": len(session.traces),
+                                "trace_count": len(session.traces),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+                else:
+                    yield {
+                        "event": "agent_aborted",
+                        "data": json.dumps(
+                            {
+                                "reason": result.message,
+                                "diagnostics": [d.model_dump(mode="json") for d in result.diagnostics],
+                            },
+                            ensure_ascii=False,
+                        ),
                     }
         except Exception as e:
             logger.error(f"Chat error: {e}")
@@ -644,7 +769,9 @@ async def steps_stream(websocket: WebSocket, session_id: str):
 
     try:
         for step in session.steps:
-            await websocket.send_json({"type": "step", "data": step.model_dump()})
+            await websocket.send_json({"type": "step", "data": step.model_dump(mode="json")})
+        for trace in getattr(session, "traces", []):
+            await websocket.send_json({"type": "trace_added", "data": trace.model_dump(mode="json")})
 
         while True:
             await websocket.receive_text()
