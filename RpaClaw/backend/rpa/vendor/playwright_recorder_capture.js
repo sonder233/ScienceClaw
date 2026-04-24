@@ -163,6 +163,7 @@
         evt.sequence = _eventSequence;
         evt.url = location.href;
         evt.frame_path = getFramePath();
+        if (!evt.tab_id && window.__rpa_tab_id) evt.tab_id = window.__rpa_tab_id;
         window.__rpa_emit(JSON.stringify(evt));
     }
 

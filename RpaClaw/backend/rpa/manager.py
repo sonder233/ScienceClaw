@@ -175,11 +175,14 @@ class RPASessionManager:
             opener_tab_id=opener_tab_id,
         )
 
+        tab_bootstrap_script = self._build_tab_bootstrap_script(tab_id)
+        await page.add_init_script(script=tab_bootstrap_script)
         bridged_context_ids = self._bridged_context_ids.setdefault(session_id, set())
         bootstrap_current_page = id(page.context) in bridged_context_ids
         await self._ensure_context_recorder(session_id, page.context)
         await self._bind_page(session_id, tab_id, page)
         if bootstrap_current_page:
+            await page.evaluate(tab_bootstrap_script)
             await self._bootstrap_page_recorder(page)
 
         if make_active or not self.sessions[session_id].active_tab_id:
@@ -300,6 +303,10 @@ class RPASessionManager:
         if parsed.scheme in {"http", "https"} and not parsed.netloc:
             raise ValueError("Invalid URL")
         return normalized
+
+    @staticmethod
+    def _build_tab_bootstrap_script(tab_id: str) -> str:
+        return f"window.__rpa_tab_id = {json.dumps(tab_id)};"
 
     async def navigate_active_tab(self, session_id: str, url: str) -> Dict[str, str]:
         session = self.sessions.get(session_id)
