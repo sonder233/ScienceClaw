@@ -19,6 +19,7 @@ from backend.rpa.skill_exporter import SkillExporter
 from backend.rpa.assistant import RPAAssistant, RPAReActAgent, _active_agents
 from backend.rpa.recording_runtime_agent import RecordingRuntimeAgent, RecordingAgentResult
 from backend.rpa.trace_recorder import recorded_action_to_trace
+from backend.rpa.trace_models import RPAAcceptedTrace
 from backend.rpa.trace_skill_compiler import TraceSkillCompiler
 from backend.rpa.cdp_connector import get_cdp_connector
 from backend.rpa.screencast import SessionScreencastController
@@ -77,6 +78,7 @@ def _generate_session_script(session, params: Dict[str, Any], *, test_mode: bool
             trace.trace_id: trace
             for trace in (recorded_action_to_trace(action) for action in session.recorded_actions)
         }
+        _merge_recorded_action_trace_metadata(session, derived_manual_traces)
         traces_for_compile = []
         for trace in getattr(session, "traces", None) or []:
             if trace.source == "manual" and trace.trace_id in derived_manual_traces:
@@ -104,6 +106,32 @@ def _generate_session_script(session, params: Dict[str, Any], *, test_mode: bool
         is_local=(settings.storage_backend == "local"),
         test_mode=test_mode,
     )
+
+
+def _merge_recorded_action_trace_metadata(session, derived_manual_traces: Dict[str, RPAAcceptedTrace]) -> None:
+    original_traces = {
+        trace.trace_id: trace
+        for trace in (getattr(session, "traces", None) or [])
+        if getattr(trace, "source", "") == "manual"
+    }
+    steps_by_trace_id = {
+        f"trace-{step.id}": step
+        for step in (getattr(session, "steps", None) or [])
+        if getattr(step, "source", "record") == "record"
+    }
+    for trace_id, derived in derived_manual_traces.items():
+        original = original_traces.get(trace_id)
+        step = steps_by_trace_id.get(trace_id)
+        merged_signals: Dict[str, Any] = {}
+        if original and isinstance(original.signals, dict):
+            merged_signals.update(original.signals)
+        if step and isinstance(step.signals, dict):
+            merged_signals.update(step.signals)
+        if merged_signals:
+            derived.signals = merged_signals
+        if original:
+            derived.before_page = original.before_page
+            derived.after_page = original.after_page
 
 
 def _ensure_no_unresolved_manual_diagnostics(session) -> None:

@@ -185,6 +185,7 @@ class TraceSkillCompiler:
             '    """Auto-generated skill from RPA trace recording."""',
             "    _results = {}",
             "    current_page = page",
+            "    tabs = {}",
             "    _trace_logger = kwargs.get('_on_log')",
         ]
         used_output_keys: Dict[str, int] = {}
@@ -295,6 +296,19 @@ class TraceSkillCompiler:
             lines.append("    # No stable locator was recorded for this manual action.")
             return lines
         expr = _locator_expression("current_page", locator)
+        popup_signal = _trace_signal(trace, "popup")
+        download_signal = _trace_signal(trace, "download")
+        if action in {"click", "press"} and (popup_signal or download_signal):
+            lines.extend(
+                self._render_side_effect_interaction(
+                    action=action,
+                    expr=expr,
+                    value=str(trace.value or ""),
+                    popup_signal=popup_signal,
+                    download_signal=download_signal,
+                )
+            )
+            return lines
         if action == "hover":
             lines.append(f"    await {expr}.hover()")
         elif action == "click":
@@ -313,6 +327,49 @@ class TraceSkillCompiler:
             lines.append(f"    await {expr}.select_option({str(trace.value or '')!r})")
         else:
             lines.append(f"    # Unsupported manual action preserved as no-op: {action}")
+        return lines
+
+    @staticmethod
+    def _render_side_effect_interaction(
+        *,
+        action: str,
+        expr: str,
+        value: str,
+        popup_signal: Dict[str, Any],
+        download_signal: Dict[str, Any],
+    ) -> List[str]:
+        lines: List[str] = []
+        interaction = f"await {expr}.click()" if action == "click" else f"await {expr}.press({value!r})"
+        outer_indent = "    "
+        if download_signal:
+            lines.append(f"{outer_indent}async with current_page.expect_download() as _dl_info:")
+            outer_indent += "    "
+        if popup_signal:
+            lines.append(f"{outer_indent}async with current_page.expect_popup() as popup_info:")
+            outer_indent += "    "
+        lines.append(f"{outer_indent}{interaction}")
+
+        if popup_signal:
+            popup_indent = "    " + ("    " if download_signal else "")
+            target_tab_id = str(popup_signal.get("target_tab_id") or "tab-new")
+            lines.append(f"{popup_indent}new_page = await popup_info.value")
+            lines.append(f"{popup_indent}tabs[{json.dumps(target_tab_id, ensure_ascii=False)}] = new_page")
+            lines.append(f"{popup_indent}current_page = new_page")
+
+        if download_signal:
+            download_name = str(download_signal.get("filename") or value or "file")
+            safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", download_name.split(".")[0]) or "file"
+            lines.extend(
+                [
+                    "    _dl = await _dl_info.value",
+                    "    _dl_dir = kwargs.get('_downloads_dir', '.')",
+                    "    import os as _os; _os.makedirs(_dl_dir, exist_ok=True)",
+                    "    _dl_dest = _os.path.join(_dl_dir, _dl.suggested_filename)",
+                    "    await _dl.save_as(_dl_dest)",
+                    f"    _results[{json.dumps('download_' + safe_name, ensure_ascii=False)}] = {{\"filename\": _dl.suggested_filename, \"path\": _dl_dest}}",
+                ]
+            )
+        lines.append("    await current_page.wait_for_timeout(500)")
         return lines
 
     def _render_data_capture_trace(
@@ -725,6 +782,12 @@ def _locator_expression(scope: str, locator: Dict[str, Any]) -> str:
     if method == "css":
         return f"{scope}.locator({locator.get('value', '')!r}).first"
     return f"{scope}.locator({locator.get('value', 'body')!r}).first"
+
+
+def _trace_signal(trace: RPAAcceptedTrace, name: str) -> Dict[str, Any]:
+    signals = trace.signals if isinstance(trace.signals, dict) else {}
+    signal = signals.get(name)
+    return dict(signal) if isinstance(signal, dict) else {}
 
 
 def _trace_has_random_like_primary_locator(trace: RPAAcceptedTrace) -> bool:

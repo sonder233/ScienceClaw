@@ -2,7 +2,7 @@ import importlib
 
 import pytest
 
-from backend.rpa.manager import RPASession
+from backend.rpa.manager import RPASession, RPAStep
 from backend.rpa.manual_recording_models import ManualActionKind, ManualRecordedAction, ManualRecordingDiagnostic
 from backend.rpa.recording_runtime_agent import RecordingAgentResult
 from backend.rpa.trace_models import RPAAcceptedTrace, RPAAIExecution, RPATraceType
@@ -48,6 +48,36 @@ def test_generate_session_script_uses_recorded_actions_when_present():
     assert "get_by_role('button'" in script or 'get_by_role("button"' in script
     assert 'name="Search"' in script or "name='Search'" in script or "name=\"Search\"" in script
 
+
+def test_generate_session_script_preserves_step_signals_on_recorded_actions():
+    session = RPASession(id="s-popup", user_id="u-popup", sandbox_session_id="sandbox")
+    session.steps.append(
+        RPAStep(
+            id="step-export",
+            action="click",
+            target='{"method": "text", "value": "Export all"}',
+            description='click text("Export all")',
+            signals={"popup": {"source_tab_id": "tab-main", "target_tab_id": "tab-export"}},
+            tab_id="tab-main",
+            source_tab_id="tab-main",
+            target_tab_id="tab-export",
+        )
+    )
+    session.recorded_actions.append(
+        ManualRecordedAction(
+            step_id="step-export",
+            action_kind=ManualActionKind.CLICK,
+            description='click text("Export all")',
+            target={"method": "text", "value": "Export all"},
+            validation={"status": "ok"},
+        )
+    )
+
+    script = ROUTE_MODULE._generate_session_script(session, {}, test_mode=True)
+
+    assert "expect_popup() as popup_info" in script
+    assert 'tabs["tab-export"] = new_page' in script
+    assert "current_page = new_page" in script
 
 def test_generate_session_script_keeps_ai_traces_when_recorded_actions_replace_manual_traces():
     session = RPASession(id="s3", user_id="u3", sandbox_session_id="sandbox")
