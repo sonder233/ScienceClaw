@@ -13,6 +13,13 @@ import {
 import { apiClient } from '@/api/client';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { buildRpaToolEditorLocation } from '@/utils/rpaMcpConvert';
+import {
+  getManualRecordingDiagnostics,
+  getLegacyRpaSteps,
+  mapRpaConfigureDisplaySteps,
+  type RpaRecordingDiagnosticItem,
+  type RpaConfigureStep,
+} from '@/utils/rpaConfigureTimeline';
 
 const router = useRouter();
 const route = useRoute();
@@ -49,7 +56,7 @@ interface StepValidation {
   details?: string;
 }
 
-interface StepItem {
+interface StepItem extends RpaConfigureStep {
   id: string;
   action: string;
   target?: ParsedLocator | string | null;
@@ -61,6 +68,8 @@ interface StepItem {
   label?: string;
   sensitive?: boolean;
   url?: string;
+  source?: string;
+  configurable?: boolean;
 }
 
 interface ParamItem {
@@ -82,14 +91,18 @@ interface CredentialItem {
 }
 
 const steps = ref<StepItem[]>([]);
+const legacySteps = ref<StepItem[]>([]);
+const diagnostics = ref<RpaRecordingDiagnosticItem[]>([]);
 const skillName = ref('');
 const skillDescription = ref('');
 const generatedScript = ref('');
+const scriptGenerating = ref(false);
 const params = ref<ParamItem[]>([]);
 const credentials = ref<CredentialItem[]>([]);
 const promotingStepIndex = ref<number | null>(null);
 const expandedStepIndex = ref<number | null>(null);
 const isScriptDrawerOpen = ref(false);
+const hasDiagnostics = computed(() => diagnostics.value.length > 0);
 
 const parseLocator = (raw: unknown): ParsedLocator | null => {
   if (!raw) return null;
@@ -255,7 +268,10 @@ const getStepTitle = (step: StepItem) => {
   return `${getActionLabel(step.action)} ${formatLocator(step.target || step.label || '')}`;
 };
 
-const getStepLocatorSummary = (step: StepItem) => shortenText(formatLocator(step.target || step.label || ''), 72);
+const getStepLocatorSummary = (step: StepItem) => {
+  if (step.url && !step.target) return shortenText(step.url, 72);
+  return shortenText(formatLocator(step.target || step.label || ''), 72);
+};
 
 const toggleStep = (index: number) => {
   expandedStepIndex.value = expandedStepIndex.value === index ? null : index;
@@ -273,6 +289,28 @@ const promoteLocator = async (stepIndex: number, candidateIndex: number) => {
     expandedStepIndex.value = stepIndex;
   } catch (err: any) {
     error.value = `切换定位器失败: ${err.response?.data?.detail || err.message}`;
+  } finally {
+    promotingStepIndex.value = null;
+  }
+};
+
+const promoteDiagnosticLocator = async (diagnostic: RpaRecordingDiagnosticItem, candidateIndex: number) => {
+  if (diagnostic.stepIndex === null) return;
+  await promoteLocator(diagnostic.stepIndex, candidateIndex);
+};
+
+const deleteDiagnosticStep = async (diagnostic: RpaRecordingDiagnosticItem) => {
+  if (!sessionId.value || diagnostic.stepIndex === null || promotingStepIndex.value !== null) return;
+  promotingStepIndex.value = diagnostic.stepIndex;
+  error.value = null;
+  try {
+    await apiClient.delete(`/rpa/session/${sessionId.value}/step/${diagnostic.stepIndex}`);
+    await loadSession();
+    if (!diagnostics.value.length && !generatedScript.value) {
+      await generateScript({ openDrawer: false });
+    }
+  } catch (err: any) {
+    error.value = `删除待修复步骤失败: ${err.response?.data?.detail || err.message}`;
   } finally {
     promotingStepIndex.value = null;
   }
@@ -336,12 +374,14 @@ const loadSession = async () => {
   try {
     const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
     const session = resp.data.session;
-    steps.value = (session.steps || []) as StepItem[];
+    legacySteps.value = getLegacyRpaSteps(session) as StepItem[];
+    steps.value = mapRpaConfigureDisplaySteps(session) as StepItem[];
+    diagnostics.value = getManualRecordingDiagnostics(session);
     loadFailed.value = false;
     error.value = null;
 
     const usedNames = new Set<string>();
-    params.value = steps.value
+    params.value = legacySteps.value
       .filter((step) => step.action === 'fill' || step.action === 'select')
       .map((step, index) => {
         let label = `参数${index + 1}`;
@@ -377,7 +417,7 @@ const loadSession = async () => {
         };
       });
 
-    const navStep = steps.value.find((step) => !!step.url);
+    const navStep = steps.value.find((step) => !!step.url) || legacySteps.value.find((step) => !!step.url);
     if (navStep?.url) {
       try {
         const url = new URL(navStep.url);
@@ -411,22 +451,36 @@ const buildParamMap = () => {
   return paramMap;
 };
 
-const generateScript = async () => {
+const generateScript = async (options: { openDrawer?: boolean } | Event = { openDrawer: true }) => {
+  const resolvedOptions = options instanceof Event ? { openDrawer: true } : options;
+  if (hasDiagnostics.value) {
+    generatedScript.value = '';
+    isScriptDrawerOpen.value = false;
+    error.value = `还有 ${diagnostics.value.length} 个待修复步骤，修复后才能生成脚本`;
+    return;
+  }
   try {
+    scriptGenerating.value = true;
     error.value = null;
     const resp = await apiClient.post(`/rpa/session/${sessionId.value}/generate`, {
       params: buildParamMap(),
     });
     generatedScript.value = resp.data.script || '';
-    isScriptDrawerOpen.value = true;
+    isScriptDrawerOpen.value = resolvedOptions.openDrawer !== false;
   } catch (err: any) {
     isScriptDrawerOpen.value = false;
     generatedScript.value = '';
     error.value = `生成脚本失败: ${err.response?.data?.detail || err.message}`;
+  } finally {
+    scriptGenerating.value = false;
   }
 };
 
 const goToTest = () => {
+  if (hasDiagnostics.value) {
+    error.value = `还有 ${diagnostics.value.length} 个待修复步骤，修复后才能开始测试`;
+    return;
+  }
   router.push({
     path: '/rpa/test',
     query: {
@@ -446,9 +500,12 @@ const goToMcpToolEditor = () => {
   }));
 };
 
-onMounted(() => {
-  loadSession();
+onMounted(async () => {
+  await loadSession();
   loadCredentials();
+  if (!loadFailed.value && sessionId.value && !hasDiagnostics.value) {
+    await generateScript({ openDrawer: false });
+  }
 });
 </script>
 
@@ -477,7 +534,8 @@ onMounted(() => {
           <button
             type="button"
             @click="generateScript"
-            class="inline-flex items-center gap-2 rounded-full border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#272728] px-4 py-2 text-sm font-semibold text-gray-700 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-[#444345]"
+            :disabled="scriptGenerating || hasDiagnostics"
+            class="inline-flex items-center gap-2 rounded-full border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#272728] px-4 py-2 text-sm font-semibold text-gray-700 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-[#444345] disabled:cursor-not-allowed disabled:opacity-60"
           >
             <Code :size="16" />
             预览脚本
@@ -485,7 +543,8 @@ onMounted(() => {
           <button
             type="button"
             @click="goToTest"
-            class="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-[#831bd7] to-[#ac0089] px-5 py-2 text-sm font-bold text-white shadow-lg shadow-[#831bd7]/20 transition-opacity hover:opacity-95"
+            :disabled="hasDiagnostics"
+            class="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-[#831bd7] to-[#ac0089] px-5 py-2 text-sm font-bold text-white shadow-lg shadow-[#831bd7]/20 transition-opacity hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-60"
           >
             <Play :size="16" />
             开始测试
@@ -521,6 +580,95 @@ onMounted(() => {
               共 {{ steps.length }} 步
             </div>
           </div>
+
+          <section
+            v-if="diagnostics.length"
+            class="rounded-3xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/80 dark:bg-rose-950/20 p-4 shadow-sm"
+          >
+            <div class="flex items-start justify-between gap-3">
+              <div>
+                <h3 class="text-sm font-bold text-rose-700 dark:text-rose-300">待修复步骤</h3>
+                <p class="mt-1 text-xs text-rose-600 dark:text-rose-300/80">
+                  这些步骤还没有形成稳定可回放的事实，修复或删除后才能生成脚本。
+                </p>
+              </div>
+              <span class="rounded-full bg-white/80 dark:bg-rose-950/40 px-3 py-1 text-[11px] font-bold text-rose-700 dark:text-rose-300 ring-1 ring-rose-200 dark:ring-rose-900/60">
+                {{ diagnostics.length }} 个待处理
+              </span>
+            </div>
+
+            <div class="mt-4 space-y-3">
+              <article
+                v-for="diagnostic in diagnostics"
+                :key="diagnostic.id"
+                class="rounded-2xl border border-rose-200/80 dark:border-rose-900/60 bg-white dark:bg-[#272728] p-4"
+              >
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0 flex-1">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <span class="rounded-full bg-rose-100 dark:bg-rose-900/40 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-rose-700 dark:text-rose-300">
+                        {{ getActionLabel(diagnostic.action) }}
+                      </span>
+                      <span
+                        class="rounded-full px-2.5 py-1 text-[10px] font-semibold"
+                        :class="getValidationClass(diagnostic.validation.status)"
+                      >
+                        {{ getValidationLabel(diagnostic.validation.status) }}
+                      </span>
+                    </div>
+                    <h4 class="mt-2 text-sm font-bold text-gray-900 dark:text-gray-100">
+                      {{ diagnostic.description }}
+                    </h4>
+                    <p class="mt-1 text-xs text-rose-700 dark:text-rose-300/80">
+                      {{ diagnostic.validation.details }}
+                    </p>
+                    <p v-if="diagnostic.url" class="mt-2 break-all font-mono text-[11px] text-gray-500 dark:text-gray-400">
+                      {{ diagnostic.url }}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    class="shrink-0 rounded-full border border-rose-200 dark:border-rose-900/60 px-3 py-1.5 text-xs font-semibold text-rose-700 dark:text-rose-300 transition-colors hover:bg-rose-100/80 dark:hover:bg-rose-900/30 disabled:cursor-not-allowed disabled:opacity-60"
+                    :disabled="diagnostic.stepIndex === null || promotingStepIndex === diagnostic.stepIndex"
+                    @click="deleteDiagnosticStep(diagnostic)"
+                  >
+                    {{ promotingStepIndex === diagnostic.stepIndex ? '处理中...' : '删除该步' }}
+                  </button>
+                </div>
+
+                <div v-if="diagnostic.locator_candidates?.length" class="mt-4 space-y-2">
+                  <div
+                    v-for="(candidate, candidateIndex) in diagnostic.locator_candidates"
+                    :key="`${diagnostic.id}-${candidateIndex}`"
+                    class="flex flex-col gap-2 rounded-2xl border border-gray-200 dark:border-gray-700 bg-[#fafafa] dark:bg-[#383739] px-3 py-3 md:flex-row md:items-start md:justify-between"
+                  >
+                    <div class="min-w-0 flex-1">
+                      <div class="flex flex-wrap items-center gap-2 text-[11px]">
+                        <span class="rounded-full bg-gray-100 dark:bg-[#444345] px-2 py-0.5 font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-400">
+                          {{ candidate.kind || 'locator' }}
+                        </span>
+                        <span v-if="candidate.playwright_locator" class="text-gray-400 dark:text-gray-500">Playwright</span>
+                        <span v-if="candidate.selector" class="text-gray-400 dark:text-gray-500">Selector</span>
+                      </div>
+                      <p class="mt-1 break-all font-mono text-xs text-gray-700 dark:text-gray-300">
+                        {{ formatLocator(candidate.locator) }}
+                      </p>
+                      <p v-if="candidate.reason" class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">{{ candidate.reason }}</p>
+                    </div>
+
+                    <button
+                      type="button"
+                      class="shrink-0 rounded-full border border-[#831bd7]/25 px-3 py-1.5 text-xs font-semibold text-[#831bd7] transition-colors hover:bg-[#831bd7]/5 disabled:cursor-not-allowed disabled:opacity-60"
+                      :disabled="diagnostic.stepIndex === null || promotingStepIndex === diagnostic.stepIndex"
+                      @click="promoteDiagnosticLocator(diagnostic, candidateIndex)"
+                    >
+                      {{ promotingStepIndex === diagnostic.stepIndex ? '切换中...' : '使用此定位器' }}
+                    </button>
+                  </div>
+                </div>
+              </article>
+            </div>
+          </section>
 
           <div class="space-y-3">
             <article
@@ -618,7 +766,7 @@ onMounted(() => {
                     </div>
                   </div>
 
-                  <div v-if="step.locator_candidates?.length" class="space-y-2">
+                  <div v-if="step.locator_candidates?.length && step.configurable !== false" class="space-y-2">
                     <div class="flex items-center justify-between">
                       <p class="text-sm font-bold text-gray-900 dark:text-gray-100">候选定位器</p>
                       <p class="text-xs text-gray-400 dark:text-gray-500">只在当前展开步骤中显示完整列表</p>
@@ -672,6 +820,35 @@ onMounted(() => {
         </section>
 
         <aside class="space-y-4 xl:sticky xl:top-24 xl:self-start">
+          <section class="rounded-3xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#272728] p-5 shadow-sm">
+            <div class="flex items-center justify-between gap-3">
+              <div class="min-w-0">
+                <h2 class="text-base font-extrabold">脚本预览</h2>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  {{ scriptGenerating ? '正在生成最终 Skill 脚本...' : (generatedScript ? '已根据录制 trace 生成最终脚本' : '脚本尚未生成') }}
+                </p>
+              </div>
+              <button
+                type="button"
+                class="shrink-0 rounded-full border border-[#831bd7]/25 px-3 py-1.5 text-xs font-semibold text-[#831bd7] transition-colors hover:bg-[#831bd7]/5 disabled:cursor-not-allowed disabled:opacity-50"
+                :disabled="!generatedScript || scriptGenerating || hasDiagnostics"
+                @click="isScriptDrawerOpen = true"
+              >
+                查看完整脚本
+              </button>
+            </div>
+            <div
+              v-if="hasDiagnostics"
+              class="mt-4 rounded-2xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/80 dark:bg-rose-950/20 px-4 py-3 text-xs text-rose-700 dark:text-rose-300"
+            >
+              还有 {{ diagnostics.length }} 个待修复步骤，脚本预览与测试已暂时阻止。
+            </div>
+            <pre
+              v-if="generatedScript"
+              class="mt-4 max-h-56 overflow-auto rounded-2xl bg-[#0f1115] p-3 text-[11px] leading-5 text-emerald-300"
+            ><code>{{ generatedScript.slice(0, 1600) }}{{ generatedScript.length > 1600 ? '\n...' : '' }}</code></pre>
+          </section>
+
           <section class="rounded-3xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#272728] p-5 shadow-sm">
             <div class="flex items-center gap-3">
               <div class="flex h-10 w-10 items-center justify-center rounded-2xl bg-[#f4eaff] text-[#831bd7]">

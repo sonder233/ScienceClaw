@@ -19,6 +19,15 @@ import {
   shouldShowScreencastReconnectNotice,
 } from '@/utils/screencastReconnect';
 import { buildRpaToolEditorLocation } from '@/utils/rpaMcpConvert';
+import {
+  getInitialRpaAgentProgress,
+  getRpaAgentProgressForEvent,
+  type RpaAgentMessageStatus,
+} from '@/utils/rpaAgentProgress';
+import {
+  getManualRecordingDiagnostics,
+  mapRpaConfigureDisplaySteps,
+} from '@/utils/rpaConfigureTimeline';
 
 const router = useRouter();
 const route = useRoute();
@@ -62,6 +71,8 @@ const MOVE_THROTTLE = 50; // 50ms 节流
 const steps = ref<any[]>([
   { id: '0', title: '初始化环境', description: '正在配置沙箱录制环境...', status: 'active' }
 ]);
+const acceptedTraces = ref<any[]>([]);
+const recordingDiagnostics = ref<any[]>([]);
 
 const parseLocator = (raw: unknown) => {
   if (!raw) return null;
@@ -140,12 +151,72 @@ const mapServerSteps = (serverSteps: any[]) => ([
   }))
 ]);
 
+const formatTraceType = (traceType?: string) => {
+  const value = traceType || '';
+  if (value === 'ai_operation') return 'AI Trace';
+  if (value === 'data_capture') return 'Data Capture';
+  if (value === 'dataflow_fill') return 'Dataflow Fill';
+  if (value === 'navigation') return 'Navigation';
+  if (value === 'manual_action') return 'Manual';
+  return value || 'Trace';
+};
+
+const mapServerTraces = (serverTraces: any[]) => ([
+  { id: '0', title: 'Environment ready', description: 'Playwright browser is ready', status: 'completed', deletable: false },
+  ...serverTraces.map((t: any, i: number) => ({
+    id: String(i + 1),
+    title: t.description || t.user_instruction || formatTraceType(t.trace_type),
+    description: t.user_instruction || t.action || formatTraceType(t.trace_type),
+    status: 'completed',
+    source: t.source === 'ai' || t.trace_type === 'ai_operation' ? 'ai' : 'record',
+    traceType: t.trace_type,
+    sensitive: false,
+    deletable: false,
+    locatorSummary: t.locator_candidates?.length ? formatLocator(t.locator_candidates[0]?.locator || t.locator_candidates[0]) : '',
+    frameSummary: t.after_page?.url || '',
+    validationStatus: t.accepted === false ? 'warning' : 'ok',
+    validationDetails: formatTraceType(t.trace_type),
+  }))
+]);
+
+const mapConfigureTimelineSteps = (session: any) => ([
+  { id: '0', title: 'Environment ready', description: 'Playwright browser is ready', status: 'completed', deletable: false },
+  ...mapRpaConfigureDisplaySteps(session).map((step: any, index: number) => ({
+    id: String(index + 1),
+    title: step.description || step.action,
+    description: step.description || step.action,
+    status: 'completed',
+    source: step.source || 'record',
+    sensitive: step.sensitive || false,
+    deletable: step.source !== 'ai',
+    locatorSummary: formatLocator(step.target),
+    frameSummary: formatFramePath(step.frame_path),
+    validationStatus: step.validation?.status || '',
+    validationDetails: step.validation?.details || '',
+  })),
+]);
+
+const refreshTimeline = (session: any) => {
+  const serverSteps = Array.isArray(session?.steps) ? session.steps : [];
+  const serverTraces = Array.isArray(session?.traces) ? session.traces : [];
+  acceptedTraces.value = serverTraces;
+  recordingDiagnostics.value = getManualRecordingDiagnostics(session);
+  if ((Array.isArray(session?.recorded_actions) && session.recorded_actions.length > 0) || serverTraces.length > 0) {
+    steps.value = mapConfigureTimelineSteps(session);
+    return;
+  }
+  if (serverSteps.length > 0) {
+    steps.value = mapServerSteps(serverSteps);
+  }
+};
+
 interface ChatMessage {
   role: 'user' | 'assistant';
   text: string;
   time: string;
   script?: string;
-  status?: 'streaming' | 'executing' | 'done' | 'error';
+  status?: RpaAgentMessageStatus;
+  processingLabel?: string;
   error?: string;
   showCode?: boolean;
   actions?: Array<{ description: string; code: string; showCode?: boolean }>;  // Track agent actions
@@ -158,7 +229,6 @@ interface ChatMessage {
 const chatMessages = ref<ChatMessage[]>([]);
 const newMessage = ref('');
 const sending = ref(false);
-const agentMode = ref(false);
 const agentRunning = ref(false);
 
 interface PendingConfirm {
@@ -193,6 +263,15 @@ const cleanupAssistantText = (text: string, script = '') => {
   }
   return next.trim();
 };
+
+const formatAgentDiagnostics = (diagnostics: any[] = []) => diagnostics
+  .map((item: any) => {
+    const message = String(item?.message || '').trim();
+    const rawError = item?.raw?.result?.error ? String(item.raw.result.error).trim() : '';
+    if (message && rawError && rawError !== message) return `${message}: ${rawError}`;
+    return message || rawError;
+  })
+  .filter(Boolean);
 
 const initSession = async () => {
   try {
@@ -231,10 +310,7 @@ const startPollingSteps = () => {
     if (!sessionId.value) return;
     try {
       const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
-      const serverSteps = resp.data.session?.steps || [];
-      if (serverSteps.length > 0) {
-        steps.value = mapServerSteps(serverSteps);
-      }
+      refreshTimeline(resp.data.session || {});
     } catch (err) {
       // Ignore polling errors
     }
@@ -589,8 +665,7 @@ const deleteStep = async (stepIndex: number) => {
   try {
     await apiClient.delete(`/rpa/session/${sessionId.value}/step/${stepIndex}`);
     const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
-    const serverSteps = resp.data.session?.steps || [];
-    steps.value = mapServerSteps(serverSteps);
+    refreshTimeline(resp.data.session || {});
   } catch (err) {
     console.error('Failed to delete step:', err);
   }
@@ -612,12 +687,19 @@ const sendMessage = async () => {
   const userText = newMessage.value.trim();
   newMessage.value = '';
   sending.value = true;
-  if (agentMode.value) agentRunning.value = true;
+  agentRunning.value = true;
+  const initialProgress = getInitialRpaAgentProgress();
 
   const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   chatMessages.value.push({ role: 'user', text: userText, time: now });
 
-  const assistantMsg: ChatMessage = { role: 'assistant', text: '', time: now, status: 'streaming' };
+  const assistantMsg: ChatMessage = {
+    role: 'assistant',
+    text: '',
+    time: now,
+    status: initialProgress.status,
+    processingLabel: initialProgress.label,
+  };
   chatMessages.value.push(assistantMsg);
   const msgIdx = chatMessages.value.length - 1;
 
@@ -628,12 +710,13 @@ const sendMessage = async () => {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
       },
-      body: JSON.stringify({ message: userText, mode: agentMode.value ? 'react' : 'chat' }),
+      body: JSON.stringify({ message: userText, mode: 'trace_first' }),
     });
 
     if (!resp.ok || !resp.body) {
       chatMessages.value[msgIdx].text = '请求失败，请重试。';
       chatMessages.value[msgIdx].status = 'error';
+      chatMessages.value[msgIdx].processingLabel = '';
       sending.value = false;
       agentRunning.value = false;
       return;
@@ -660,6 +743,11 @@ const sendMessage = async () => {
           if (!raw) continue;
           try {
             const data = JSON.parse(raw);
+            const progress = getRpaAgentProgressForEvent(eventType);
+            if (progress) {
+              chatMessages.value[msgIdx].status = progress.status;
+              chatMessages.value[msgIdx].processingLabel = progress.label;
+            }
             if (eventType === 'message_chunk') {
               chatMessages.value[msgIdx].text += data.text || '';
             } else if (eventType === 'script') {
@@ -679,11 +767,13 @@ const sendMessage = async () => {
               }
             } else if (eventType === 'executing') {
               chatMessages.value[msgIdx].status = 'executing';
+              chatMessages.value[msgIdx].processingLabel = '正在执行浏览器操作...';
               if (!chatMessages.value[msgIdx].text.trim()) {
                 chatMessages.value[msgIdx].text = '代码已生成，正在执行浏览器操作。';
               }
             } else if (eventType === 'result') {
               chatMessages.value[msgIdx].status = data.success ? 'done' : 'error';
+              chatMessages.value[msgIdx].processingLabel = '';
               if (data.error) chatMessages.value[msgIdx].error = data.error;
               if (data.output && data.output !== 'ok' && data.output !== 'None') {
                 chatMessages.value[msgIdx].text += `${chatMessages.value[msgIdx].text ? '\n' : ''}输出: ${data.output}`;
@@ -696,6 +786,10 @@ const sendMessage = async () => {
               if (!chatMessages.value[msgIdx].actions) chatMessages.value[msgIdx].actions = [];
               chatMessages.value[msgIdx].actions!.push({ description: data.description || '', code: data.code || '', showCode: false });
             } else if (eventType === 'agent_step_done') {
+              if (data.trace) {
+                acceptedTraces.value = [...acceptedTraces.value.filter((t: any) => t.trace_id !== data.trace.trace_id), data.trace];
+                steps.value = mapServerTraces(acceptedTraces.value);
+              }
               if (data.step) {
                 const s = data.step;
                 steps.value.push({
@@ -709,18 +803,26 @@ const sendMessage = async () => {
               }
               // Show output if present
               if (data.output) {
-                chatMessages.value[msgIdx].text += `\n✓ 输出：${data.output}`;
+                const outputText = typeof data.output === 'string' ? data.output : JSON.stringify(data.output);
+                chatMessages.value[msgIdx].text += `\nOutput: ${outputText}`;
+              }
+            } else if (eventType === 'trace_added') {
+              if (data?.trace_id) {
+                acceptedTraces.value = [...acceptedTraces.value.filter((t: any) => t.trace_id !== data.trace_id), data];
+                steps.value = mapServerTraces(acceptedTraces.value);
               }
             } else if (eventType === 'confirm_required') {
               pendingConfirm.value = data;
             } else if (eventType === 'agent_done') {
               chatMessages.value[msgIdx].status = 'done';
-              chatMessages.value[msgIdx].text += `\n✅ 任务完成，共执行 ${data.total_steps ?? 0} 步`;
+              const completedCount = data.trace_count ?? data.total_steps ?? Math.max(steps.value.length - 1, 0);
+              chatMessages.value[msgIdx].text += `\nTask completed, accepted ${completedCount} trace(s).`;
               agentRunning.value = false;
               pendingConfirm.value = null;
             } else if (eventType === 'agent_aborted') {
               chatMessages.value[msgIdx].status = 'error';
               chatMessages.value[msgIdx].text += `\n⚠️ Agent 已停止：${data.reason || ''}`;
+              chatMessages.value[msgIdx].diagnostics = formatAgentDiagnostics(data.diagnostics || []);
               agentRunning.value = false;
               pendingConfirm.value = null;
             } else if (eventType === 'error') {
@@ -740,6 +842,7 @@ const sendMessage = async () => {
   } catch (err: any) {
     chatMessages.value[msgIdx].text = `连接失败: ${err.message}`;
     chatMessages.value[msgIdx].status = 'error';
+    chatMessages.value[msgIdx].processingLabel = '';
     agentRunning.value = false;
   } finally {
     sending.value = false;
@@ -792,6 +895,14 @@ const sendMessage = async () => {
           <span class="text-[#831bd7] text-[10px] font-bold bg-[#c384ff]/20 px-2 py-1 rounded-md">{{ steps.length }} 步</span>
         </div>
 
+        <div
+          v-if="recordingDiagnostics.length"
+          class="mb-4 rounded-xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/80 dark:bg-rose-950/20 p-3 text-xs text-rose-700 dark:text-rose-300"
+        >
+          <p class="font-semibold">当前有 {{ recordingDiagnostics.length }} 个待修复步骤</p>
+          <p class="mt-1">这些步骤不会进入 accepted timeline，完成录制后需要在配置页修复或删除。</p>
+        </div>
+
         <div class="space-y-4">
           <div
             v-for="(step, index) in steps"
@@ -808,7 +919,7 @@ const sendMessage = async () => {
               </div>
               <div class="flex items-center gap-1">
                 <button
-                  v-if="index > 0"
+                  v-if="index > 0 && step.deletable !== false"
                   @click="deleteStep(index - 1)"
                   class="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-red-50 rounded"
                   title="删除步骤"
@@ -937,9 +1048,11 @@ const sendMessage = async () => {
               </div>
               <div>
                 <h3 class="text-gray-900 dark:text-gray-100 font-bold text-sm">AI 录制助手</h3>
-                <p class="text-[10px] font-bold" :class="agentRunning ? 'text-orange-500' : 'text-[#831bd7]'">
-                  {{ agentRunning ? 'Agent 运行中...' : (agentMode ? 'Agent 模式' : '已就绪 · 协助录制中') }}
-                </p>
+                <p
+                  class="text-[10px] font-bold"
+                  :class="agentRunning ? 'text-orange-500' : 'text-[#831bd7]'"
+                  v-text="agentRunning ? 'Agent 运行中...' : 'Trace-first 智能录制'"
+                ></p>
               </div>
             </div>
             <div class="flex items-center gap-2">
@@ -948,18 +1061,6 @@ const sendMessage = async () => {
                 @click="abortAgent"
                 class="text-[10px] font-bold text-red-500 border border-red-200 dark:border-red-800 px-2 py-1 rounded-lg hover:bg-red-50 transition-colors"
               >中止</button>
-              <label class="flex items-center gap-1.5 cursor-pointer" :class="agentRunning ? 'opacity-50 pointer-events-none' : ''">
-                <span class="text-[10px] text-gray-500 dark:text-gray-400 font-medium">Agent</span>
-                <div
-                  @click="agentMode = !agentMode"
-                  class="w-8 h-4 rounded-full transition-colors relative"
-                  :class="agentMode ? 'bg-[#831bd7]' : 'bg-gray-300'"
-                >
-                  <div class="w-3 h-3 bg-white dark:bg-[#272728] rounded-full absolute top-0.5 transition-transform shadow-sm"
-                    :class="agentMode ? 'translate-x-4' : 'translate-x-0.5'"
-                  ></div>
-                </div>
-              </label>
             </div>
           </div>
         </div>
@@ -975,13 +1076,13 @@ const sendMessage = async () => {
             :class="msg.role === 'user' ? 'items-end' : 'items-start'"
           >
             <div
-              class="max-w-[85%] p-3 rounded-2xl text-xs leading-relaxed"
+              class="max-w-[85%] min-w-0 overflow-hidden p-3 rounded-2xl text-xs leading-relaxed break-words [overflow-wrap:anywhere]"
               :class="msg.role === 'user' ? 'bg-[#831bd7] text-white rounded-tr-none shadow-md shadow-purple-100' : 'bg-white dark:bg-[#272728] text-gray-700 dark:text-gray-300 rounded-tl-none border border-gray-100 dark:border-gray-800'"
             >
               <!-- Message text with inline code blocks for agent actions -->
               <div v-if="msg.actions && msg.actions.length > 0">
                 <template v-for="(part, pidx) in msg.text.split(/(\[\[CODE_\d+\]\])/)" :key="pidx">
-                  <span v-if="!part.match(/\[\[CODE_(\d+)\]\]/)">{{ part }}</span>
+                  <span v-if="!part.match(/\[\[CODE_(\d+)\]\]/)" class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ part }}</span>
                   <div v-else class="inline-block ml-2">
                     <button
                       @click="msg.actions[codeActionIndex(part)].showCode = !msg.actions[codeActionIndex(part)].showCode"
@@ -994,13 +1095,19 @@ const sendMessage = async () => {
                   </div>
                 </template>
               </div>
-              <div v-else class="whitespace-pre-wrap">{{ msg.text }}</div>
+              <div v-else class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ msg.text }}</div>
               <div v-if="msg.status === 'executing'" class="mt-2 flex items-center gap-1.5 text-[10px] text-[#831bd7] font-medium">
                 <div class="w-2 h-2 rounded-full bg-[#831bd7] animate-pulse"></div>
-                正在执行...
+                <span>{{ msg.processingLabel || '正在执行...' }}</span>
               </div>
               <div v-if="msg.status === 'error' && msg.error" class="mt-2 text-[10px] text-red-500 bg-red-50 dark:bg-red-900/30 p-2 rounded-lg">
                 {{ msg.error }}
+              </div>
+              <div v-if="msg.status === 'error' && msg.diagnostics?.length" class="mt-2 text-[10px] text-red-600 bg-red-50 dark:bg-red-900/30 border border-red-100 dark:border-red-800/60 p-2 rounded-lg space-y-1">
+                <div class="font-bold">失败诊断</div>
+                <div v-for="(diagnostic, didx) in msg.diagnostics" :key="didx" class="font-mono whitespace-pre-wrap break-words">
+                  {{ didx + 1 }}. {{ diagnostic }}
+                </div>
               </div>
               <div v-if="msg.frameSummary || msg.collectionSummary || msg.locatorSummary" class="mt-2 space-y-1 text-[10px] text-gray-500 dark:text-gray-400">
                 <div v-if="msg.frameSummary">
@@ -1016,7 +1123,7 @@ const sendMessage = async () => {
                   <span class="ml-1">{{ msg.locatorSummary }}</span>
                 </div>
               </div>
-              <div v-if="msg.status === 'done' && msg.role === 'assistant' && !agentMode" class="mt-2 flex items-center gap-1 text-[10px] text-green-600 font-medium">
+              <div v-if="msg.status === 'done' && msg.role === 'assistant'" class="mt-2 flex items-center gap-1 text-[10px] text-green-600 font-medium">
                 <CheckCircle :size="10" /> 执行成功
               </div>
               <!-- Legacy script toggle (for non-agent mode) -->
@@ -1052,7 +1159,7 @@ const sendMessage = async () => {
               @keyup.enter="sendMessage"
               :disabled="sending || agentRunning"
               class="w-full bg-white dark:bg-[#272728] border border-gray-200 dark:border-gray-700 rounded-2xl py-3 pl-4 pr-12 text-xs focus:ring-2 focus:ring-[#831bd7] focus:border-transparent shadow-sm placeholder:text-gray-400 outline-none disabled:opacity-50"
-              :placeholder="agentRunning ? 'Agent 运行中...' : (sending ? 'AI 正在处理...' : (agentMode ? '描述目标任务...' : '向助手提问...'))"
+              :placeholder="agentRunning ? 'Agent 运行中...' : (sending ? 'AI 正在处理...' : '描述录制目标或操作...')"
               type="text"
             />
             <button
