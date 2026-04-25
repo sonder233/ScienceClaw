@@ -30,7 +30,7 @@ describe('rpaConfigureTimeline', () => {
         {
           step_id: 'step-search',
           action_kind: 'click',
-          description: '点击 button("Search")',
+          description: 'click button("Search")',
           target: { method: 'role', role: 'button', name: 'Search' },
           validation: { status: 'ok' },
           page_state: { url: 'https://example.test/search' },
@@ -46,7 +46,7 @@ describe('rpaConfigureTimeline', () => {
       stepId: 'step-search',
       traceId: 'trace-step-search',
       action: 'click',
-      description: '点击 button("Search")',
+      description: 'click button("Search")',
       source: 'record',
       url: 'https://example.test/search',
       validation: { status: 'ok', details: 'Accepted manual action' },
@@ -54,10 +54,14 @@ describe('rpaConfigureTimeline', () => {
     expect(displaySteps[0].target).toEqual({ method: 'role', role: 'button', name: 'Search' });
   });
 
-  it('keeps AI traces visible when recorded actions are present', () => {
+  it('keeps AI traces when recorded actions replace manual traces', () => {
     const session = {
       steps: [
-        { id: 'step-search', action: 'click', description: 'legacy click' },
+        {
+          id: 'step-search',
+          action: 'click',
+          description: 'legacy click should only remain for parameterization',
+        },
       ],
       traces: [
         {
@@ -65,37 +69,43 @@ describe('rpaConfigureTimeline', () => {
           trace_type: 'manual_action',
           source: 'manual',
           action: 'click',
-          description: 'derived manual trace should be deduplicated',
+          description: 'legacy manual trace',
         },
         {
-          trace_id: 'trace-ai-project',
+          trace_id: 'trace-ai-select',
           trace_type: 'ai_operation',
           source: 'ai',
-          user_instruction: '抓取第一个项目的信息',
-          description: '抓取第一个项目的信息',
-          output_key: 'selected_project',
+          user_instruction: 'click the first project',
+          description: 'Click first project',
+          after_page: { url: 'https://github.com/example/repo' },
+          ai_execution: { code: 'async def run(page, results):\n    return {}' },
         },
       ],
       recorded_actions: [
         {
           step_id: 'step-search',
           action_kind: 'click',
-          description: 'click search',
+          description: 'click button("Search")',
           target: { method: 'role', role: 'button', name: 'Search' },
           validation: { status: 'ok' },
+          page_state: { url: 'https://example.test/search' },
         },
       ],
     };
 
     const displaySteps = mapRpaConfigureDisplaySteps(session);
 
-    expect(displaySteps).toHaveLength(2);
-    expect(displaySteps.map((step) => step.id)).toEqual(['step-search', 'trace-ai-project']);
+    expect(displaySteps.map((step) => step.description)).toEqual([
+      'click button("Search")',
+      'Click first project',
+    ]);
+    expect(displaySteps.map((step) => step.source)).toEqual(['record', 'ai']);
     expect(displaySteps[1]).toMatchObject({
-      traceId: 'trace-ai-project',
-      source: 'ai',
+      id: 'trace-ai-select',
+      traceId: 'trace-ai-select',
       action: 'ai_operation',
-      description: '抓取第一个项目的信息',
+      url: 'https://github.com/example/repo',
+      validation: { status: 'ok', details: 'AI Trace' },
     });
   });
 
@@ -141,7 +151,7 @@ describe('rpaConfigureTimeline', () => {
         {
           id: 'step-bad',
           action: 'fill',
-          description: '输入 "foo" 到 None',
+          description: 'Input "foo" into None',
           locator_candidates: [{ playwright_locator: 'page.locator(".mystery")', selected: true }],
           url: 'https://example.test/search',
         },
@@ -175,6 +185,28 @@ describe('rpaConfigureTimeline', () => {
   it('allows deleting AI timeline items only when they have stable trace ids', () => {
     expect(isRpaTimelineStepDeletable({ source: 'ai', traceId: 'trace-ai-project' })).toBe(true);
     expect(isRpaTimelineStepDeletable({ source: 'ai' })).toBe(false);
-    expect(isRpaTimelineStepDeletable({ source: 'record', stepId: 'step-search' })).toBe(true);
+    expect(isRpaTimelineStepDeletable({ source: 'record', traceId: 'trace-step-search' })).toBe(true);
+  });
+
+  it('preserves frame path from recorded actions', () => {
+    const session = {
+      recorded_actions: [
+        {
+          step_id: 'step-iframe',
+          action_kind: 'click',
+          description: 'click link("Runoob Note")',
+          target: { method: 'role', role: 'link', name: 'Runoob Note' },
+          frame_path: ['iframe[title="result"]', 'iframe[src="https://www.runoob.com"]'],
+          validation: { status: 'ok' },
+        },
+      ],
+    };
+
+    const displaySteps = mapRpaConfigureDisplaySteps(session);
+
+    expect(displaySteps[0].frame_path).toEqual([
+      'iframe[title="result"]',
+      'iframe[src="https://www.runoob.com"]',
+    ]);
   });
 });

@@ -79,6 +79,39 @@ def test_generate_session_script_preserves_step_signals_on_recorded_actions():
     assert 'tabs["tab-export"] = new_page' in script
     assert "current_page = new_page" in script
 
+def test_generate_session_script_preserves_frame_path_on_recorded_actions():
+    session = RPASession(id="s-frame", user_id="u-frame", sandbox_session_id="sandbox")
+    session.recorded_actions.append(
+        ManualRecordedAction(
+            step_id="step-notes",
+            action_kind=ManualActionKind.CLICK,
+            description='点击 link("菜鸟笔记") 并在新标签页打开',
+            target={"method": "role", "role": "link", "name": "菜鸟笔记"},
+            validation={"status": "ok"},
+            frame_path=["iframe[title='运行结果预览']", "iframe"],
+        )
+    )
+    session.steps.append(
+        RPAStep(
+            id="step-notes",
+            action="click",
+            target='{"method": "role", "role": "link", "name": "菜鸟笔记"}',
+            description='点击 link("菜鸟笔记") 并在新标签页打开',
+            frame_path=["iframe[title='运行结果预览']", "iframe"],
+            signals={"popup": {"source_tab_id": "tab-main", "target_tab_id": "tab-note"}},
+            tab_id="tab-main",
+            source_tab_id="tab-main",
+            target_tab_id="tab-note",
+        )
+    )
+
+    script = ROUTE_MODULE._generate_session_script(session, {}, test_mode=True)
+
+    assert 'frame_scope = current_page.frame_locator("iframe[title=\'运行结果预览\']")' in script
+    assert 'frame_scope = frame_scope.frame_locator("iframe")' in script
+    assert "await frame_scope.get_by_role('link', name='菜鸟笔记', exact=True).click()" in script or 'await frame_scope.get_by_role("link", name="菜鸟笔记", exact=True).click()' in script
+    assert "expect_popup() as popup_info" in script
+
 
 def test_generate_session_script_keeps_ai_traces_when_recorded_actions_replace_manual_traces():
     session = RPASession(id="s3", user_id="u3", sandbox_session_id="sandbox")
@@ -231,7 +264,8 @@ async def test_save_skill_exports_trace_first_recording_meta(monkeypatch):
         assert captured["recording_meta"]["recording_source"] == "trace"
         assert captured["recording_meta"]["traces"][0]["trace_id"] == "trace-ai-1"
         assert captured["recording_meta"]["legacy_steps"][0]["id"] == "legacy-step"
-        assert "steps" not in captured
+        assert captured["steps"][0]["id"] == "trace-ai-1"
+        assert captured["steps"][0]["result_key"] == "result"
     finally:
         manager.sessions.pop(session.id, None)
 
@@ -441,6 +475,49 @@ async def test_test_script_blocks_when_recording_diagnostics_exist():
             await ROUTE_MODULE.test_script(session.id, ROUTE_MODULE.GenerateRequest(), user)
         assert exc_info.value.status_code == 400
         assert "diagnostic" in exc_info.value.detail
+    finally:
+        manager.sessions.pop(session.id, None)
+
+
+@pytest.mark.asyncio
+async def test_save_skill_exports_projected_trace_steps(monkeypatch):
+    manager = ROUTE_MODULE.rpa_manager
+    session = RPASession(id="route-save-trace", user_id="u1", sandbox_session_id="sandbox")
+    session.traces.append(
+        RPAAcceptedTrace(
+            trace_id="trace-ai-select",
+            trace_type=RPATraceType.AI_OPERATION,
+            source="ai",
+            user_instruction="click the first project",
+            description="Click first project",
+            ai_execution=RPAAIExecution(code="async def run(page, results):\n    return {}"),
+        )
+    )
+    manager.sessions[session.id] = session
+    captured: dict = {}
+
+    async def fake_export_skill(**kwargs):
+        captured.update(kwargs)
+        return kwargs["skill_name"]
+
+    monkeypatch.setattr(
+        ROUTE_MODULE,
+        "_generate_session_script",
+        lambda *args, **kwargs: "async def execute_skill(page, **kwargs):\n    return {}",
+    )
+    monkeypatch.setattr(ROUTE_MODULE.exporter, "export_skill", fake_export_skill)
+
+    try:
+        user = type("User", (), {"id": "u1"})()
+        response = await ROUTE_MODULE.save_skill(
+            session.id,
+            ROUTE_MODULE.SaveSkillRequest(skill_name="trace_skill", description="Trace skill", params={}),
+            user,
+        )
+
+        assert response == {"status": "success", "skill_name": "trace_skill"}
+        assert captured["steps"][0]["action"] == "ai_script"
+        assert captured["steps"][0]["rpa_trace"]["trace_id"] == "trace-ai-select"
     finally:
         manager.sessions.pop(session.id, None)
 

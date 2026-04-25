@@ -21,6 +21,7 @@ from backend.rpa.recording_runtime_agent import RecordingRuntimeAgent, Recording
 from backend.rpa.trace_recorder import manual_step_to_trace, recorded_action_to_trace
 from backend.rpa.trace_models import RPAAcceptedTrace
 from backend.rpa.trace_skill_compiler import TraceSkillCompiler
+from backend.rpa.mcp_step_projection import session_to_mcp_steps
 from backend.rpa.cdp_connector import get_cdp_connector
 from backend.rpa.screencast import SessionScreencastController
 from backend.user.dependencies import get_current_user, User
@@ -276,6 +277,8 @@ def _merge_recorded_action_trace_metadata(session, derived_manual_traces: Dict[s
                 derived.output = original.output
         if step:
             _merge_step_metadata_into_trace(derived, step)
+            if not derived.frame_path:
+                derived.frame_path = list(getattr(step, "frame_path", None) or [])
 
 
 def _ensure_no_unresolved_manual_diagnostics(session) -> None:
@@ -772,6 +775,7 @@ async def save_skill(
     _ensure_no_unresolved_manual_diagnostics(session)
     script = _generate_session_script(session, request.params)
     recording_meta = _build_session_recording_meta(session)
+    steps = session_to_mcp_steps(session)
 
     skill_name = await exporter.export_skill(
         user_id=str(current_user.id),
@@ -780,6 +784,7 @@ async def save_skill(
         script=script,
         params=request.params,
         recording_meta=recording_meta,
+        steps=steps,
     )
 
     session.status = "saved"

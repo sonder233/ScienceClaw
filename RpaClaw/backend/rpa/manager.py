@@ -502,14 +502,16 @@ class RPASessionManager:
                     resolved_tab_id = session.active_tab_id if session else None
                 if resolved_tab_id:
                     evt.setdefault("tab_id", resolved_tab_id)
+                reported_frame_path = evt.get("frame_path", []) or []
+                if reported_frame_path:
+                    signals = evt.get("signals")
+                    normalized_signals = dict(signals) if isinstance(signals, dict) else {}
+                    normalized_signals["reported_frame_path"] = list(reported_frame_path)
+                    evt["signals"] = normalized_signals
                 if source_frame:
-                    reported_frame_path = evt.get("frame_path", []) or []
-                    if reported_frame_path:
-                        signals = evt.get("signals")
-                        normalized_signals = dict(signals) if isinstance(signals, dict) else {}
-                        normalized_signals["reported_frame_path"] = list(reported_frame_path)
-                        evt["signals"] = normalized_signals
-                    evt["frame_path"] = await self._build_frame_path(source_frame)
+                    server_frame_path = await self._build_frame_path(source_frame)
+                    if server_frame_path or not reported_frame_path:
+                        evt["frame_path"] = server_frame_path
                 await self._run_tracked_event(session_id, evt)
             except Exception as e:
                 logger.error(f"[RPA] binding emit error: {e}")
@@ -1422,6 +1424,7 @@ class RPASessionManager:
                 action=step.action,
                 description=step.description or "",
                 target=step.target or "",
+                frame_path=step.frame_path,
                 locator_candidates=step.locator_candidates,
                 validation=step.validation,
                 value=step.value,
