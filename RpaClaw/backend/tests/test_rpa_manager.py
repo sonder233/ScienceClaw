@@ -1139,6 +1139,34 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
             ["iframe[title='editor']"],
         )
 
+    async def test_context_binding_callback_keeps_client_frame_path_when_source_frame_is_main(self):
+        context = _FakeContext()
+        page = _FakePage("https://example.com", "Example", context=context)
+        page.main_frame.page = page
+        await self.manager.register_page(self.session.id, page, make_active=True)
+
+        _, binding_callback, _ = context.exposed_bindings[0]
+        reported_frame_path = ["iframe[name='iframeResult']"]
+
+        await binding_callback(
+            SimpleNamespace(page=page, frame=page.main_frame),
+            json.dumps(
+                {
+                    "action": "click",
+                    "tag": "BUTTON",
+                    "timestamp": 1234567890,
+                    "frame_path": reported_frame_path,
+                    "locator": {"method": "role", "role": "button", "name": "Runoob Note"},
+                }
+            ),
+        )
+
+        self.assertEqual(self.session.steps[-1].frame_path, reported_frame_path)
+        self.assertEqual(
+            self.session.steps[-1].signals.get("reported_frame_path"),
+            reported_frame_path,
+        )
+
     async def test_build_frame_path_falls_back_to_frame_name_when_frame_element_fails(self):
         page = _FakePage("https://example.com", "Example")
         outer_frame = _FakeFrame(page, attrs={"name": "workspace"})
