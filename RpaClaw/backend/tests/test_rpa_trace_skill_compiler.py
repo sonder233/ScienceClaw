@@ -31,6 +31,23 @@ def test_compiler_renders_navigation_trace():
     assert "https://github.com/trending" in script
 
 
+def test_compiler_does_not_emit_github_helpers_for_generic_web_trace():
+    script = TraceSkillCompiler().generate_script(
+        [
+            RPAAcceptedTrace(
+                trace_type=RPATraceType.NAVIGATION,
+                after_page=RPAPageState(url="https://example.test/customers/alpha"),
+            )
+        ],
+        is_local=True,
+    )
+
+    assert "https://example.test/customers/alpha" in script
+    assert "github" not in script.lower()
+    assert "_abs_github_url" not in script
+    assert "_github_repo_base" not in script
+
+
 def test_compiler_wraps_each_trace_with_trace_level_logging():
     script = TraceSkillCompiler().generate_script(
         [
@@ -60,7 +77,7 @@ def test_compiler_wraps_each_trace_with_trace_level_logging():
     assert "TRACE_ERROR" in script
 
 
-def test_compiler_generalizes_highest_star_trace_instead_of_hardcoding_url():
+def test_compiler_preserves_highest_star_selection_as_runtime_ai():
     script = TraceSkillCompiler().generate_script(
         [
             RPAAcceptedTrace(
@@ -79,8 +96,10 @@ def test_compiler_generalizes_highest_star_trace_instead_of_hardcoding_url():
         is_local=True,
     )
 
-    assert "stargazers" in script
-    assert "max_stars" in script
+    assert "_execute_runtime_ai_instruction(" in script
+    assert "stargazers" not in script
+    assert "max_stars" not in script
+    assert "_abs_github_url" not in script
     assert "https://github.com/recorded/repo" not in _execute_body(script)
 
 
@@ -193,7 +212,7 @@ def test_compiler_uses_source_ref_for_dataflow_fill():
     script = TraceSkillCompiler().generate_script([trace], is_local=True)
 
     assert "customer_info.name" in script
-    assert "await current_page.get_by_role('textbox', name='Customer Name', exact=True).fill(str(_value))" in script
+    assert "await current_page.get_by_role('textbox', name='Customer Name').fill(str(_value))" in script
     assert "Alice Zhang" not in _execute_body(script)
 
 
@@ -221,7 +240,7 @@ def test_manual_fill_uses_sensitive_credential_param():
     )
     body = _execute_body(script)
 
-    assert "get_by_role('textbox', name='Password', exact=True).fill(kwargs['password'])" in body
+    assert "get_by_role('textbox', name='Password').fill(kwargs['password'])" in body
     assert "fill('{{credential}}')" not in body
 
 
@@ -249,11 +268,11 @@ def test_manual_fill_uses_plain_param_default_when_configured():
     )
     body = _execute_body(script)
 
-    assert "get_by_role('textbox', name='Username', exact=True).fill(kwargs.get('username', 'admi'))" in body
+    assert "get_by_role('textbox', name='Username').fill(kwargs.get('username', 'admi'))" in body
     assert "fill('admi')" not in body
 
 
-def test_manual_click_defaults_to_exact_match_for_role_locator():
+def test_manual_click_preserves_role_locator_without_forcing_exact():
     trace = RPAAcceptedTrace(
         trace_id="manual-click",
         trace_type=RPATraceType.MANUAL_ACTION,
@@ -267,7 +286,8 @@ def test_manual_click_defaults_to_exact_match_for_role_locator():
     script = TraceSkillCompiler().generate_script([trace], is_local=True)
     body = _execute_body(script)
 
-    assert "await current_page.get_by_role('link', name='菜鸟笔记', exact=True).click()" in body
+    assert "await current_page.get_by_role('link', name='菜鸟笔记').click()" in body
+    assert "exact=True" not in body
 
 
 def test_ai_data_capture_does_not_force_exact_match_when_unspecified():
@@ -329,8 +349,8 @@ def test_duplicate_sensitive_fill_values_consume_params_in_order():
     )
     body = _execute_body(script)
 
-    assert "get_by_role('textbox', name='Portal Password', exact=True).fill(kwargs['password'])" in body
-    assert "get_by_role('textbox', name='ERP Password', exact=True).fill(kwargs['password_2'])" in body
+    assert "get_by_role('textbox', name='Portal Password').fill(kwargs['password'])" in body
+    assert "get_by_role('textbox', name='ERP Password').fill(kwargs['password_2'])" in body
 
 
 def test_manual_hover_compiles_to_locator_hover():
@@ -347,7 +367,7 @@ def test_manual_hover_compiles_to_locator_hover():
     script = TraceSkillCompiler().generate_script([trace], is_local=True)
     body = _execute_body(script)
 
-    assert "get_by_role('button', name='Export', exact=True).hover()" in body
+    assert "get_by_role('button', name='Export').hover()" in body
 
 
 def test_manual_popup_click_compiles_to_expect_popup_and_switches_page():
@@ -370,6 +390,75 @@ def test_manual_popup_click_compiles_to_expect_popup_and_switches_page():
     assert "new_page = await popup_info.value" in body
     assert 'tabs["tab-export"] = new_page' in body
     assert "current_page = new_page" in body
+
+
+def test_manual_popup_click_registers_source_tab_before_switching_to_new_page():
+    traces = [
+        RPAAcceptedTrace(
+            trace_id="popup-export",
+            trace_type=RPATraceType.MANUAL_ACTION,
+            action="click",
+            description='click text("Export all")',
+            locator_candidates=[
+                {"locator": {"method": "text", "value": "Export all", "exact": True}, "selected": True},
+            ],
+            signals={"popup": {"source_tab_id": "tab-root", "target_tab_id": "tab-export"}},
+        ),
+        RPAAcceptedTrace(
+            trace_id="switch-root",
+            trace_type=RPATraceType.MANUAL_ACTION,
+            action="switch_tab",
+            description="Switch back to root tab",
+            signals={"tab": {"source_tab_id": "tab-export", "target_tab_id": "tab-root"}},
+        ),
+    ]
+
+    script = TraceSkillCompiler().generate_script(traces, is_local=True)
+    body = _execute_body(script)
+
+    source_registration = 'tabs.setdefault("tab-root", current_page)'
+    popup_wait = "async with current_page.expect_popup() as popup_info:"
+    assert source_registration in body
+    assert body.index(source_registration) < body.index(popup_wait)
+    assert 'tabs["tab-export"] = new_page' in body
+    assert 'current_page = tabs["tab-root"]' in body
+
+
+def test_manual_switch_tab_trace_compiles_to_page_context_switch():
+    trace = RPAAcceptedTrace(
+        trace_id="switch-to-sales",
+        trace_type=RPATraceType.MANUAL_ACTION,
+        action="switch_tab",
+        description="切换到标签页 iSales+",
+        signals={"tab": {"source_tab_id": "tab-root", "target_tab_id": "tab-sales"}},
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert "No stable locator was recorded" not in body
+    assert 'tabs.setdefault("tab-root", current_page)' in body
+    assert 'current_page = tabs["tab-sales"]' in body
+    assert "await current_page.bring_to_front()" in body
+
+
+def test_manual_close_tab_trace_compiles_to_page_close_and_fallback_switch():
+    trace = RPAAcceptedTrace(
+        trace_id="close-sales",
+        trace_type=RPATraceType.MANUAL_ACTION,
+        action="close_tab",
+        description="关闭标签页 iSales+ 并切换到其他标签页",
+        signals={"tab": {"tab_id": "tab-sales", "target_tab_id": "tab-root"}},
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert "No stable locator was recorded" not in body
+    assert 'tabs.setdefault("tab-sales", current_page)' in body
+    assert 'closing_page = tabs.pop("tab-sales", current_page)' in body
+    assert "await closing_page.close()" in body
+    assert 'current_page = tabs["tab-root"]' in body
 
 
 def test_manual_download_click_compiles_to_expect_download():
@@ -449,19 +538,18 @@ def test_ai_operation_with_existing_expect_download_is_not_wrapped_twice():
 def test_standalone_download_trace_after_ai_operation_merges_into_trigger():
     traces = [
         RPAAcceptedTrace(
-            trace_id="ai-click-export-file",
+            trace_id="ai-click-download-link",
             trace_type=RPATraceType.AI_OPERATION,
             source="ai",
-            user_instruction="click the first file name in the export table",
-            description="Click table row column action",
-            output_key="table_row_action",
+            user_instruction="click the report download link",
+            description="Click report download link",
+            output_key="download_action",
             output={"action_performed": True},
             ai_execution=RPAAIExecution(
                 language="python",
                 code=(
                     "async def run(page, results):\n"
-                    "    _row = page.locator('tbody tr').nth(0)\n"
-                    "    await _row.locator('td[data-colid=\"col_25\"] a').click()\n"
+                    "    await page.get_by_role('link', name='report.xlsx').click()\n"
                     "    return {'action_performed': True}"
                 ),
             ),
@@ -484,6 +572,91 @@ def test_standalone_download_trace_after_ai_operation_merges_into_trigger():
     assert "_dl = await _dl_info.value" in body
     assert "No stable locator was recorded for this manual action" not in body
     assert "_trace_start(_trace_logger, 1, '下载文件" not in body
+
+
+def test_standalone_export_table_download_trace_merges_as_export_task():
+    traces = [
+        RPAAcceptedTrace(
+            trace_id="ai-click-export-file",
+            trace_type=RPATraceType.AI_OPERATION,
+            source="ai",
+            user_instruction="click the first file name in the export table",
+            description="Click table row column action",
+            output_key="table_row_action",
+            output={"action_performed": True},
+            ai_execution=RPAAIExecution(
+                language="python",
+                code=(
+                    "async def run(page, results):\n"
+                    "    _heading = page.get_by_text('导出列表', exact=True).first\n"
+                    "    if await _heading.count():\n"
+                    "        _rows = _heading.locator(\"xpath=following::table[.//tbody/tr][1]//tbody/tr\")\n"
+                    "    else:\n"
+                    "        _rows = page.locator('tbody tr')\n"
+                    "    _row = _rows.nth(0)\n"
+                    "    await _row.locator('td[data-colid=\"col_25\"] a').click()\n"
+                    "    return {'action_performed': True}"
+                ),
+            ),
+        ),
+        RPAAcceptedTrace(
+            trace_id="download-export-file",
+            trace_type=RPATraceType.MANUAL_ACTION,
+            source="manual",
+            action="download",
+            description="Download file",
+            value="Conclusion excelExport_17733824_20260426211105.xlsx",
+        ),
+    ]
+
+    script = TraceSkillCompiler().generate_script(traces, is_local=True)
+    body = _execute_body(script)
+
+    assert "_download_from_export_task(" in body
+    assert "            _result = await run(current_page, _results)" not in body
+    assert "async with current_page.expect_download() as _dl_info:" not in body
+
+
+def test_ai_export_task_download_signal_compiles_to_export_task_helper():
+    trace = RPAAcceptedTrace(
+        trace_id="ai-click-export-file",
+        trace_type=RPATraceType.AI_OPERATION,
+        source="ai",
+        user_instruction="click the first file name in the export table",
+        description="Click table row column action",
+        output_key="table_row_action",
+        output={"action_performed": True},
+        signals={
+            "download": {
+                "filename": "Conclusion excelExport_17733824_20260426211105.xlsx",
+                "trigger_mode": "export_task",
+            }
+        },
+        ai_execution=RPAAIExecution(
+            language="python",
+            code=(
+                "async def run(page, results):\n"
+                "    _heading = page.get_by_text('导出列表', exact=True).first\n"
+                "    if await _heading.count():\n"
+                "        _rows = _heading.locator(\"xpath=following::table[.//tbody/tr][1]//tbody/tr\")\n"
+                "    else:\n"
+                "        _rows = page.locator('tbody tr')\n"
+                "    _row = _rows.nth(0)\n"
+                "    await _row.locator('td[data-colid=\"col_25\"] a').click()\n"
+                "    return {'action_performed': True}"
+            ),
+        ),
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert "_download_from_export_task(" in body
+    assert "table_heading='导出列表'" in body
+    assert "action_selector='td[data-colid=\"col_25\"] a'" in body
+    assert "            _result = await run(current_page, _results)" not in body
+    assert '_results["download_Conclusion_excelExport_17733824_20260426211105"]' in body
+    assert "_results['table_row_action'] = _result" in body
 
 
 def test_manual_navigation_signal_click_compiles_to_expect_navigation():
@@ -522,7 +695,7 @@ def test_manual_navigate_click_preserves_click_navigation_semantics():
     body = _execute_body(script)
 
     assert "expect_navigation" in body
-    assert "get_by_role('button', name='登录', exact=True).click()" in body
+    assert "get_by_role('button', name='登录').click()" in body
     assert "goto(_target_url" not in body
 
 
@@ -567,6 +740,113 @@ def test_navigation_after_selected_project_uses_dynamic_result_url():
     assert "+ '/pulls'" in script
 
 
+def test_navigation_after_action_result_without_url_uses_current_page_not_result_ref():
+    traces = [
+        RPAAcceptedTrace(
+            trace_type=RPATraceType.AI_OPERATION,
+            description="Click ordinal item",
+            output_key="ordinal_item_action",
+            output={"action_performed": True},
+            after_page=RPAPageState(url="https://github.com/owner/recorded-repo"),
+            ai_execution=RPAAIExecution(
+                code=(
+                    "async def run(page, results):\n"
+                    "    await page.locator('h2.lh-condensed a').nth(0).click()\n"
+                    "    return {'action_performed': True}"
+                ),
+            ),
+        ),
+        RPAAcceptedTrace(
+            trace_type=RPATraceType.NAVIGATION,
+            after_page=RPAPageState(url="https://github.com/owner/recorded-repo/pulls"),
+        ),
+    ]
+
+    script = TraceSkillCompiler().generate_script(traces, is_local=True)
+    body = _execute_body(script)
+
+    assert "_resolve_first_result_ref(_results, ['ordinal_item_action.url', 'ordinal_item_action.value'])" not in body
+    assert "https://github.com/owner/recorded-repo/pulls" not in body
+    assert "_trace_page_url(current_page)" in body
+    assert "+ '/pulls'" in body
+
+
+def test_navigation_does_not_use_stale_observed_base_from_older_trace():
+    traces = [
+        RPAAcceptedTrace(
+            trace_type=RPATraceType.AI_OPERATION,
+            description="Click old site item",
+            output_key="old_action",
+            output={"action_performed": True},
+            after_page=RPAPageState(url="https://example.com"),
+            ai_execution=RPAAIExecution(
+                code=(
+                    "async def run(page, results):\n"
+                    "    await page.get_by_text('Open').click()\n"
+                    "    return {'action_performed': True}"
+                ),
+            ),
+        ),
+        RPAAcceptedTrace(
+            trace_type=RPATraceType.NAVIGATION,
+            after_page=RPAPageState(url="https://other.com"),
+        ),
+        RPAAcceptedTrace(
+            trace_type=RPATraceType.NAVIGATION,
+            after_page=RPAPageState(url="https://example.com/foo"),
+        ),
+    ]
+
+    script = TraceSkillCompiler().generate_script(traces, is_local=True)
+    body = _execute_body(script)
+
+    assert "_target_url = str(_trace_page_url(current_page)).rstrip('/') + '/foo'" not in body
+    assert "_target_url = 'https://example.com/foo'" in body
+
+
+def test_navigation_after_manual_action_that_already_reached_url_is_skipped():
+    traces = [
+        RPAAcceptedTrace(
+            trace_type=RPATraceType.MANUAL_ACTION,
+            action="click",
+            description='点击 link("Pull requests")',
+            after_page=RPAPageState(url="https://github.com/owner/repo/pulls"),
+            locator_candidates=[
+                {"locator": {"method": "role", "role": "link", "name": "Pull requests"}, "selected": True},
+            ],
+        ),
+        RPAAcceptedTrace(
+            trace_type=RPATraceType.NAVIGATION,
+            description="导航到 https://github.com/owner/repo/pulls",
+            after_page=RPAPageState(url="https://github.com/owner/repo/pulls"),
+        ),
+    ]
+
+    script = TraceSkillCompiler().generate_script(traces, is_local=True)
+    body = _execute_body(script)
+
+    assert "get_by_role('link', name='Pull requests').click()" in body
+    assert "goto(_target_url" not in body
+    assert "导航到 https://github.com/owner/repo/pulls" not in body
+
+
+def test_manual_link_locator_does_not_force_exact_when_unspecified():
+    trace = RPAAcceptedTrace(
+        trace_type=RPATraceType.MANUAL_ACTION,
+        action="click",
+        description='click link("Pull requests")',
+        locator_candidates=[
+            {"locator": {"method": "role", "role": "link", "name": "Pull requests"}, "selected": True},
+        ],
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert "get_by_role('link', name='Pull requests').click()" in body
+    assert "exact=True" not in body
+
+
 def test_semantic_project_selection_compiles_to_runtime_ai_not_recorded_click():
     traces = [
         RPAAcceptedTrace(
@@ -598,7 +878,7 @@ def test_semantic_project_selection_compiles_to_runtime_ai_not_recorded_click():
     assert "page.locator('a[href=\"/openai/openai-agents-python\"]')" not in body
 
 
-def test_manual_pull_request_click_compiles_to_dynamic_repo_subpage_navigation():
+def test_manual_pull_request_click_keeps_recorded_locator_without_github_subpage_template():
     traces = [
         RPAAcceptedTrace(
             trace_type=RPATraceType.AI_OPERATION,
@@ -619,12 +899,12 @@ def test_manual_pull_request_click_compiles_to_dynamic_repo_subpage_navigation()
     script = TraceSkillCompiler().generate_script(traces, is_local=True)
     body = _execute_body(script)
 
-    assert "_github_repo_base(str(_resolve_result_ref(_results, 'selected_project.url')))" in body
-    assert "+ '/pulls?q=is%3Apr'" in body
-    assert "get_by_role('link', name='Pull requests').click()" not in body
+    assert "_github_repo_base" not in body
+    assert "+ '/pulls?q=is%3Apr'" not in body
+    assert "get_by_role('link', name='Pull requests').click()" in body
 
 
-def test_pr_extraction_two_pages_all_states_uses_paged_dynamic_pulls_template():
+def test_pr_extraction_instruction_stays_runtime_ai_without_pulls_template():
     traces = [
         RPAAcceptedTrace(
             trace_type=RPATraceType.AI_OPERATION,
@@ -643,9 +923,10 @@ def test_pr_extraction_two_pages_all_states_uses_paged_dynamic_pulls_template():
     script = TraceSkillCompiler().generate_script(traces, is_local=True)
     body = _execute_body(script)
 
-    assert "_page_count = 2" in body
-    assert "_target_url = _repo_base + '/pulls?q=is%3Apr'" in body
-    assert "_target_url += f'&page={_page_number}'" in body
+    assert "_execute_runtime_ai_instruction(" in body
+    assert "_page_count = 2" not in body
+    assert "_target_url = _repo_base + '/pulls?q=is%3Apr'" not in body
+    assert "_target_url += f'&page={_page_number}'" not in body
     assert "rows[:10]" not in body
 
 
@@ -676,8 +957,9 @@ def test_pr_extraction_does_not_fallback_to_recorded_observed_repo_url():
     body = _execute_body(script)
 
     assert "https://github.com/openai/openai-agents-python" not in body
-    assert "_resolve_first_result_ref(_results, ['selected_project.url', 'selected_project.value'])" in body
-    assert "_target_url = _repo_base + '/pulls?q=is%3Apr'" in body
+    assert "_execute_runtime_ai_instruction(" in body
+    assert "_resolve_first_result_ref(_results, ['selected_project.url', 'selected_project.value'])" not in body
+    assert "_target_url = _repo_base + '/pulls?q=is%3Apr'" not in body
 
 
 def test_issue_extraction_after_highest_star_uses_dynamic_result_not_recorded_repo_url():

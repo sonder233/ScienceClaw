@@ -16,6 +16,7 @@ export interface RpaConfigureStep {
   source?: string;
   configurable?: boolean;
   stepId?: string;
+  traceId?: string;
 }
 
 export interface RpaRecordingDiagnosticItem {
@@ -46,6 +47,11 @@ const TRACE_LABELS: Record<string, string> = {
 export const formatRpaTraceType = (traceType?: string) => {
   if (!traceType) return 'Trace';
   return TRACE_LABELS[traceType] || traceType;
+};
+
+export const isRpaTimelineStepDeletable = (step: Pick<RpaConfigureStep, 'source' | 'traceId'>): boolean => {
+  if (step.source === 'ai') return !!step.traceId;
+  return true;
 };
 
 const formatDiagnosticReason = (reason?: string) => {
@@ -106,6 +112,7 @@ const manualActionSourceLabel = (action: any) => (
 const mapRecordedAction = (action: any, index: number): RpaConfigureStep => ({
   id: String(action?.step_id || `recorded-action-${index}`),
   stepId: String(action?.step_id || ''),
+  traceId: action?.step_id ? `trace-${action.step_id}` : undefined,
   action: action?.action_kind || 'record',
   target: action?.target || null,
   frame_path: Array.isArray(action?.frame_path) ? action.frame_path : [],
@@ -129,8 +136,10 @@ const mapTrace = (trace: any, index: number): RpaConfigureStep => {
   const afterUrl = trace?.after_page?.url || '';
   return {
     id: String(trace?.trace_id || `trace-${index}`),
+    traceId: String(trace?.trace_id || ''),
     action: traceAction(trace),
     target: locator,
+    frame_path: Array.isArray(trace?.frame_path) ? trace.frame_path : [],
     locator_candidates: normalizeTraceCandidates(trace),
     validation: {
       status: trace?.accepted === false ? 'warning' : 'ok',
@@ -159,7 +168,7 @@ const mergeRecordedActionsAndTraces = (session: any): RpaConfigureStep[] => {
   const merged: RpaConfigureStep[] = [];
   traces.forEach((trace: any, index: number) => {
     const match = actionsByTraceId.get(String(trace?.trace_id || ''));
-    if (match) {
+    if (match && (trace?.source === 'manual' || trace?.trace_type === 'manual_action')) {
       merged.push(mapRecordedAction(match.action, match.index));
       emittedStepIds.add(String(match.action?.step_id || ''));
       return;

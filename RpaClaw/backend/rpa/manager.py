@@ -77,6 +77,7 @@ class RPASession(BaseModel):
     traces: List[RPAAcceptedTrace] = Field(default_factory=list)
     trace_diagnostics: List[RPATraceDiagnostic] = Field(default_factory=list)
     runtime_results: RPARuntimeResults = Field(default_factory=RPARuntimeResults)
+    pending_download_events: List[Dict[str, Any]] = Field(default_factory=list)
     sandbox_session_id: str
     paused: bool = False  # pause event recording during AI execution
     active_tab_id: Optional[str] = None
@@ -591,6 +592,18 @@ class RPASessionManager:
                 self._append_step_description(step, f" 并下载文件 {suggested}")
                 await self._broadcast_step(session_id, step)
                 return
+            session = self.sessions.get(session_id)
+            if session and session.paused:
+                session.pending_download_events.append(
+                    {
+                        "filename": suggested,
+                        "url": getattr(page, "url", ""),
+                        "tab_id": tab_id,
+                        "opener_tab_id": opener_tab_id,
+                        "event_timestamp_ms": int(datetime.now().timestamp() * 1000),
+                    }
+                )
+                return
             # Fallback: no preceding click found, record standalone
             evt = {
                 "action": "download",
@@ -638,9 +651,49 @@ class RPASessionManager:
         session = self.sessions.get(session_id)
         if not session or step_index < 0 or step_index >= len(session.steps):
             return False
-        session.steps.pop(step_index)
+        deleted_step = session.steps.pop(step_index)
         self._rebuild_manual_recording_state(session)
+        deleted_trace_id = f"trace-{deleted_step.id}"
+        session.traces = [
+            trace
+            for trace in session.traces
+            if not (trace.source == "manual" and trace.trace_id == deleted_trace_id)
+        ]
         return True
+
+    async def delete_step_by_id(self, session_id: str, step_id: str) -> bool:
+        """Delete a recorded step by stable ID and remove its derived manual trace."""
+        session = self.sessions.get(session_id)
+        if not session or not step_id:
+            return False
+        for index, step in enumerate(session.steps):
+            if step.id == step_id:
+                return await self.delete_step(session_id, index)
+        return False
+
+    async def delete_trace(self, session_id: str, trace_id: str) -> bool:
+        """Delete an accepted trace by stable ID without relying on legacy step indexes."""
+        session = self.sessions.get(session_id)
+        if not session or not trace_id:
+            return False
+        target_trace = next((trace for trace in session.traces if trace.trace_id == trace_id), None)
+        if target_trace and target_trace.source == "manual" and trace_id.startswith("trace-"):
+            step_id = trace_id.removeprefix("trace-")
+            if any(step.id == step_id for step in session.steps):
+                return await self.delete_step_by_id(session_id, step_id)
+        original_count = len(session.traces)
+        session.traces = [trace for trace in session.traces if trace.trace_id != trace_id]
+        deleted = len(session.traces) != original_count
+        if deleted:
+            self._rebuild_runtime_results(session)
+        return deleted
+
+    @staticmethod
+    def _rebuild_runtime_results(session: RPASession) -> None:
+        rebuilt = RPARuntimeResults()
+        for trace in session.traces:
+            rebuilt.write(trace.output_key, trace.output)
+        session.runtime_results = rebuilt
 
     @staticmethod
     def _unescape_playwright_literal(value: str) -> str:
@@ -794,11 +847,49 @@ class RPASessionManager:
         return locator
 
     @staticmethod
-    def _candidate_score(candidate: Dict[str, Any]) -> float:
+    def _candidate_score(candidate: Dict[str, Any], locator: Optional[Dict[str, Any]] = None) -> float:
         score = candidate.get("score")
-        if isinstance(score, (int, float)):
-            return float(score)
-        return float("inf")
+        if not isinstance(score, (int, float)):
+            return float("inf")
+        return float(score) + RPASessionManager._locator_instability_penalty(candidate, locator=locator)
+
+    @staticmethod
+    def _locator_instability_penalty(
+        candidate: Dict[str, Any],
+        *,
+        locator: Optional[Dict[str, Any]] = None,
+    ) -> float:
+        resolved_locator = locator if isinstance(locator, dict) else candidate.get("locator")
+        if not isinstance(resolved_locator, dict):
+            return 0.0
+
+        method = str(resolved_locator.get("method") or candidate.get("kind") or "").lower()
+        if method == "nth":
+            return 10000.0
+        if method != "css":
+            return 0.0
+
+        selector = str(
+            resolved_locator.get("value")
+            or candidate.get("selector")
+            or candidate.get("playwright_locator")
+            or ""
+        )
+        if not selector:
+            return 0.0
+
+        penalty = 0.0
+        if re.search(r"\bdata-v-[0-9a-f]{6,}\b", selector, re.IGNORECASE):
+            penalty += 10000.0
+        if re.search(r"#[A-Za-z_][\w-]*-\d{2,}\b", selector):
+            penalty += 10000.0
+        if selector.count(">") >= 4:
+            penalty += 5000.0
+        if ">> nth=" in selector or ".nth(" in selector:
+            penalty += 5000.0
+        if len(selector) >= 160:
+            penalty += 1000.0
+        return penalty
 
     @classmethod
     def _candidate_is_nth(cls, candidate: Dict[str, Any], locator: Optional[Dict[str, Any]] = None) -> bool:
@@ -831,7 +922,7 @@ class RPASessionManager:
             except ValueError:
                 continue
 
-            score = cls._candidate_score(candidate)
+            score = cls._candidate_score(candidate, locator=locator)
             is_nth = cls._candidate_is_nth(candidate, locator=locator)
             if best is None:
                 best = (index, candidate, locator)
@@ -905,8 +996,9 @@ class RPASessionManager:
             status = validation.get("status") if isinstance(validation, dict) else None
             should_promote = selected_strict_count != 1 or status in {"fallback", "ambiguous", "warning", "broken"}
             if not should_promote and isinstance(selected_candidate, dict):
-                selected_score = cls._candidate_score(selected_candidate)
-                best_score = cls._candidate_score(best_candidate)
+                selected_locator = selected_candidate_info[2] if selected_candidate_info else None
+                selected_score = cls._candidate_score(selected_candidate, locator=selected_locator)
+                best_score = cls._candidate_score(best_candidate, locator=best_locator)
                 selected_is_nth = cls._candidate_is_nth(selected_candidate)
                 best_is_nth = cls._candidate_is_nth(best_candidate, locator=best_locator)
                 should_promote = best_score < selected_score or (
@@ -1477,9 +1569,35 @@ class RPASessionManager:
         session = self.sessions.get(session_id)
         if not session:
             raise ValueError(f"Session {session_id} not found")
+        self._merge_pending_downloads_into_trace(session, trace)
         session.traces.append(trace)
         await self._broadcast_trace(session_id, trace)
         return session.traces
+
+    @staticmethod
+    def _merge_pending_downloads_into_trace(session: RPASession, trace: RPAAcceptedTrace) -> None:
+        if not session.pending_download_events:
+            return
+        if trace.source != "ai":
+            return
+        signals = dict(trace.signals or {})
+        if isinstance(signals.get("download"), dict):
+            return
+        downloads = list(session.pending_download_events)
+        first = dict(downloads[0])
+        download_signal = {
+            "filename": first.get("filename", ""),
+            "url": first.get("url", ""),
+            "tab_id": first.get("tab_id"),
+            "opener_tab_id": first.get("opener_tab_id"),
+            "event_timestamp_ms": first.get("event_timestamp_ms"),
+            "count": len(downloads),
+        }
+        if len(downloads) > 1:
+            download_signal["files"] = downloads
+        signals["download"] = {key: value for key, value in download_signal.items() if value is not None}
+        trace.signals = signals
+        session.pending_download_events.clear()
 
     async def append_trace_diagnostic(self, session_id: str, diagnostic: RPATraceDiagnostic) -> List[RPATraceDiagnostic]:
         session = self.sessions.get(session_id)

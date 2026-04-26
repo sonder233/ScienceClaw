@@ -52,13 +52,18 @@ def _run_capture_probe(scenario: str) -> dict:
           return element;
         }}
 
+        const elementsBySelector = {{}};
         let installedOptions = null;
         const emitted = [];
         const context = {{
           console,
           CSS: {{ escape: value => String(value) }},
           location: {{ href: 'https://example.test/login' }},
-          document: {{}},
+          document: {{
+            querySelector(selector) {{
+              return elementsBySelector[selector] || null;
+            }},
+          }},
           window: {{
             __rpa_tab_id: 'tab-1',
             __rpa_emit: payload => emitted.push(JSON.parse(payload)),
@@ -115,6 +120,21 @@ def _run_capture_probe(scenario: str) -> dict:
               closest: {{ '[role="menu"], [role="listbox"]': menu }},
             }});
             installedOptions.emitAction('click', item, {{}});
+          }} else if (scenario === 'dropdown-container-click-retargets-trigger') {{
+            const button = makeElement({{
+              tagName: 'BUTTON',
+              textContent: 'Download',
+              attributes: {{ role: 'button', 'aria-controls': 'dropdown-menu-9221', 'aria-haspopup': 'list' }},
+            }});
+            const menu = makeElement({{
+              tagName: 'UL',
+              id: 'dropdown-menu-9221',
+              textContent: 'All Docs Export all',
+              attributes: {{ role: 'list', id: 'dropdown-menu-9221' }},
+              className: 'el-dropdown-menu el-popper dropdown-menu-list',
+            }});
+            elementsBySelector['[aria-controls="dropdown-menu-9221"]'] = button;
+            installedOptions.emitAction('click', menu, {{}});
           }} else if (scenario === 'hover-menu-trigger') {{
             const menu = makeElement({{
               tagName: 'UL',
@@ -197,6 +217,17 @@ def test_menu_item_click_keeps_menu_context_signal():
     event = payload["emitted"][0]
     assert event["action"] == "click"
     assert event["signals"]["menu_context"]["is_menu_item"] is True
+
+
+def test_dropdown_container_click_retargets_to_controlling_trigger():
+    payload = _run_capture_probe("dropdown-container-click-retargets-trigger")
+
+    event = payload["emitted"][0]
+    assert event["action"] == "click"
+    assert event["locator"]["role"] == "button"
+    assert event["locator"]["name"] == "Download"
+    assert event["element_snapshot"]["tag"] == "button"
+    assert "menu_context" not in event.get("signals", {})
 
 
 def test_hover_menu_trigger_keeps_trigger_signal():

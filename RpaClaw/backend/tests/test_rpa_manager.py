@@ -193,6 +193,40 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
             "https://github.com/owner/repo",
         )
 
+    async def test_delete_trace_rebuilds_runtime_results_from_remaining_traces(self):
+        deleted_trace = TRACE_MODELS_MODULE.RPAAcceptedTrace(
+            trace_id="trace-delete",
+            trace_type=TRACE_MODELS_MODULE.RPATraceType.AI_OPERATION,
+            output_key="selected_project",
+            output={"url": "https://github.com/old/repo"},
+        )
+        kept_trace = TRACE_MODELS_MODULE.RPAAcceptedTrace(
+            trace_id="trace-keep",
+            trace_type=TRACE_MODELS_MODULE.RPATraceType.AI_OPERATION,
+            output_key="latest_issue",
+            output={"title": "Current issue"},
+        )
+        overwritten_key_trace = TRACE_MODELS_MODULE.RPAAcceptedTrace(
+            trace_id="trace-new-selected",
+            trace_type=TRACE_MODELS_MODULE.RPATraceType.AI_OPERATION,
+            output_key="selected_project",
+            output={"url": "https://github.com/new/repo"},
+        )
+        self.session.traces.extend([deleted_trace, kept_trace, overwritten_key_trace])
+        self.session.runtime_results.write("selected_project", deleted_trace.output)
+        self.session.runtime_results.write("latest_issue", kept_trace.output)
+
+        deleted = await self.manager.delete_trace(self.session.id, deleted_trace.trace_id)
+
+        self.assertTrue(deleted)
+        self.assertEqual(
+            self.session.runtime_results.values,
+            {
+                "latest_issue": {"title": "Current issue"},
+                "selected_project": {"url": "https://github.com/new/repo"},
+            },
+        )
+
     async def test_add_step_records_manual_trace_without_breaking_steps(self):
         step = await self.manager.add_step(
             self.session.id,
@@ -318,6 +352,33 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(deleted)
         self.assertEqual(len(self.session.recorded_actions), 0)
         self.assertEqual(len(self.session.recording_diagnostics), 0)
+
+    async def test_delete_step_removes_corresponding_manual_trace_only(self):
+        step = await self.manager.add_step(
+            self.session.id,
+            {
+                "action": "click",
+                "target": json.dumps({"method": "role", "role": "button", "name": "Search"}),
+                "description": 'click button("Search")',
+                "source": "record",
+                "validation": {"status": "ok"},
+            },
+        )
+        self.session.traces.append(
+            TRACE_MODELS_MODULE.RPAAcceptedTrace(
+                trace_id="trace-ai-keep",
+                trace_type=TRACE_MODELS_MODULE.RPATraceType.AI_OPERATION,
+                source="ai",
+                action="extract",
+                description="keep ai trace",
+            )
+        )
+
+        deleted = await self.manager.delete_step(self.session.id, 0)
+
+        self.assertTrue(deleted)
+        self.assertNotIn(f"trace-{step.id}", [trace.trace_id for trace in self.session.traces])
+        self.assertEqual([trace.trace_id for trace in self.session.traces], ["trace-ai-keep"])
 
     async def test_fill_merge_rebuilds_recorded_action_value(self):
         await self.manager.add_step(
@@ -628,6 +689,56 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(step.validation["status"], "ok")
         self.assertEqual(step.validation["details"], "strict unique css match")
 
+    async def test_handle_event_prefers_stable_semantic_candidate_over_runtime_id_css(self):
+        page = _FakePage("https://example.com", "Example")
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "fill",
+                "tab_id": tab_id,
+                "tag": "INPUT",
+                "timestamp": 1234567892,
+                "value": "7260316102147H,000484261001AF",
+                "locator": {
+                    "method": "css",
+                    "value": "#el-collapse-content-830 > .el-collapse-item__content > .new-search-form > .el-form > .el-row > div > .el-form-item > .item-layout-container-flex > .item-layout-content > .el-form-item__content > .el-tooltip > .el-row > .el-col > .web-text-area",
+                },
+                "locator_candidates": [
+                    {
+                        "kind": "css",
+                        "score": 0,
+                        "strict_match_count": 1,
+                        "visible_match_count": 1,
+                        "selected": True,
+                        "locator": {
+                            "method": "css",
+                            "value": "#el-collapse-content-830 > .el-collapse-item__content > .new-search-form > .el-form > .el-row > div > .el-form-item > .item-layout-container-flex > .item-layout-content > .el-form-item__content > .el-tooltip > .el-row > .el-col > .web-text-area",
+                        },
+                        "reason": "selected Playwright candidate is strict unique",
+                    },
+                    {
+                        "kind": "placeholder",
+                        "score": 20,
+                        "strict_match_count": 1,
+                        "visible_match_count": 1,
+                        "selected": False,
+                        "locator": {"method": "placeholder", "value": "请输入ESN"},
+                        "reason": "stable placeholder candidate",
+                    },
+                ],
+                "validation": {"status": "ok", "details": "selected Playwright candidate is strict unique"},
+            },
+        )
+
+        step = self.session.steps[-1]
+        self.assertEqual(json.loads(step.target), {"method": "placeholder", "value": "请输入ESN"})
+        self.assertFalse(step.locator_candidates[0]["selected"])
+        self.assertTrue(step.locator_candidates[1]["selected"])
+        self.assertEqual(step.validation["selected_candidate_kind"], "placeholder")
+        self.assertEqual(step.validation["details"], "stable placeholder candidate")
+
     async def test_handle_event_recovers_target_from_playwright_candidate_when_top_level_locator_missing(self):
         page = _FakePage("https://example.com", "Example")
         tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
@@ -705,6 +816,32 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(step.value, "ContractList20260411111546.xlsx")
         self.assertNotEqual(step.action, "open_tab_click")
         self.assertNotEqual(step.action, "download_click")
+
+    async def test_paused_download_event_is_merged_into_next_ai_trace(self):
+        self.session.paused = True
+        self.session.pending_download_events.append(
+            {
+                "filename": "export.xlsx",
+                "tab_id": "tab-export",
+                "url": "https://example.com/exportQuery",
+            }
+        )
+        trace = TRACE_MODELS_MODULE.RPAAcceptedTrace(
+            trace_id="ai-export",
+            trace_type=TRACE_MODELS_MODULE.RPATraceType.AI_OPERATION,
+            source="ai",
+            description="Click table row column action",
+            ai_execution=TRACE_MODELS_MODULE.RPAAIExecution(
+                code="async def run(page, results):\n    return {'action_performed': True}"
+            ),
+        )
+
+        await self.manager.append_trace(self.session.id, trace)
+
+        self.assertEqual(trace.signals["download"]["filename"], "export.xlsx")
+        self.assertEqual(trace.signals["download"]["tab_id"], "tab-export")
+        self.assertEqual(trace.signals["download"]["count"], 1)
+        self.assertEqual(self.session.pending_download_events, [])
 
     async def test_select_step_locator_candidate_promotes_target_and_selection(self):
         await self.manager.add_step(

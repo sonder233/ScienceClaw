@@ -3,33 +3,34 @@ import {
   getLegacyRpaSteps,
   getManualRecordingDiagnostics,
   hasManualRecordingDiagnostics,
+  isRpaTimelineStepDeletable,
   mapRpaConfigureDisplaySteps,
 } from './rpaConfigureTimeline';
 
 describe('rpaConfigureTimeline', () => {
-  it('prefers recorded actions over traces and legacy steps when present', () => {
+  it('deduplicates recorded actions and their derived manual traces', () => {
     const session = {
       steps: [
         {
-          id: 'legacy-1',
+          id: 'step-search',
           action: 'click',
           description: 'legacy click should only remain for parameterization',
         },
       ],
       traces: [
         {
-          trace_id: 'trace-manual',
+          trace_id: 'trace-step-search',
           trace_type: 'manual_action',
-          source: 'record',
+          source: 'manual',
           action: 'click',
-          description: 'legacy manual trace',
+          description: 'derived manual trace should not duplicate recorded action',
         },
       ],
       recorded_actions: [
         {
           step_id: 'step-search',
           action_kind: 'click',
-          description: '点击 button("Search")',
+          description: 'click button("Search")',
           target: { method: 'role', role: 'button', name: 'Search' },
           validation: { status: 'ok' },
           page_state: { url: 'https://example.test/search' },
@@ -42,8 +43,10 @@ describe('rpaConfigureTimeline', () => {
     expect(displaySteps).toHaveLength(1);
     expect(displaySteps[0]).toMatchObject({
       id: 'step-search',
+      stepId: 'step-search',
+      traceId: 'trace-step-search',
       action: 'click',
-      description: '点击 button("Search")',
+      description: 'click button("Search")',
       source: 'record',
       url: 'https://example.test/search',
       validation: { status: 'ok', details: 'Accepted manual action' },
@@ -99,6 +102,7 @@ describe('rpaConfigureTimeline', () => {
     expect(displaySteps.map((step) => step.source)).toEqual(['record', 'ai']);
     expect(displaySteps[1]).toMatchObject({
       id: 'trace-ai-select',
+      traceId: 'trace-ai-select',
       action: 'ai_operation',
       url: 'https://github.com/example/repo',
       validation: { status: 'ok', details: 'AI Trace' },
@@ -119,7 +123,13 @@ describe('rpaConfigureTimeline', () => {
       ],
     };
 
-    expect(mapRpaConfigureDisplaySteps(session)).toHaveLength(1);
+    const displaySteps = mapRpaConfigureDisplaySteps(session);
+
+    expect(displaySteps).toHaveLength(1);
+    expect(displaySteps[0]).toMatchObject({
+      id: 'trace-fill',
+      traceId: 'trace-fill',
+    });
     expect(getLegacyRpaSteps(session)).toEqual(session.steps);
   });
 
@@ -141,7 +151,7 @@ describe('rpaConfigureTimeline', () => {
         {
           id: 'step-bad',
           action: 'fill',
-          description: '输入 "foo" 到 None',
+          description: 'Input "foo" into None',
           locator_candidates: [{ playwright_locator: 'page.locator(".mystery")', selected: true }],
           url: 'https://example.test/search',
         },
@@ -170,6 +180,12 @@ describe('rpaConfigureTimeline', () => {
       url: 'https://example.test/search',
     });
     expect(hasManualRecordingDiagnostics(session)).toBe(true);
+  });
+
+  it('allows deleting AI timeline items only when they have stable trace ids', () => {
+    expect(isRpaTimelineStepDeletable({ source: 'ai', traceId: 'trace-ai-project' })).toBe(true);
+    expect(isRpaTimelineStepDeletable({ source: 'ai' })).toBe(false);
+    expect(isRpaTimelineStepDeletable({ source: 'record', traceId: 'trace-step-search' })).toBe(true);
   });
 
   it('preserves frame path from recorded actions', () => {
