@@ -771,6 +771,39 @@ def test_navigation_after_action_result_without_url_uses_current_page_not_result
     assert "+ '/pulls'" in body
 
 
+def test_navigation_does_not_use_stale_observed_base_from_older_trace():
+    traces = [
+        RPAAcceptedTrace(
+            trace_type=RPATraceType.AI_OPERATION,
+            description="Click old site item",
+            output_key="old_action",
+            output={"action_performed": True},
+            after_page=RPAPageState(url="https://example.com"),
+            ai_execution=RPAAIExecution(
+                code=(
+                    "async def run(page, results):\n"
+                    "    await page.get_by_text('Open').click()\n"
+                    "    return {'action_performed': True}"
+                ),
+            ),
+        ),
+        RPAAcceptedTrace(
+            trace_type=RPATraceType.NAVIGATION,
+            after_page=RPAPageState(url="https://other.com"),
+        ),
+        RPAAcceptedTrace(
+            trace_type=RPATraceType.NAVIGATION,
+            after_page=RPAPageState(url="https://example.com/foo"),
+        ),
+    ]
+
+    script = TraceSkillCompiler().generate_script(traces, is_local=True)
+    body = _execute_body(script)
+
+    assert "_target_url = str(_trace_page_url(current_page)).rstrip('/') + '/foo'" not in body
+    assert "_target_url = 'https://example.com/foo'" in body
+
+
 def test_navigation_after_manual_action_that_already_reached_url_is_skipped():
     traces = [
         RPAAcceptedTrace(

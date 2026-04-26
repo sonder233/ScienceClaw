@@ -683,7 +683,17 @@ class RPASessionManager:
                 return await self.delete_step_by_id(session_id, step_id)
         original_count = len(session.traces)
         session.traces = [trace for trace in session.traces if trace.trace_id != trace_id]
-        return len(session.traces) != original_count
+        deleted = len(session.traces) != original_count
+        if deleted:
+            self._rebuild_runtime_results(session)
+        return deleted
+
+    @staticmethod
+    def _rebuild_runtime_results(session: RPASession) -> None:
+        rebuilt = RPARuntimeResults()
+        for trace in session.traces:
+            rebuilt.write(trace.output_key, trace.output)
+        session.runtime_results = rebuilt
 
     @staticmethod
     def _unescape_playwright_literal(value: str) -> str:

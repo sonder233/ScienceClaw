@@ -689,6 +689,7 @@ class TraceSkillCompiler:
     def _dynamic_url_expression(self, url: str, previous_traces: List[RPAAcceptedTrace]) -> str:
         if not url:
             return ""
+        latest_trace = previous_traces[-1] if previous_traces else None
         for trace in reversed(previous_traces):
             result_expr = self._trace_result_url_expression(trace)
             output = trace.output if isinstance(trace.output, dict) else {}
@@ -700,7 +701,7 @@ class TraceSkillCompiler:
             if result_expr and observed_base and url.startswith(observed_base):
                 suffix = url[len(observed_base):]
                 return f"str({result_expr}).rstrip('/') + {suffix!r}"
-            if observed_base and url.startswith(observed_base):
+            if trace is latest_trace and observed_base and url.startswith(observed_base):
                 suffix = url[len(observed_base):]
                 return f"str(_trace_page_url(current_page)).rstrip('/') + {suffix!r}"
         return ""

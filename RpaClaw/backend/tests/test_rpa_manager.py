@@ -193,6 +193,40 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
             "https://github.com/owner/repo",
         )
 
+    async def test_delete_trace_rebuilds_runtime_results_from_remaining_traces(self):
+        deleted_trace = TRACE_MODELS_MODULE.RPAAcceptedTrace(
+            trace_id="trace-delete",
+            trace_type=TRACE_MODELS_MODULE.RPATraceType.AI_OPERATION,
+            output_key="selected_project",
+            output={"url": "https://github.com/old/repo"},
+        )
+        kept_trace = TRACE_MODELS_MODULE.RPAAcceptedTrace(
+            trace_id="trace-keep",
+            trace_type=TRACE_MODELS_MODULE.RPATraceType.AI_OPERATION,
+            output_key="latest_issue",
+            output={"title": "Current issue"},
+        )
+        overwritten_key_trace = TRACE_MODELS_MODULE.RPAAcceptedTrace(
+            trace_id="trace-new-selected",
+            trace_type=TRACE_MODELS_MODULE.RPATraceType.AI_OPERATION,
+            output_key="selected_project",
+            output={"url": "https://github.com/new/repo"},
+        )
+        self.session.traces.extend([deleted_trace, kept_trace, overwritten_key_trace])
+        self.session.runtime_results.write("selected_project", deleted_trace.output)
+        self.session.runtime_results.write("latest_issue", kept_trace.output)
+
+        deleted = await self.manager.delete_trace(self.session.id, deleted_trace.trace_id)
+
+        self.assertTrue(deleted)
+        self.assertEqual(
+            self.session.runtime_results.values,
+            {
+                "latest_issue": {"title": "Current issue"},
+                "selected_project": {"url": "https://github.com/new/repo"},
+            },
+        )
+
     async def test_add_step_records_manual_trace_without_breaking_steps(self):
         step = await self.manager.add_step(
             self.session.id,
