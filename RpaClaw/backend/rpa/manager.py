@@ -824,11 +824,49 @@ class RPASessionManager:
         return locator
 
     @staticmethod
-    def _candidate_score(candidate: Dict[str, Any]) -> float:
+    def _candidate_score(candidate: Dict[str, Any], locator: Optional[Dict[str, Any]] = None) -> float:
         score = candidate.get("score")
-        if isinstance(score, (int, float)):
-            return float(score)
-        return float("inf")
+        if not isinstance(score, (int, float)):
+            return float("inf")
+        return float(score) + RPASessionManager._locator_instability_penalty(candidate, locator=locator)
+
+    @staticmethod
+    def _locator_instability_penalty(
+        candidate: Dict[str, Any],
+        *,
+        locator: Optional[Dict[str, Any]] = None,
+    ) -> float:
+        resolved_locator = locator if isinstance(locator, dict) else candidate.get("locator")
+        if not isinstance(resolved_locator, dict):
+            return 0.0
+
+        method = str(resolved_locator.get("method") or candidate.get("kind") or "").lower()
+        if method == "nth":
+            return 10000.0
+        if method != "css":
+            return 0.0
+
+        selector = str(
+            resolved_locator.get("value")
+            or candidate.get("selector")
+            or candidate.get("playwright_locator")
+            or ""
+        )
+        if not selector:
+            return 0.0
+
+        penalty = 0.0
+        if re.search(r"\bdata-v-[0-9a-f]{6,}\b", selector, re.IGNORECASE):
+            penalty += 10000.0
+        if re.search(r"#[A-Za-z_][\w-]*-\d{2,}\b", selector):
+            penalty += 10000.0
+        if selector.count(">") >= 4:
+            penalty += 5000.0
+        if ">> nth=" in selector or ".nth(" in selector:
+            penalty += 5000.0
+        if len(selector) >= 160:
+            penalty += 1000.0
+        return penalty
 
     @classmethod
     def _candidate_is_nth(cls, candidate: Dict[str, Any], locator: Optional[Dict[str, Any]] = None) -> bool:
@@ -861,7 +899,7 @@ class RPASessionManager:
             except ValueError:
                 continue
 
-            score = cls._candidate_score(candidate)
+            score = cls._candidate_score(candidate, locator=locator)
             is_nth = cls._candidate_is_nth(candidate, locator=locator)
             if best is None:
                 best = (index, candidate, locator)
@@ -935,8 +973,9 @@ class RPASessionManager:
             status = validation.get("status") if isinstance(validation, dict) else None
             should_promote = selected_strict_count != 1 or status in {"fallback", "ambiguous", "warning", "broken"}
             if not should_promote and isinstance(selected_candidate, dict):
-                selected_score = cls._candidate_score(selected_candidate)
-                best_score = cls._candidate_score(best_candidate)
+                selected_locator = selected_candidate_info[2] if selected_candidate_info else None
+                selected_score = cls._candidate_score(selected_candidate, locator=selected_locator)
+                best_score = cls._candidate_score(best_candidate, locator=best_locator)
                 selected_is_nth = cls._candidate_is_nth(selected_candidate)
                 best_is_nth = cls._candidate_is_nth(best_candidate, locator=best_locator)
                 should_promote = best_score < selected_score or (

@@ -655,6 +655,56 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(step.validation["status"], "ok")
         self.assertEqual(step.validation["details"], "strict unique css match")
 
+    async def test_handle_event_prefers_stable_semantic_candidate_over_runtime_id_css(self):
+        page = _FakePage("https://example.com", "Example")
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "fill",
+                "tab_id": tab_id,
+                "tag": "INPUT",
+                "timestamp": 1234567892,
+                "value": "7260316102147H,000484261001AF",
+                "locator": {
+                    "method": "css",
+                    "value": "#el-collapse-content-830 > .el-collapse-item__content > .new-search-form > .el-form > .el-row > div > .el-form-item > .item-layout-container-flex > .item-layout-content > .el-form-item__content > .el-tooltip > .el-row > .el-col > .web-text-area",
+                },
+                "locator_candidates": [
+                    {
+                        "kind": "css",
+                        "score": 0,
+                        "strict_match_count": 1,
+                        "visible_match_count": 1,
+                        "selected": True,
+                        "locator": {
+                            "method": "css",
+                            "value": "#el-collapse-content-830 > .el-collapse-item__content > .new-search-form > .el-form > .el-row > div > .el-form-item > .item-layout-container-flex > .item-layout-content > .el-form-item__content > .el-tooltip > .el-row > .el-col > .web-text-area",
+                        },
+                        "reason": "selected Playwright candidate is strict unique",
+                    },
+                    {
+                        "kind": "placeholder",
+                        "score": 20,
+                        "strict_match_count": 1,
+                        "visible_match_count": 1,
+                        "selected": False,
+                        "locator": {"method": "placeholder", "value": "请输入ESN"},
+                        "reason": "stable placeholder candidate",
+                    },
+                ],
+                "validation": {"status": "ok", "details": "selected Playwright candidate is strict unique"},
+            },
+        )
+
+        step = self.session.steps[-1]
+        self.assertEqual(json.loads(step.target), {"method": "placeholder", "value": "请输入ESN"})
+        self.assertFalse(step.locator_candidates[0]["selected"])
+        self.assertTrue(step.locator_candidates[1]["selected"])
+        self.assertEqual(step.validation["selected_candidate_kind"], "placeholder")
+        self.assertEqual(step.validation["details"], "stable placeholder candidate")
+
     async def test_handle_event_recovers_target_from_playwright_candidate_when_top_level_locator_missing(self):
         page = _FakePage("https://example.com", "Example")
         tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
