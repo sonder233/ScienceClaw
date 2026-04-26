@@ -23,6 +23,8 @@
             if (role && INTERACTIVE_ROLES.indexOf(role) >= 0) return cur;
             cur = cur.parentElement;
         }
+        var controlledTrigger = controlledMenuTrigger(el);
+        if (controlledTrigger) return controlledTrigger;
         return el;
     }
 
@@ -171,6 +173,24 @@
         var role = (el.getAttribute('role') || '').toLowerCase();
         if (role === 'menu' || role === 'listbox') return true;
         return hasClassToken(el, /(menu|dropdown|popover|popup|listbox)/i);
+    }
+
+    function controlledMenuTrigger(el) {
+        if (!isMenuLikeElement(el)) return null;
+        var id = el.id || (el.getAttribute && el.getAttribute('id')) || '';
+        if (!id || !document.querySelector) return null;
+        var owner = null;
+        try {
+            owner = document.querySelector('[aria-controls="' + cssEsc(id) + '"]');
+        } catch (error) {
+            return null;
+        }
+        if (!owner || !owner.getAttribute) return null;
+        var role = (owner.getAttribute('role') || '').toLowerCase();
+        if (owner.tagName === 'BUTTON' || owner.tagName === 'A' || role === 'button' || role === 'link') {
+            return owner;
+        }
+        return null;
     }
 
     function hasMenuPopupNearby(el) {
