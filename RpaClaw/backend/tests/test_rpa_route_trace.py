@@ -326,6 +326,21 @@ async def test_generate_script_waits_for_pending_events(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_generate_script_rejects_non_owner():
+    manager = ROUTE_MODULE.rpa_manager
+    session = RPASession(id="route-generate-owner", user_id="owner", sandbox_session_id="sandbox")
+    manager.sessions[session.id] = session
+
+    try:
+        user = type("User", (), {"id": "intruder"})()
+        with pytest.raises(ROUTE_MODULE.HTTPException) as exc_info:
+            await ROUTE_MODULE.generate_script(session.id, ROUTE_MODULE.GenerateRequest(), user)
+        assert exc_info.value.status_code == 403
+    finally:
+        manager.sessions.pop(session.id, None)
+
+
+@pytest.mark.asyncio
 async def test_delete_timeline_manual_step_removes_generate_input():
     manager = ROUTE_MODULE.rpa_manager
     session = RPASession(id="route-delete-manual-step", user_id="u1", sandbox_session_id="sandbox")
@@ -480,6 +495,27 @@ async def test_test_script_blocks_when_recording_diagnostics_exist():
 
 
 @pytest.mark.asyncio
+async def test_test_script_rejects_non_owner(monkeypatch):
+    manager = ROUTE_MODULE.rpa_manager
+    session = RPASession(id="route-test-owner", user_id="owner", sandbox_session_id="sandbox")
+    manager.sessions[session.id] = session
+
+    class ForbiddenConnector:
+        async def get_browser(self, **_kwargs):
+            raise AssertionError("test_script should reject before opening a browser")
+
+    monkeypatch.setattr(ROUTE_MODULE, "get_cdp_connector", lambda: ForbiddenConnector())
+
+    try:
+        user = type("User", (), {"id": "intruder"})()
+        with pytest.raises(ROUTE_MODULE.HTTPException) as exc_info:
+            await ROUTE_MODULE.test_script(session.id, ROUTE_MODULE.GenerateRequest(), user)
+        assert exc_info.value.status_code == 403
+    finally:
+        manager.sessions.pop(session.id, None)
+
+
+@pytest.mark.asyncio
 async def test_save_skill_exports_projected_trace_steps(monkeypatch):
     manager = ROUTE_MODULE.rpa_manager
     session = RPASession(id="route-save-trace", user_id="u1", sandbox_session_id="sandbox")
@@ -519,6 +555,56 @@ async def test_save_skill_exports_projected_trace_steps(monkeypatch):
         assert captured["steps"][0]["action"] == "ai_script"
         assert captured["steps"][0]["rpa_trace"]["trace_id"] == "trace-ai-select"
     finally:
+        manager.sessions.pop(session.id, None)
+
+
+@pytest.mark.asyncio
+async def test_save_skill_rejects_non_owner(monkeypatch):
+    manager = ROUTE_MODULE.rpa_manager
+    session = RPASession(id="route-save-owner", user_id="owner", sandbox_session_id="sandbox")
+    manager.sessions[session.id] = session
+
+    async def forbidden_export_skill(**_kwargs):
+        raise AssertionError("save_skill should reject before exporting")
+
+    monkeypatch.setattr(ROUTE_MODULE.exporter, "export_skill", forbidden_export_skill)
+
+    try:
+        user = type("User", (), {"id": "intruder"})()
+        with pytest.raises(ROUTE_MODULE.HTTPException) as exc_info:
+            await ROUTE_MODULE.save_skill(
+                session.id,
+                ROUTE_MODULE.SaveSkillRequest(skill_name="stolen", description=""),
+                user,
+            )
+        assert exc_info.value.status_code == 403
+    finally:
+        manager.sessions.pop(session.id, None)
+
+
+@pytest.mark.asyncio
+async def test_agent_confirm_rejects_non_owner():
+    manager = ROUTE_MODULE.rpa_manager
+    session = RPASession(id="route-agent-owner", user_id="owner", sandbox_session_id="sandbox")
+    manager.sessions[session.id] = session
+
+    class FakeAgent:
+        resolved = False
+
+        def resolve_confirm(self, _approved):
+            self.resolved = True
+
+    agent = FakeAgent()
+    ROUTE_MODULE._active_agents[session.id] = agent
+
+    try:
+        user = type("User", (), {"id": "intruder"})()
+        with pytest.raises(ROUTE_MODULE.HTTPException) as exc_info:
+            await ROUTE_MODULE.agent_confirm(session.id, ROUTE_MODULE.ConfirmRequest(approved=True), user)
+        assert exc_info.value.status_code == 403
+        assert agent.resolved is False
+    finally:
+        ROUTE_MODULE._active_agents.pop(session.id, None)
         manager.sessions.pop(session.id, None)
 
 

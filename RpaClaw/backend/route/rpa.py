@@ -290,6 +290,11 @@ def _ensure_no_unresolved_manual_diagnostics(session) -> None:
         )
 
 
+def _ensure_session_owner(session, current_user: User) -> None:
+    if session.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+
 async def _apply_recording_agent_result(session_id: str, result: RecordingAgentResult) -> None:
     for diagnostic in result.diagnostics:
         await rpa_manager.append_trace_diagnostic(session_id, diagnostic)
@@ -650,6 +655,7 @@ async def generate_script(
     session = await rpa_manager.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    _ensure_session_owner(session, current_user)
 
     _ensure_no_unresolved_manual_diagnostics(session)
     script = _generate_session_script(session, request.params)
@@ -666,6 +672,7 @@ async def test_script(
     session = await rpa_manager.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    _ensure_session_owner(session, current_user)
 
     _ensure_no_unresolved_manual_diagnostics(session)
     steps = [step.model_dump() for step in session.steps]
@@ -771,6 +778,7 @@ async def save_skill(
     session = await rpa_manager.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    _ensure_session_owner(session, current_user)
 
     _ensure_no_unresolved_manual_diagnostics(session)
     script = _generate_session_script(session, request.params)
@@ -941,6 +949,10 @@ async def agent_confirm(
     body: ConfirmRequest,
     current_user: User = Depends(get_current_user),
 ):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _ensure_session_owner(session, current_user)
     agent = _active_agents.get(session_id)
     if agent:
         agent.resolve_confirm(body.approved)
@@ -952,6 +964,10 @@ async def agent_abort(
     session_id: str,
     current_user: User = Depends(get_current_user),
 ):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _ensure_session_owner(session, current_user)
     agent = _active_agents.get(session_id)
     if agent:
         agent.abort()
