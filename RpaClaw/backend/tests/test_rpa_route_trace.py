@@ -80,6 +80,37 @@ def test_generate_session_script_preserves_step_signals_on_recorded_actions():
     assert 'tabs["tab-export"] = new_page' in script
     assert "current_page = new_page" in script
 
+
+def test_generate_session_script_merges_step_tab_fields_into_existing_trace():
+    session = RPASession(id="s-switch", user_id="u-switch", sandbox_session_id="sandbox")
+    session.steps.append(
+        RPAStep(
+            id="step-switch",
+            action="switch_tab",
+            target="",
+            description="切换到标签页 iSales+",
+            tab_id="tab-root",
+            source_tab_id="tab-root",
+            target_tab_id="tab-sales",
+        )
+    )
+    session.traces.append(
+        RPAAcceptedTrace(
+            trace_id="trace-step-switch",
+            trace_type=RPATraceType.MANUAL_ACTION,
+            source="manual",
+            action="switch_tab",
+            description="切换到标签页 iSales+",
+        )
+    )
+
+    script = ROUTE_MODULE._generate_session_script(session, {}, test_mode=True)
+
+    assert "No stable locator was recorded" not in script
+    assert 'tabs.setdefault("tab-root", current_page)' in script
+    assert 'current_page = tabs["tab-sales"]' in script
+
+
 def test_generate_session_script_preserves_frame_path_on_recorded_actions():
     session = RPASession(id="s-frame", user_id="u-frame", sandbox_session_id="sandbox")
     session.recorded_actions.append(

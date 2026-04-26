@@ -290,6 +290,12 @@ class TraceSkillCompiler:
                 lines.append(f"        await {expr}.press({str(trace.value or '')!r})")
             lines.append("    await current_page.wait_for_load_state('domcontentloaded')")
             return lines
+        if action == "switch_tab":
+            lines.extend(self._render_switch_tab_trace(trace))
+            return lines
+        if action == "close_tab":
+            lines.extend(self._render_close_tab_trace(trace))
+            return lines
         if not locator and action in {"hover", "click", "fill", "press", "check", "uncheck", "select"}:
             lines.extend(self._invalid_manual_action_lines(action))
             return lines
@@ -330,6 +336,43 @@ class TraceSkillCompiler:
             lines.append(f"    await {expr}.select_option({str(trace.value or '')!r})")
         else:
             lines.append(f"    # Unsupported manual action preserved as no-op: {action}")
+        return lines
+
+    @staticmethod
+    def _render_switch_tab_trace(trace: RPAAcceptedTrace) -> List[str]:
+        tab_signal = _trace_signal(trace, "tab")
+        source_tab_id = str(tab_signal.get("source_tab_id") or tab_signal.get("tab_id") or "").strip()
+        target_tab_id = str(tab_signal.get("target_tab_id") or "").strip()
+        if not target_tab_id:
+            return ["    # Switch tab trace is missing target_tab_id."]
+
+        lines: List[str] = []
+        if source_tab_id:
+            lines.append(f"    tabs.setdefault({json.dumps(source_tab_id, ensure_ascii=False)}, current_page)")
+        lines.append(f"    current_page = tabs[{json.dumps(target_tab_id, ensure_ascii=False)}]")
+        lines.append("    await current_page.bring_to_front()")
+        return lines
+
+    @staticmethod
+    def _render_close_tab_trace(trace: RPAAcceptedTrace) -> List[str]:
+        tab_signal = _trace_signal(trace, "tab")
+        closing_tab_id = str(
+            tab_signal.get("tab_id")
+            or tab_signal.get("source_tab_id")
+            or ""
+        ).strip()
+        fallback_tab_id = str(tab_signal.get("target_tab_id") or "").strip()
+
+        lines: List[str] = []
+        if closing_tab_id:
+            lines.append(f"    tabs.setdefault({json.dumps(closing_tab_id, ensure_ascii=False)}, current_page)")
+            lines.append(f"    closing_page = tabs.pop({json.dumps(closing_tab_id, ensure_ascii=False)}, current_page)")
+        else:
+            lines.append("    closing_page = current_page")
+        lines.append("    await closing_page.close()")
+        if fallback_tab_id:
+            lines.append(f"    current_page = tabs[{json.dumps(fallback_tab_id, ensure_ascii=False)}]")
+            lines.append("    await current_page.bring_to_front()")
         return lines
 
     @staticmethod

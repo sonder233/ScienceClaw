@@ -221,6 +221,16 @@ def _order_traces_by_recording_time(traces: list[RPAAcceptedTrace]) -> list[RPAA
 
 
 def _session_traces_for_compile(session) -> list[RPAAcceptedTrace]:
+    traces_by_id = {
+        trace.trace_id: trace
+        for trace in getattr(session, "traces", None) or []
+        if getattr(trace, "trace_id", None)
+    }
+    for step in getattr(session, "steps", None) or []:
+        trace = traces_by_id.get(f"trace-{getattr(step, 'id', '')}")
+        if trace:
+            _merge_step_metadata_into_trace(trace, step)
+
     if getattr(session, "recorded_actions", None):
         derived_manual_traces = {
             trace.trace_id: trace

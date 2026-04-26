@@ -392,6 +392,43 @@ def test_manual_popup_click_compiles_to_expect_popup_and_switches_page():
     assert "current_page = new_page" in body
 
 
+def test_manual_switch_tab_trace_compiles_to_page_context_switch():
+    trace = RPAAcceptedTrace(
+        trace_id="switch-to-sales",
+        trace_type=RPATraceType.MANUAL_ACTION,
+        action="switch_tab",
+        description="切换到标签页 iSales+",
+        signals={"tab": {"source_tab_id": "tab-root", "target_tab_id": "tab-sales"}},
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert "No stable locator was recorded" not in body
+    assert 'tabs.setdefault("tab-root", current_page)' in body
+    assert 'current_page = tabs["tab-sales"]' in body
+    assert "await current_page.bring_to_front()" in body
+
+
+def test_manual_close_tab_trace_compiles_to_page_close_and_fallback_switch():
+    trace = RPAAcceptedTrace(
+        trace_id="close-sales",
+        trace_type=RPATraceType.MANUAL_ACTION,
+        action="close_tab",
+        description="关闭标签页 iSales+ 并切换到其他标签页",
+        signals={"tab": {"tab_id": "tab-sales", "target_tab_id": "tab-root"}},
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert "No stable locator was recorded" not in body
+    assert 'tabs.setdefault("tab-sales", current_page)' in body
+    assert 'closing_page = tabs.pop("tab-sales", current_page)' in body
+    assert "await closing_page.close()" in body
+    assert 'current_page = tabs["tab-root"]' in body
+
+
 def test_manual_download_click_compiles_to_expect_download():
     trace = RPAAcceptedTrace(
         trace_id="download-report",

@@ -45,6 +45,15 @@ def _locator_candidates(step: Dict[str, Any]) -> List[Dict[str, Any]]:
     return []
 
 
+def _tab_signal(step: Dict[str, Any]) -> Dict[str, Any]:
+    signal: Dict[str, Any] = {}
+    for key in ("tab_id", "source_tab_id", "target_tab_id"):
+        value = _step_get(step, key)
+        if value:
+            signal[key] = value
+    return signal
+
+
 def _page_state_from_step(step: Dict[str, Any], *, prefer_after: bool = True) -> RPAPageState:
     url = _step_get(step, "url", "") or _step_get(step, "page_url", "") or ""
     title = _step_get(step, "title", "") or _step_get(step, "page_title", "") or ""
@@ -64,6 +73,12 @@ def manual_step_to_trace(step: Dict[str, Any]) -> RPAAcceptedTrace:
     if trace_type == RPATraceType.NAVIGATION and not after_page.url:
         after_page.url = str(_step_get(step, "target", "") or "")
 
+    signals = dict(_step_get(step, "signals", {}) or {})
+    tab_signal = _tab_signal(step)
+    if tab_signal:
+        existing_tab_signal = signals.get("tab") if isinstance(signals.get("tab"), dict) else {}
+        signals["tab"] = {**existing_tab_signal, **tab_signal}
+
     return RPAAcceptedTrace(
         trace_id=trace_id,
         trace_type=trace_type,
@@ -75,7 +90,7 @@ def manual_step_to_trace(step: Dict[str, Any]) -> RPAAcceptedTrace:
         frame_path=list(_step_get(step, "frame_path", []) or []),
         locator_candidates=_locator_candidates(step),
         validation=dict(_step_get(step, "validation", {}) or {}),
-        signals=dict(_step_get(step, "signals", {}) or {}),
+        signals=signals,
         value=_step_get(step, "value"),
         output_key=_step_get(step, "result_key"),
         output=_step_get(step, "output"),
