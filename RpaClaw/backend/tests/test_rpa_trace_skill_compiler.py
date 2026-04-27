@@ -658,6 +658,40 @@ def test_ai_export_task_download_signal_compiles_to_export_task_helper():
     assert "_results['table_row_action'] = _result" in body
 
 
+def test_jalor_export_task_download_uses_scoped_row_selector_helper():
+    trace = RPAAcceptedTrace(
+        trace_id="ai-click-jalor-export-file",
+        trace_type=RPATraceType.AI_OPERATION,
+        source="ai",
+        user_instruction="点击列表中第一行的文件名称",
+        description="Click table row column action",
+        output_key="table_row_action",
+        output={"action_performed": True},
+        signals={"download": {"filename": "ContractList20260427102109.xlsx"}},
+        ai_execution=RPAAIExecution(
+            language="python",
+            code=(
+                "async def run(page, results):\n"
+                "    _rows = page.locator('#taskExportGridTable tbody.igrid-data tr.grid-row')\n"
+                "    _row = _rows.nth(0)\n"
+                "    await _row.locator('td[field=\"tmpName\"] a').click()\n"
+                "    return {'action_performed': True}"
+            ),
+        ),
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert "_download_from_export_task(" in body
+    assert "row_selector='#taskExportGridTable tbody.igrid-data tr.grid-row'" in body
+    assert "action_selector='td[field=\"tmpName\"] a'" in body
+    assert "            _result = await run(current_page, _results)" not in body
+    assert "async with current_page.expect_download() as _dl_info:" not in body
+    assert '_results["download_ContractList20260427102109"]' in body
+    assert "_results['table_row_action'] = _result" in body
+
+
 def test_manual_navigation_signal_click_compiles_to_expect_navigation():
     trace = RPAAcceptedTrace(
         trace_id="menu-settings",
