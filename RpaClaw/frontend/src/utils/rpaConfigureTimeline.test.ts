@@ -1,63 +1,115 @@
 import { describe, expect, it } from 'vitest';
 import {
   getLegacyRpaSteps,
+  getManualRecordingDiagnostics,
+  hasManualRecordingDiagnostics,
+  isRpaTimelineStepDeletable,
   mapRpaConfigureDisplaySteps,
 } from './rpaConfigureTimeline';
 
 describe('rpaConfigureTimeline', () => {
-  it('uses accepted traces as configure-page display steps when trace-first data exists', () => {
+  it('deduplicates recorded actions and their derived manual traces', () => {
     const session = {
       steps: [
         {
-          id: 'legacy-1',
+          id: 'step-search',
           action: 'click',
           description: 'legacy click should only remain for parameterization',
         },
       ],
       traces: [
         {
-          trace_id: 'trace-ai',
-          trace_type: 'ai_operation',
-          source: 'ai',
-          description: 'Open the most Python-related project',
-          user_instruction: '打开和python最相关的项目',
-          output_key: 'selected_project',
-          after_page: { url: 'https://github.com/openai/openai-agents-python' },
-          accepted: true,
-        },
-        {
-          trace_id: 'trace-manual',
+          trace_id: 'trace-step-search',
           trace_type: 'manual_action',
-          source: 'record',
+          source: 'manual',
           action: 'click',
-          description: '点击 link("Pull requests")',
-          locator_candidates: [
-            {
-              selected: true,
-              locator: { method: 'role', role: 'link', name: 'Pull requests' },
-            },
-          ],
-          after_page: { url: 'https://github.com/openai/openai-agents-python/pulls' },
-          accepted: true,
+          description: 'derived manual trace should not duplicate recorded action',
+        },
+      ],
+      recorded_actions: [
+        {
+          step_id: 'step-search',
+          action_kind: 'click',
+          description: 'click button("Search")',
+          target: { method: 'role', role: 'button', name: 'Search' },
+          validation: { status: 'ok' },
+          page_state: { url: 'https://example.test/search' },
         },
       ],
     };
 
     const displaySteps = mapRpaConfigureDisplaySteps(session);
 
-    expect(displaySteps).toHaveLength(2);
+    expect(displaySteps).toHaveLength(1);
     expect(displaySteps[0]).toMatchObject({
-      id: 'trace-ai',
-      action: 'ai_operation',
-      description: 'Open the most Python-related project',
-      source: 'ai',
-      url: 'https://github.com/openai/openai-agents-python',
-      validation: { status: 'ok', details: 'AI Trace' },
+      id: 'step-search',
+      stepId: 'step-search',
+      traceId: 'trace-step-search',
+      action: 'click',
+      description: 'click button("Search")',
+      source: 'record',
+      url: 'https://example.test/search',
+      validation: { status: 'ok', details: 'Accepted manual action' },
     });
-    expect(displaySteps[1].target).toEqual({ method: 'role', role: 'link', name: 'Pull requests' });
+    expect(displaySteps[0].target).toEqual({ method: 'role', role: 'button', name: 'Search' });
   });
 
-  it('keeps legacy steps available separately for fill/select parameterization', () => {
+  it('keeps AI traces when recorded actions replace manual traces', () => {
+    const session = {
+      steps: [
+        {
+          id: 'step-search',
+          action: 'click',
+          description: 'legacy click should only remain for parameterization',
+        },
+      ],
+      traces: [
+        {
+          trace_id: 'trace-step-search',
+          trace_type: 'manual_action',
+          source: 'manual',
+          action: 'click',
+          description: 'legacy manual trace',
+        },
+        {
+          trace_id: 'trace-ai-select',
+          trace_type: 'ai_operation',
+          source: 'ai',
+          user_instruction: 'click the first project',
+          description: 'Click first project',
+          after_page: { url: 'https://github.com/example/repo' },
+          ai_execution: { code: 'async def run(page, results):\n    return {}' },
+        },
+      ],
+      recorded_actions: [
+        {
+          step_id: 'step-search',
+          action_kind: 'click',
+          description: 'click button("Search")',
+          target: { method: 'role', role: 'button', name: 'Search' },
+          validation: { status: 'ok' },
+          page_state: { url: 'https://example.test/search' },
+        },
+      ],
+    };
+
+    const displaySteps = mapRpaConfigureDisplaySteps(session);
+
+    expect(displaySteps.map((step) => step.description)).toEqual([
+      'click button("Search")',
+      'Click first project',
+    ]);
+    expect(displaySteps.map((step) => step.source)).toEqual(['record', 'ai']);
+    expect(displaySteps[1]).toMatchObject({
+      id: 'trace-ai-select',
+      traceId: 'trace-ai-select',
+      action: 'ai_operation',
+      url: 'https://github.com/example/repo',
+      validation: { status: 'ok', details: 'AI Trace' },
+    });
+  });
+
+  it('keeps accepted traces as fallback when recorded actions are absent', () => {
     const session = {
       steps: [
         { id: 'fill-1', action: 'fill', value: 'Alice', sensitive: false },
@@ -71,18 +123,90 @@ describe('rpaConfigureTimeline', () => {
       ],
     };
 
-    expect(mapRpaConfigureDisplaySteps(session)).toHaveLength(1);
+    const displaySteps = mapRpaConfigureDisplaySteps(session);
+
+    expect(displaySteps).toHaveLength(1);
+    expect(displaySteps[0]).toMatchObject({
+      id: 'trace-fill',
+      traceId: 'trace-fill',
+    });
     expect(getLegacyRpaSteps(session)).toEqual(session.steps);
   });
 
-  it('falls back to legacy steps when no accepted traces are present', () => {
+  it('falls back to legacy steps when no recorded actions or traces are present', () => {
     const session = {
       steps: [
         { id: 'click-1', action: 'click', description: 'Click search' },
       ],
       traces: [],
+      recorded_actions: [],
     };
 
     expect(mapRpaConfigureDisplaySteps(session)).toEqual(session.steps);
+  });
+
+  it('maps recording diagnostics back to legacy step indexes', () => {
+    const session = {
+      steps: [
+        {
+          id: 'step-bad',
+          action: 'fill',
+          description: 'Input "foo" into None',
+          locator_candidates: [{ playwright_locator: 'page.locator(".mystery")', selected: true }],
+          url: 'https://example.test/search',
+        },
+      ],
+      recording_diagnostics: [
+        {
+          related_step_id: 'step-bad',
+          related_action_kind: 'fill',
+          failure_reason: 'canonical_target_missing',
+          raw_candidates: [{ playwright_locator: 'page.locator(".mystery")', selected: true }],
+          page_state: { url: 'https://example.test/search' },
+        },
+      ],
+    };
+
+    const diagnostics = getManualRecordingDiagnostics(session);
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
+      stepId: 'step-bad',
+      stepIndex: 0,
+      action: 'fill',
+      failureReason: 'canonical_target_missing',
+      validation: { status: 'broken', details: 'canonical target missing' },
+      configurable: true,
+      url: 'https://example.test/search',
+    });
+    expect(hasManualRecordingDiagnostics(session)).toBe(true);
+  });
+
+  it('allows deleting AI timeline items only when they have stable trace ids', () => {
+    expect(isRpaTimelineStepDeletable({ source: 'ai', traceId: 'trace-ai-project' })).toBe(true);
+    expect(isRpaTimelineStepDeletable({ source: 'ai' })).toBe(false);
+    expect(isRpaTimelineStepDeletable({ source: 'record', traceId: 'trace-step-search' })).toBe(true);
+  });
+
+  it('preserves frame path from recorded actions', () => {
+    const session = {
+      recorded_actions: [
+        {
+          step_id: 'step-iframe',
+          action_kind: 'click',
+          description: 'click link("Runoob Note")',
+          target: { method: 'role', role: 'link', name: 'Runoob Note' },
+          frame_path: ['iframe[title="result"]', 'iframe[src="https://www.runoob.com"]'],
+          validation: { status: 'ok' },
+        },
+      ],
+    };
+
+    const displaySteps = mapRpaConfigureDisplaySteps(session);
+
+    expect(displaySteps[0].frame_path).toEqual([
+      'iframe[title="result"]',
+      'iframe[src="https://www.runoob.com"]',
+    ]);
   });
 });

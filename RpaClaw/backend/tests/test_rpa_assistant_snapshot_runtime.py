@@ -33,3 +33,44 @@ def test_snapshot_v2_js_captures_visible_business_fields():
     assert "data-section" in SNAPSHOT_V2_JS
     assert "data-region" in SNAPSHOT_V2_JS
     assert "detail_section" in SNAPSHOT_V2_JS
+
+
+def test_snapshot_v2_js_collects_structured_table_and_detail_views():
+    assert "table_views: []" in SNAPSHOT_V2_JS
+    assert "detail_views: []" in SNAPSHOT_V2_JS
+    assert "function collectTableViews()" in SNAPSHOT_V2_JS
+    assert "function collectDetailViews()" in SNAPSHOT_V2_JS
+    assert "data-colid" in SNAPSHOT_V2_JS
+    assert "row_count_observed" in SNAPSHOT_V2_JS
+    assert "column_header" in SNAPSHOT_V2_JS
+    assert "row_local_actions" in SNAPSHOT_V2_JS
+    assert "aui-form-item" in SNAPSHOT_V2_JS
+    assert "data_prop" in SNAPSHOT_V2_JS
+    assert "value_kind" in SNAPSHOT_V2_JS
+
+
+def test_snapshot_v2_js_marks_non_row_table_text_as_auxiliary():
+    assert "auxiliary_text" in SNAPSHOT_V2_JS
+    assert "empty_state" in SNAPSHOT_V2_JS
+    assert "tooltip" in SNAPSHOT_V2_JS
+    assert "outside_rows" in SNAPSHOT_V2_JS
+
+
+def test_snapshot_v2_js_assigns_nearby_heading_to_table_view_title():
+    assert "function nearestTableTitle(root)" in SNAPSHOT_V2_JS
+    assert "previousElementSibling" in SNAPSHOT_V2_JS
+    assert "nearest_preceding_heading" in SNAPSHOT_V2_JS
+    assert "title_source" in SNAPSHOT_V2_JS
+
+
+def test_snapshot_v2_js_collects_jalor_grid_as_scoped_table_view():
+    assert "function collectJalorGridTableView(root)" in SNAPSHOT_V2_JS
+    assert ".jalor-igrid" in SNAPSHOT_V2_JS
+    assert ".jalor-igrid-head tbody.igrid-head td" in SNAPSHOT_V2_JS
+    assert ".jalor-igrid-body tbody.igrid-data tr.grid-row" in SNAPSHOT_V2_JS
+    assert "tr.grid-row-group" in SNAPSHOT_V2_JS
+    assert "field=\"tmpName\"" not in SNAPSHOT_V2_JS
+    assert "fieldName || colNumber || `index:${index}`" in SNAPSHOT_V2_JS
+    assert "bodyTableId ? `#${escapeCssIdentifier(bodyTableId)} tbody.igrid-data tr.grid-row`" in SNAPSHOT_V2_JS
+    assert "td[field=\"" in SNAPSHOT_V2_JS
+    assert "framework_hint: 'jalor-igrid'" in SNAPSHOT_V2_JS

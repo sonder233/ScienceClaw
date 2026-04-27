@@ -51,6 +51,26 @@ def test_extract_text_step_becomes_data_capture_trace():
     assert trace.output_key == "latest_issue_title"
 
 
+def test_manual_step_to_trace_preserves_tab_transition_signal():
+    trace = manual_step_to_trace(
+        {
+            "id": "switch-1",
+            "action": "switch_tab",
+            "source": "record",
+            "description": "切换到标签页 iSales+",
+            "tab_id": "tab-root",
+            "source_tab_id": "tab-root",
+            "target_tab_id": "tab-sales",
+        }
+    )
+
+    assert trace.signals["tab"] == {
+        "tab_id": "tab-root",
+        "source_tab_id": "tab-root",
+        "target_tab_id": "tab-sales",
+    }
+
+
 def test_fill_trace_links_literal_value_to_runtime_result_ref():
     runtime_results = RPARuntimeResults(values={"customer_info": {"name": "Alice Zhang"}})
     trace = manual_step_to_trace(
@@ -67,4 +87,29 @@ def test_fill_trace_links_literal_value_to_runtime_result_ref():
 
     assert updated.trace_type == "dataflow_fill"
     assert updated.dataflow.selected_source_ref == "customer_info.name"
+
+
+def test_manual_step_to_trace_preserves_signals_and_filters_invalid_locators():
+    trace = manual_step_to_trace(
+        {
+            "id": "step-4",
+            "action": "fill",
+            "source": "record",
+            "description": "Fill account",
+            "target": '{"selected": true}',
+            "locator_candidates": [
+                {"selected": True},
+                {"locator": {"method": "css", "value": ""}},
+                {"locator": {"method": "role", "role": "textbox", "name": "Account"}, "selected": False},
+            ],
+            "validation": {"status": "broken", "details": "missing locator"},
+            "signals": {"navigation": {"url": "https://example.com/next"}},
+        }
+    )
+
+    assert trace.validation["status"] == "broken"
+    assert trace.signals["navigation"]["url"] == "https://example.com/next"
+    assert trace.locator_candidates == [
+        {"locator": {"method": "role", "role": "textbox", "name": "Account"}, "selected": True}
+    ]
 

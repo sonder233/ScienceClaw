@@ -42,6 +42,15 @@
         return logicalToggleTarget(node) || retarget(node);
     }
 
+    function hoverMenuTriggerTarget(node, retarget) {
+        var target = closestElement(node, 'button, a, [role="button"], [role="link"]') || retarget(node);
+        if (!isElement(target)) return null;
+        var role = (target.getAttribute('role') || '').toLowerCase();
+        if (target.nodeName === 'BUTTON' || target.nodeName === 'A') return target;
+        if (role === 'button' || role === 'link') return target;
+        return null;
+    }
+
     function toggleState(node) {
         var checkbox = asCheckbox(node);
         if (checkbox) return !!checkbox.checked;
@@ -132,6 +141,7 @@
         if (typeof emitAction !== 'function') throw new Error('emitAction is required');
 
         var activeTarget = null;
+        var lastHoverTarget = null;
         var recentAction = null;
         var recentFileInput = new WeakMap();
         var listeners = [];
@@ -237,6 +247,15 @@
             if (activeTarget && sameOrRelatedTarget(activeTarget, logicalActionTarget(event.target, retarget))) {
                 activeTarget = null;
             }
+        });
+
+        addListener('mouseover', function(event) {
+            if (!event.isTrusted || isPaused()) return;
+            var target = hoverMenuTriggerTarget(event.target, retarget);
+            if (!target) return;
+            if (lastHoverTarget && sameOrRelatedTarget(lastHoverTarget, target)) return;
+            lastHoverTarget = target;
+            emitLogicalAction('hover', target, {});
         });
 
         addListener('click', function(event) {

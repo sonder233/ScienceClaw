@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import json
 import sys
@@ -6,27 +7,107 @@ from pathlib import Path
 
 import pytest
 
+import backend.rpa.recording_runtime_agent as recording_runtime_agent
 from backend.rpa.recording_runtime_agent import (
     RecordingRuntimeAgent,
     RECORDING_RUNTIME_SYSTEM_PROMPT,
     _classify_recording_failure,
+    _ensure_expected_effect,
     _parse_json_object,
     _resolve_recording_snapshot_debug_dir,
     _resolve_recording_snapshot_debug_path,
 )
+from backend.rpa.trace_models import RPAPageState
 
 
 class _FakePage:
     url = "https://example.test/start"
 
+    def __init__(self):
+        self._event_handlers = {}
+
     async def title(self):
         return "Example"
+
+    def locator(self, _selector):
+        return _FakeLocator()
 
     async def goto(self, url, wait_until=None):
         self.url = url
 
     async def wait_for_load_state(self, _state):
         return None
+
+    def on(self, event, handler):
+        self._event_handlers.setdefault(event, []).append(handler)
+
+    def remove_listener(self, event, handler):
+        handlers = self._event_handlers.get(event) or []
+        self._event_handlers[event] = [item for item in handlers if item is not handler]
+
+    async def trigger_download(self, filename):
+        download = SimpleNamespace(suggested_filename=filename)
+        for handler in list(self._event_handlers.get("download") or []):
+            result = handler(download)
+            if hasattr(result, "__await__"):
+                await result
+
+    def trigger_download_later(self, filename, delay=0.05):
+        async def emit():
+            await asyncio.sleep(delay)
+            await self.trigger_download(filename)
+
+        asyncio.create_task(emit())
+
+
+class _FakeLocator:
+    def nth(self, _index):
+        return self
+
+    async def click(self):
+        return None
+
+
+class _FakeListPage(_FakePage):
+    def __init__(self):
+        self.url = "https://github.com/trending"
+        self.clicked = []
+        self._selectors = {
+            "h2.lh-condensed a": ["alpha / one", "beta / two", "gamma / three"],
+            "a.download-link": ["Download", "Download", "Download"],
+        }
+
+    def locator(self, selector):
+        return _FakeListLocator(self, selector, self._selectors.get(selector, []))
+
+
+class _FakeListLocator:
+    def __init__(self, page, selector, values, index=None):
+        self.page = page
+        self.selector = selector
+        self.values = values
+        self.index = index
+
+    def nth(self, index):
+        return _FakeListLocator(self.page, self.selector, self.values, index)
+
+    async def count(self):
+        return len(self.values)
+
+    async def inner_text(self):
+        return self.values[self.index or 0]
+
+    async def click(self):
+        self.page.clicked.append((self.selector, self.index or 0))
+        if self.selector == "h2.lh-condensed a":
+            self.page.url = f"https://github.com/{self.values[self.index or 0].replace(' / ', '/')}"
+
+
+class _FakeNavigatedPage(_FakePage):
+    url = "https://github.com/HKUDS/RAG-Anything"
+
+    async def title(self):
+        return "GitHub - HKUDS/RAG-Anything"
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +128,389 @@ def _find_region_with_pair(snapshot, label, value):
             if pair.get("label") == label and pair.get("value") == value:
                 return region
     return None
+
+
+def _ordinal_snapshot():
+    containers = []
+    actionable_nodes = []
+    repos = ["alpha / one", "beta / two", "gamma / three"]
+    for index, repo in enumerate(repos):
+        container_id = f"repo-{index}"
+        containers.append(
+            {
+                "container_id": container_id,
+                "container_kind": "card_group",
+                "name": repo,
+                "bbox": {"x": 10, "y": 100 + index * 90, "width": 800, "height": 80},
+            }
+        )
+        actionable_nodes.append(
+            {
+                "node_id": f"title-{index}",
+                "container_id": container_id,
+                "role": "link",
+                "name": repo,
+                "text": repo,
+                "href": f"/{repo.replace(' / ', '/')}",
+                "collection_container_selector": "article",
+                "collection_item_selector": "h2.lh-condensed a",
+                "collection_item_count": len(repos),
+            }
+        )
+        actionable_nodes.append(
+            {
+                "node_id": f"download-{index}",
+                "container_id": container_id,
+                "role": "link",
+                "name": "Download",
+                "text": "Download",
+                "href": f"/{repo.replace(' / ', '/')}/archive.zip",
+                "collection_container_selector": "article",
+                "collection_item_selector": "a.download-link",
+                "collection_item_count": len(repos),
+            }
+        )
+    return {
+        "url": "https://github.com/trending",
+        "title": "Trending repositories",
+        "frames": [],
+        "content_nodes": [],
+        "containers": containers,
+        "actionable_nodes": actionable_nodes,
+    }
+
+
+def _ordinal_frame_collection_snapshot():
+    return {
+        "url": "https://github.com/trending",
+        "title": "Trending repositories",
+        "actionable_nodes": [],
+        "content_nodes": [],
+        "containers": [],
+        "frames": [
+            {
+                "frame_path": [],
+                "frame_hint": "main document",
+                "elements": [],
+                "collections": [
+                    {
+                        "kind": "repeated_items",
+                        "item_count": 5,
+                        "container_hint": {"locator": {"method": "css", "value": "li"}},
+                        "item_hint": {
+                            "locator": {"method": "css", "value": "button.js-details-target"},
+                            "role": "button",
+                        },
+                        "items": [
+                            {"index": 3, "tag": "button", "role": "button", "name": "Platform"},
+                            {"index": 4, "tag": "button", "role": "button", "name": "Solutions"},
+                            {"index": 5, "tag": "button", "role": "button", "name": "Resources"},
+                            {"index": 6, "tag": "button", "role": "button", "name": "Open Source"},
+                            {"index": 7, "tag": "button", "role": "button", "name": "Enterprise"},
+                        ],
+                    },
+                    {
+                        "kind": "repeated_items",
+                        "item_count": 12,
+                        "container_hint": {
+                            "locator": {
+                                "method": "css",
+                                "value": "div.position-relative.container-lg div div article div",
+                            }
+                        },
+                        "item_hint": {"locator": {"method": "css", "value": "a"}, "role": "link"},
+                        "items": [
+                            {"index": 26, "tag": "a", "role": "link", "name": "7,684"},
+                            {"index": 27, "tag": "a", "role": "link", "name": "1,199"},
+                            {"index": 35, "tag": "a", "role": "link", "name": "4,864"},
+                            {"index": 36, "tag": "a", "role": "link", "name": "402"},
+                        ],
+                    },
+                    {
+                        "kind": "repeated_items",
+                        "item_count": 12,
+                        "container_hint": {
+                            "locator": {
+                                "method": "css",
+                                "value": "div.position-relative.container-lg div div article",
+                            }
+                        },
+                        "item_hint": {
+                            "locator": {"method": "css", "value": "h2.lh-condensed a"},
+                            "role": "link",
+                        },
+                        "items": [
+                            {"index": 25, "tag": "a", "role": "link", "name": "Alishahryar1 / free-claude-code"},
+                            {"index": 34, "tag": "a", "role": "link", "name": "huggingface / ml-intern"},
+                            {"index": 42, "tag": "a", "role": "link", "name": "google / osv-scanner"},
+                        ],
+                    },
+                ],
+            }
+        ],
+    }
+
+
+def test_ordinal_overlay_builds_relative_first_item_name_plan():
+    build_plan = getattr(recording_runtime_agent, "_build_ordinal_overlay_plan")
+
+    plan = build_plan("get the first project name", _ordinal_snapshot())
+
+    assert plan is not None
+    assert plan["expected_effect"] == "extract"
+    assert "page.locator('h2.lh-condensed a').nth(0)" in plan["code"]
+    assert "alpha / one" not in plan["code"]
+
+
+def test_ordinal_overlay_builds_first_n_names_plan():
+    build_plan = getattr(recording_runtime_agent, "_build_ordinal_overlay_plan")
+
+    plan = build_plan("get the first 2 project names", _ordinal_snapshot())
+
+    assert plan is not None
+    assert plan["expected_effect"] == "extract"
+    assert "_limit = min(2, await _items.count())" in plan["code"]
+    assert "return _result" in plan["code"]
+
+
+def test_ordinal_overlay_uses_frame_collection_when_actionable_nodes_are_unannotated():
+    build_plan = getattr(recording_runtime_agent, "_build_ordinal_overlay_plan")
+
+    plan = build_plan("获取第一个项目的名称", _ordinal_frame_collection_snapshot())
+
+    assert plan is not None
+    assert "page.locator('h2.lh-condensed a').nth(0)" in plan["code"]
+    assert "Alishahryar1 / free-claude-code" not in plan["code"]
+
+
+def test_ordinal_overlay_builds_second_download_plan():
+    build_plan = getattr(recording_runtime_agent, "_build_ordinal_overlay_plan")
+
+    plan = build_plan("点击第二项名字进行下载", _ordinal_snapshot())
+
+    assert plan is not None
+    assert plan["expected_effect"] == "none"
+    assert "page.locator('a.download-link').nth(1).click()" in plan["code"]
+    assert "beta / two" not in plan["code"]
+
+
+def test_ordinal_overlay_falls_back_for_identical_action_only_collection():
+    build_plan = getattr(recording_runtime_agent, "_build_ordinal_overlay_plan")
+    snapshot = _ordinal_snapshot()
+    snapshot["actionable_nodes"] = [
+        node for node in snapshot["actionable_nodes"] if str(node.get("node_id", "")).startswith("download-")
+    ]
+
+    plan = build_plan("click the first item", snapshot)
+
+    assert plan is None
+
+
+def test_ordinal_overlay_falls_back_for_semantic_selection():
+    build_plan = getattr(recording_runtime_agent, "_build_ordinal_overlay_plan")
+
+    plan = build_plan("open the project most related to python", _ordinal_snapshot())
+
+    assert plan is None
+
+
+def _table_view_snapshot():
+    return {
+        "url": "https://example.test/grid",
+        "title": "Grid",
+        "frames": [],
+        "actionable_nodes": [],
+        "content_nodes": [],
+        "containers": [],
+        "table_views": [
+            {
+                "kind": "table_view",
+                "framework_hint": "aui-grid",
+                "columns": [
+                    {"index": 0, "column_id": "col_23", "header": "", "role": "row_index"},
+                    {"index": 1, "column_id": "col_24", "header": "", "role": "selection"},
+                    {"index": 2, "column_id": "col_25", "header": "文件名称", "role": "file_link"},
+                    {"index": 3, "column_id": "col_28", "header": "导出状态", "role": "status"},
+                ],
+                "rows": [
+                    {
+                        "index": 0,
+                        "cells": [
+                            {
+                                "column_id": "col_25",
+                                "column_index": 2,
+                                "column_header": "文件名称",
+                                "text": "File_189.xlsx",
+                                "actions": [
+                                    {
+                                        "kind": "link",
+                                        "label": "File_189.xlsx",
+                                        "locator": {
+                                            "method": "relative_css",
+                                            "scope": "row",
+                                            "value": "td[data-colid='col_25'] a",
+                                        },
+                                    }
+                                ],
+                            },
+                            {"column_id": "col_28", "column_index": 3, "column_header": "导出状态", "text": "FINISH", "actions": []},
+                        ],
+                        "locator_hints": [{"kind": "playwright", "expression": "page.locator('table.aui-grid__body tbody tr').nth(0)"}],
+                    },
+                    {
+                        "index": 1,
+                        "cells": [
+                            {
+                                "column_id": "col_25",
+                                "column_index": 2,
+                                "column_header": "文件名称",
+                                "text": "File_380.xlsx",
+                                "actions": [
+                                    {
+                                        "kind": "link",
+                                        "label": "File_380.xlsx",
+                                        "locator": {
+                                            "method": "relative_css",
+                                            "scope": "row",
+                                            "value": "td[data-colid='col_25'] a",
+                                        },
+                                    }
+                                ],
+                            },
+                            {"column_id": "col_28", "column_index": 3, "column_header": "导出状态", "text": "FINISH", "actions": []},
+                        ],
+                        "locator_hints": [{"kind": "playwright", "expression": "page.locator('table.aui-grid__body tbody tr').nth(1)"}],
+                    },
+                ],
+            }
+        ],
+        "detail_views": [],
+    }
+
+
+def test_table_ordinal_lane_clicks_first_row_named_column_link():
+    build_plan = getattr(recording_runtime_agent, "_build_table_ordinal_overlay_plan")
+
+    plan = build_plan("点击第一行的文件名称", _table_view_snapshot())
+
+    assert plan is not None
+    assert plan["table_ordinal_overlay"] is True
+    assert "table.aui-grid__body tbody tr" in plan["code"]
+    assert "td[data-colid='col_25'] a" in plan["code"]
+    assert "File_189.xlsx" not in plan["code"]
+
+
+def test_table_ordinal_lane_extracts_second_row_status():
+    build_plan = getattr(recording_runtime_agent, "_build_table_ordinal_overlay_plan")
+
+    plan = build_plan("提取第二行的导出状态", _table_view_snapshot())
+
+    assert plan is not None
+    assert "nth(1)" in plan["code"]
+    assert "td[data-colid='col_28']" in plan["code"]
+    assert plan["expected_effect"] == "extract"
+
+
+def test_table_ordinal_lane_falls_back_without_column_match():
+    build_plan = getattr(recording_runtime_agent, "_build_table_ordinal_overlay_plan")
+
+    plan = build_plan("点击第一行的审批按钮", _table_view_snapshot())
+
+    assert plan is None
+
+
+def _named_multi_table_view_snapshot():
+    snapshot = _table_view_snapshot()
+    edm_table = snapshot["table_views"][0]
+    edm_table["title"] = "EDM Request"
+    edm_table["title_source"] = "nearest_preceding_heading"
+    edm_table["nearby_headings"] = ["EDM Request"]
+    edm_table["columns"][2]["column_id"] = "col_2"
+    edm_table["columns"][2]["header"] = "File Name"
+    edm_table["columns"][3]["column_id"] = "col_3"
+    edm_table["columns"][3]["header"] = "Export Status"
+    edm_table["rows"][0]["cells"][0]["column_id"] = "col_2"
+    edm_table["rows"][0]["cells"][0]["column_header"] = "File Name"
+    edm_table["rows"][0]["cells"][0]["text"] = "EquipmentConfigurationLevelSplitDataSheet_17728130.xlsx"
+    edm_table["rows"][0]["cells"][0]["actions"][0]["locator"]["value"] = 'td[data-colid="col_2"] a'
+    edm_table["rows"][0]["locator_hints"] = [{"kind": "playwright", "expression": "page.locator('tbody tr').nth(0)"}]
+    edm_table["rows"][1]["cells"][0]["column_id"] = "col_2"
+    edm_table["rows"][1]["cells"][0]["column_header"] = "File Name"
+    edm_table["rows"][1]["locator_hints"] = [{"kind": "playwright", "expression": "page.locator('tbody tr').nth(1)"}]
+    jalor_table = {
+        **edm_table,
+        "title": "Jalor Request",
+        "nearby_headings": ["Jalor Request"],
+    }
+    snapshot["table_views"] = [jalor_table, edm_table]
+    snapshot["actionable_nodes"] = [
+        {
+            "role": "link",
+            "name": "Home",
+            "text": "Home",
+            "collection_item_selector": "div a",
+            "collection_item_count": 6,
+        },
+        {
+            "role": "link",
+            "name": "Request",
+            "text": "Request",
+            "collection_item_selector": "div a",
+            "collection_item_count": 6,
+        },
+    ]
+    return snapshot
+
+
+def test_table_ordinal_lane_scopes_named_table_without_observed_row_text():
+    build_plan = getattr(recording_runtime_agent, "_build_table_ordinal_overlay_plan")
+
+    plan = build_plan("获取EDM Request表格中第一行的File Name", _named_multi_table_view_snapshot())
+
+    assert plan is not None
+    assert plan["table_ordinal_overlay"] is True
+    assert "get_by_text('EDM Request', exact=True)" in plan["code"]
+    assert "following::table" in plan["code"]
+    assert "col_2" in plan["code"]
+    assert "div a" not in plan["code"]
+    assert "EquipmentConfigurationLevelSplitDataSheet_17728130.xlsx" not in plan["code"]
+
+
+def test_table_ordinal_lane_extracts_first_n_rows_as_headered_records():
+    build_plan = getattr(recording_runtime_agent, "_build_table_ordinal_overlay_plan")
+
+    plan = build_plan("获取EDM Request表格中前三行的信息", _named_multi_table_view_snapshot())
+
+    assert plan is not None
+    assert plan["table_ordinal_overlay"] is True
+    assert plan["expected_effect"] == "extract"
+    assert "get_by_text('EDM Request', exact=True)" in plan["code"]
+    assert "_limit = min(3, await _rows.count())" in plan["code"]
+    assert "'File Name'" in plan["code"]
+    assert "'Export Status'" in plan["code"]
+
+
+@pytest.mark.asyncio
+async def test_recording_runtime_agent_uses_ordinal_overlay_without_planner(monkeypatch):
+    async def fake_build_page_snapshot(*_args, **_kwargs):
+        return _ordinal_snapshot()
+
+    async def planner(_payload):
+        raise AssertionError("planner should not be called for high-confidence ordinal tasks")
+
+    monkeypatch.setattr("backend.rpa.recording_runtime_agent.build_page_snapshot", fake_build_page_snapshot)
+
+    page = _FakeListPage()
+    result = await RecordingRuntimeAgent(planner=planner).run(
+        page=page,
+        instruction="get the first project name",
+        runtime_results={},
+    )
+
+    assert result.success is True
+    assert result.output == "alpha / one"
+    assert "page.locator('h2.lh-condensed a').nth(0)" in result.trace.ai_execution.code
+    assert "alpha / one" not in result.trace.ai_execution.code
 
 
 def test_backend_rpa_package_import_is_lazy():
@@ -91,6 +555,14 @@ def test_recording_runtime_prompt_defines_result_return_contract():
     assert "locator_hints" in RECORDING_RUNTIME_SYSTEM_PROMPT
 
 
+def test_recording_runtime_prompt_prefers_structured_snapshot_views():
+    assert "table_views" in RECORDING_RUNTIME_SYSTEM_PROMPT
+    assert "detail_views" in RECORDING_RUNTIME_SYSTEM_PROMPT
+    assert "row-relative" in RECORDING_RUNTIME_SYSTEM_PROMPT
+    assert "column-relative" in RECORDING_RUNTIME_SYSTEM_PROMPT
+    assert "Do not use observed row text as the primary selector when the instruction is ordinal" in RECORDING_RUNTIME_SYSTEM_PROMPT
+
+
 def test_recording_snapshot_debug_dir_falls_back_to_backend_settings(monkeypatch):
     monkeypatch.delenv("RPA_RECORDING_DEBUG_SNAPSHOT_DIR", raising=False)
     monkeypatch.setitem(
@@ -129,6 +601,132 @@ async def test_recording_runtime_agent_accepts_successful_python_plan():
     assert result.trace.output_key == "page_title"
     assert result.trace.output == {"title": "Example"}
     assert result.trace.ai_execution.repair_attempted is False
+
+
+@pytest.mark.asyncio
+async def test_recording_runtime_agent_attaches_locator_stability_metadata_when_available():
+    async def planner(_payload):
+        return {
+            "description": "Open stable action menu",
+            "action_type": "run_python",
+            "expected_effect": "extract",
+            "output_key": "opened_menu",
+            "code": (
+                "async def run(page, results):\n"
+                "    await page.locator('[data-testid=\"menu-btn-a1b2c3d4\"]').click()\n"
+                "    return {'opened': True}"
+            ),
+        }
+
+    result = await RecordingRuntimeAgent(planner=planner).run(
+        page=_FakePage(),
+        instruction="inspect the action menu button",
+        runtime_results={},
+    )
+
+    assert result.success is True
+    metadata = result.trace.locator_stability
+    assert metadata is not None
+    assert metadata.primary_locator["method"] == "css"
+    assert metadata.unstable_signals[0]["attribute"] == "data-testid"
+
+
+@pytest.mark.asyncio
+async def test_recording_runtime_agent_keeps_trace_success_when_no_locator_stability_metadata_is_found():
+    async def planner(_payload):
+        return {
+            "description": "Return summary",
+            "action_type": "run_python",
+            "expected_effect": "extract",
+            "output_key": "summary",
+            "code": "async def run(page, results):\n    return {'summary': 'ok'}",
+        }
+
+    result = await RecordingRuntimeAgent(planner=planner).run(
+        page=_FakePage(),
+        instruction="summarize page",
+        runtime_results={},
+    )
+
+    assert result.success is True
+    assert result.trace.locator_stability is None
+
+
+@pytest.mark.asyncio
+async def test_recording_runtime_agent_extracts_stable_self_and_anchor_signals_from_snapshot(monkeypatch):
+    snapshot = {
+        "url": "https://example.test/dashboard",
+        "title": "Dashboard",
+        "actionable_nodes": [
+            {
+                "role": "button",
+                "name": "Open menu",
+                "text": "Open menu",
+                "locator": {"method": "role", "role": "button", "name": "Open menu"},
+                "container": {"title": "Quarterly Report"},
+            }
+        ],
+        "content_nodes": [],
+        "containers": [],
+        "frames": [],
+    }
+
+    async def fake_build_page_snapshot(_page, _build_frame_path):
+        return snapshot
+
+    monkeypatch.setattr("backend.rpa.recording_runtime_agent.build_page_snapshot", fake_build_page_snapshot)
+
+    async def planner(_payload):
+        return {
+            "description": "Inspect report menu",
+            "action_type": "run_python",
+            "expected_effect": "extract",
+            "code": (
+                "async def run(page, results):\n"
+                "    await page.locator('[data-testid=\"menu-btn-a1b2c3d4\"]').click()\n"
+                "    return {'opened': True}"
+            ),
+        }
+
+    result = await RecordingRuntimeAgent(planner=planner).run(
+        page=_FakePage(),
+        instruction="inspect the report menu button",
+        runtime_results={},
+    )
+
+    assert result.success is True
+    metadata = result.trace.locator_stability
+    assert metadata is not None
+    assert metadata.stable_self_signals["role"] == "button"
+    assert metadata.stable_self_signals["name"] == "Open menu"
+    assert metadata.stable_anchor_signals["title"] == "Quarterly Report"
+    assert metadata.alternate_locators[0].locator == {
+        "method": "role",
+        "role": "button",
+        "name": "Open menu",
+    }
+
+
+@pytest.mark.asyncio
+async def test_ensure_expected_effect_accepts_run_python_click_when_url_changes():
+    page = _FakeNavigatedPage()
+    result = await _ensure_expected_effect(
+        page=page,
+        instruction="click the third project",
+        plan={
+            "action_type": "run_python",
+            "expected_effect": "click",
+            "code": 'async def run(page, results):\n    await page.get_by_role("link", name="HKUDS / RAG-Anything").click()',
+        },
+        result={"success": True, "output": None},
+        before=RPAPageState(url="https://github.com/trending", title="Trending repositories on GitHub today · GitHub"),
+    )
+
+    assert result["success"] is True
+    assert result["effect"]["type"] == "click"
+    assert result["effect"]["action_performed"] is True
+    assert result["effect"]["observed_url_change"] is True
+    assert result["effect"]["url"] == "https://github.com/HKUDS/RAG-Anything"
 
 
 @pytest.mark.asyncio
@@ -314,6 +912,60 @@ async def test_recording_runtime_agent_payload_includes_structured_regions(monke
     region = _find_region_with_pair(calls[0]["snapshot"], "购买人", "李雨晨")
     assert region is not None
     assert "region_catalogue" in calls[0]["snapshot"]
+
+
+@pytest.mark.asyncio
+async def test_recording_runtime_agent_forwards_structured_views_to_planner(monkeypatch):
+    snapshot = {
+        "url": "https://example.test/grid",
+        "title": "Grid",
+        "frames": [],
+        "actionable_nodes": [],
+        "content_nodes": [],
+        "containers": [],
+        "table_views": [
+            {
+                "kind": "table_view",
+                "columns": [{"index": 0, "column_id": "col_25", "header": "文件名称", "role": "file_link"}],
+                "rows": [
+                    {
+                        "index": 0,
+                        "cells": [
+                            {
+                                "column_id": "col_25",
+                                "column_header": "文件名称",
+                                "text": "File_189.xlsx",
+                                "actions": [],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+        "detail_views": [],
+    }
+    calls = []
+
+    async def fake_build_page_snapshot(_page, _build_frame_path):
+        return snapshot
+
+    async def fake_planner(payload):
+        calls.append(payload)
+        return {
+            "description": "Extract grid",
+            "action_type": "run_python",
+            "expected_effect": "extract",
+            "code": "async def run(page, results):\n    return 'ok'",
+            "output_key": "grid_result",
+        }
+
+    monkeypatch.setattr("backend.rpa.recording_runtime_agent.build_page_snapshot", fake_build_page_snapshot)
+
+    agent = RecordingRuntimeAgent(planner=fake_planner)
+    result = await agent.run(page=_FakePage(), instruction="提取第一行文件名称", runtime_results={})
+
+    assert result.success is True
+    assert calls[0]["snapshot"]["table_views"][0]["columns"][0]["header"] == "文件名称"
 
 
 @pytest.mark.asyncio
@@ -794,6 +1446,61 @@ async def test_recording_runtime_agent_accepts_empty_extract_when_plan_explicitl
 
     assert result.success is True
     assert result.output == {"notifications": []}
+
+
+@pytest.mark.asyncio
+async def test_recording_runtime_agent_records_download_signal_from_ai_code():
+    async def planner(_payload):
+        return {
+            "description": "Download report",
+            "action_type": "run_python",
+            "expected_effect": "click",
+            "output_key": "download_report",
+            "code": (
+                "async def run(page, results):\n"
+                "    await page.trigger_download('report.xlsx')\n"
+                "    return {'action_performed': True}"
+            ),
+        }
+
+    page = _FakePage()
+    result = await RecordingRuntimeAgent(planner=planner).run(
+        page=page,
+        instruction="download the report",
+        runtime_results={},
+    )
+
+    assert result.success is True
+    assert result.trace.signals["download"]["filename"] == "report.xlsx"
+    assert result.trace.signals["download"]["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_recording_runtime_agent_waits_briefly_for_click_triggered_download():
+    async def planner(_payload):
+        return {
+            "description": "Click table row column action",
+            "action_type": "run_python",
+            "expected_effect": "none",
+            "output_key": "table_row_action",
+            "code": (
+                "async def run(page, results):\n"
+                "    page.trigger_download_later('delayed-report.xlsx')\n"
+                "    await page.locator('tbody tr').nth(0).click()\n"
+                "    return {'action_performed': True}"
+            ),
+        }
+
+    page = _FakePage()
+    result = await RecordingRuntimeAgent(planner=planner).run(
+        page=page,
+        instruction="click the first file name in the export table",
+        runtime_results={},
+    )
+
+    assert result.success is True
+    assert result.trace.signals["download"]["filename"] == "delayed-report.xlsx"
+    assert result.trace.output_key == "table_row_action"
 
 
 @pytest.mark.asyncio

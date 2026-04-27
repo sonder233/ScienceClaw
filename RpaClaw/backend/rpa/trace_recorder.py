@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 
+from .manual_recording_models import ManualRecordedAction
+from .trace_locator_utils import normalize_locator, normalize_locator_candidates
 from .trace_models import (
     RPAAcceptedTrace,
     RPADataflowMapping,
@@ -33,12 +35,23 @@ def _parse_target_locator(raw_target: Any) -> Dict[str, Any]:
 
 def _locator_candidates(step: Dict[str, Any]) -> List[Dict[str, Any]]:
     candidates = _step_get(step, "locator_candidates", []) or []
-    if isinstance(candidates, list) and candidates:
-        return candidates
     target = _parse_target_locator(_step_get(step, "target", ""))
+    normalized = normalize_locator_candidates(candidates, target=target)
+    if normalized:
+        return normalized
+    target = normalize_locator(target)
     if target:
         return [{"kind": target.get("method", "locator"), "locator": target, "selected": True}]
     return []
+
+
+def _tab_signal(step: Dict[str, Any]) -> Dict[str, Any]:
+    signal: Dict[str, Any] = {}
+    for key in ("tab_id", "source_tab_id", "target_tab_id"):
+        value = _step_get(step, key)
+        if value:
+            signal[key] = value
+    return signal
 
 
 def _page_state_from_step(step: Dict[str, Any], *, prefer_after: bool = True) -> RPAPageState:
@@ -60,6 +73,12 @@ def manual_step_to_trace(step: Dict[str, Any]) -> RPAAcceptedTrace:
     if trace_type == RPATraceType.NAVIGATION and not after_page.url:
         after_page.url = str(_step_get(step, "target", "") or "")
 
+    signals = dict(_step_get(step, "signals", {}) or {})
+    tab_signal = _tab_signal(step)
+    if tab_signal:
+        existing_tab_signal = signals.get("tab") if isinstance(signals.get("tab"), dict) else {}
+        signals["tab"] = {**existing_tab_signal, **tab_signal}
+
     return RPAAcceptedTrace(
         trace_id=trace_id,
         trace_type=trace_type,
@@ -68,11 +87,40 @@ def manual_step_to_trace(step: Dict[str, Any]) -> RPAAcceptedTrace:
         description=str(_step_get(step, "description", "") or action or "Manual action"),
         before_page=RPAPageState(url=str(_step_get(step, "before_url", "") or "")),
         after_page=after_page,
+        frame_path=list(_step_get(step, "frame_path", []) or []),
         locator_candidates=_locator_candidates(step),
-        signals=_step_get(step, "signals", {}) or {},
+        validation=dict(_step_get(step, "validation", {}) or {}),
+        signals=signals,
         value=_step_get(step, "value"),
         output_key=_step_get(step, "result_key"),
         output=_step_get(step, "output"),
+    )
+
+
+def recorded_action_to_trace(action: ManualRecordedAction) -> RPAAcceptedTrace:
+    page_state = action.page_state if isinstance(action.page_state, dict) else {}
+    locator = normalize_locator(action.target or {})
+    locator_candidates = [{"locator": locator, "selected": True}] if locator else []
+    trace_type = (
+        RPATraceType.NAVIGATION
+        if action.action_kind.value == "navigate"
+        else RPATraceType.MANUAL_ACTION
+    )
+    after_page = RPAPageState(
+        url=str(page_state.get("url", "") or ""),
+        title=str(page_state.get("title", "") or ""),
+    )
+    return RPAAcceptedTrace(
+        trace_id=f"trace-{action.step_id or action.action_kind.value}",
+        trace_type=trace_type,
+        source="manual",
+        action=action.action_kind.value,
+        description=action.description,
+        after_page=after_page,
+        frame_path=list(action.frame_path or []),
+        locator_candidates=locator_candidates,
+        validation=dict(action.validation or {}),
+        value=action.value,
     )
 
 
@@ -86,7 +134,7 @@ def infer_dataflow_for_fill(trace: RPAAcceptedTrace, runtime_results: RPARuntime
     selected_locator = {}
     if trace.locator_candidates:
         selected = next((item for item in trace.locator_candidates if item.get("selected")), trace.locator_candidates[0])
-        selected_locator = selected.get("locator") or selected
+        selected_locator = normalize_locator(selected.get("locator") or selected)
 
     trace.dataflow = RPADataflowMapping(
         target_field=RPATargetField(locator_candidates=list(trace.locator_candidates or [])),

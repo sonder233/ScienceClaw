@@ -31,6 +31,20 @@ class RPAAIExecution(BaseModel):
     repair_attempted: bool = False
 
 
+class RPALocatorStabilityCandidate(BaseModel):
+    locator: Dict[str, Any] = Field(default_factory=dict)
+    source: str = ""
+    confidence: str = ""
+
+
+class RPALocatorStabilityMetadata(BaseModel):
+    primary_locator: Dict[str, Any] = Field(default_factory=dict)
+    stable_self_signals: Dict[str, Any] = Field(default_factory=dict)
+    stable_anchor_signals: Dict[str, Any] = Field(default_factory=dict)
+    unstable_signals: List[Dict[str, Any]] = Field(default_factory=list)
+    alternate_locators: List[RPALocatorStabilityCandidate] = Field(default_factory=list)
+
+
 class RPATargetField(BaseModel):
     label: str = ""
     role: str = ""
@@ -55,12 +69,15 @@ class RPAAcceptedTrace(BaseModel):
     description: str = ""
     before_page: RPAPageState = Field(default_factory=RPAPageState)
     after_page: RPAPageState = Field(default_factory=RPAPageState)
+    frame_path: List[str] = Field(default_factory=list)
     locator_candidates: List[Dict[str, Any]] = Field(default_factory=list)
+    validation: Dict[str, Any] = Field(default_factory=dict)
     signals: Dict[str, Any] = Field(default_factory=dict)
     value: Any = None
     output_key: Optional[str] = None
     output: Any = None
     ai_execution: Optional[RPAAIExecution] = None
+    locator_stability: Optional[RPALocatorStabilityMetadata] = None
     dataflow: Optional[RPADataflowMapping] = None
     diagnostics_ref: Optional[str] = None
     accepted: bool = True

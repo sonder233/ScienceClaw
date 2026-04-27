@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen, Globe, FileUp, FileDown, Workflow, CloudUpload, ArrowRight, Loader2, FileText } from 'lucide-vue-next';
+import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, Globe, FileUp, FileDown, Workflow, CloudUpload, ArrowRight, Loader2, FileText, AlertCircle, ChevronDown, ChevronUp, ClipboardCheck } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
+import RpaFlowGuide from '@/components/rpa/RpaFlowGuide.vue';
+import RpaStepTimeline from '@/components/rpa/RpaStepTimeline.vue';
 import { getBackendWsUrl } from '@/utils/sandbox';
 import {
   getFrameSizeFromMetadata,
@@ -18,14 +20,28 @@ import {
   isTerminalScreencastClose,
   shouldShowScreencastReconnectNotice,
 } from '@/utils/screencastReconnect';
+import { buildRpaToolEditorLocation } from '@/utils/rpaMcpConvert';
 import {
   getInitialRpaAgentProgress,
   getRpaAgentProgressForEvent,
   type RpaAgentMessageStatus,
 } from '@/utils/rpaAgentProgress';
+import {
+  applyRpaAssistantRunEvent,
+  createRpaAssistantRun,
+  type RpaAssistantRun,
+  type RpaAssistantRunItem,
+  type RpaAssistantRound,
+} from '@/utils/rpaAssistantRun';
+import {
+  getManualRecordingDiagnostics,
+  isRpaTimelineStepDeletable,
+  mapRpaConfigureDisplaySteps,
+} from '@/utils/rpaConfigureTimeline';
 
 const router = useRouter();
 const route = useRoute();
+const launchSource = ref(typeof route.query.source === 'string' ? route.query.source : '');
 
 const sessionId = ref<string | null>(null);
 const sandboxSessionId = ref<string>('');
@@ -90,6 +106,7 @@ const steps = ref<any[]>([
   { id: '0', title: '初始化环境', description: '正在配置沙箱录制环境...', status: 'active' }
 ]);
 const acceptedTraces = ref<any[]>([]);
+const recordingDiagnostics = ref<any[]>([]);
 
 const parseLocator = (raw: unknown) => {
   if (!raw) return null;
@@ -126,54 +143,6 @@ const formatFramePath = (framePath?: string[]) => {
   return framePath.join(' -> ');
 };
 
-const VALIDATION_LABELS: Record<string, string> = {
-  ok: 'Strict match',
-  ambiguous: 'Ambiguous / not unique',
-  fallback: 'Fallback',
-  warning: 'Warning',
-  broken: 'Broken',
-};
-
-const VALIDATION_CLASS_MAP: Record<string, string> = {
-  ok: 'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-400',
-  ambiguous: 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400',
-  fallback: 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400',
-  warning: 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400',
-  broken: 'bg-rose-100 dark:bg-rose-900/40 text-rose-700 dark:text-rose-400',
-};
-
-const getValidationLabel = (status?: string) => {
-  if (!status) return 'Unknown';
-  return VALIDATION_LABELS[status] || status.replace(/_/g, ' ');
-};
-
-const getValidationClass = (status?: string) => {
-  if (!status) return 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300';
-  return VALIDATION_CLASS_MAP[status] || 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300';
-};
-
-const getStepFileOperation = (step: any): 'upload' | 'download' | '' => {
-  const signals = step?.signals || {};
-  if (step?.action === 'set_input_files' || signals.set_input_files) return 'upload';
-  if (step?.action === 'download' || step?.action === 'download_click' || signals.download) return 'download';
-  if (step?.action === 'file_transform' || signals.file_transform) return 'download';
-  return '';
-};
-
-const getStepFileName = (step: any): string => {
-  const signals = step?.signals || {};
-  const operation = getStepFileOperation(step);
-  if (operation === 'download') {
-    return String(signals.download?.filename || signals.download?.suggested_filename || step?.value || '').trim();
-  }
-  if (operation === 'upload') {
-    const files = signals.set_input_files?.files;
-    if (Array.isArray(files) && files.length > 0) return files.map((item) => String(item)).filter(Boolean).join(', ');
-    return String(step?.value || '').trim();
-  }
-  return '';
-};
-
 const mapServerSteps = (serverSteps: any[]) => ([
   { id: '0', title: '环境就绪', description: '已成功启动 Playwright 浏览器', status: 'completed' },
   ...serverSteps.map((s: any, i: number) => ({
@@ -208,6 +177,7 @@ const mapServerTraces = (serverTraces: any[]) => ([
   { id: '0', title: 'Environment ready', description: 'Playwright browser is ready', status: 'completed', deletable: false },
   ...serverTraces.map((t: any, i: number) => ({
     id: String(i + 1),
+    traceId: t.trace_id || '',
     title: t.description || t.user_instruction || formatTraceType(t.trace_type),
     description: t.user_instruction || t.action || formatTraceType(t.trace_type),
     status: 'completed',
@@ -216,7 +186,10 @@ const mapServerTraces = (serverTraces: any[]) => ([
     source: t.source === 'ai' || t.trace_type === 'ai_operation' || t.trace_type === 'file_transform' ? 'ai' : 'record',
     traceType: t.trace_type,
     sensitive: false,
-    deletable: false,
+    deletable: isRpaTimelineStepDeletable({
+      source: t.source === 'ai' || t.trace_type === 'ai_operation' ? 'ai' : 'record',
+      traceId: t.trace_id || '',
+    }),
     locatorSummary: t.locator_candidates?.length ? formatLocator(t.locator_candidates[0]?.locator || t.locator_candidates[0]) : '',
     frameSummary: t.after_page?.url || '',
     validationStatus: t.accepted === false ? 'warning' : 'ok',
@@ -224,10 +197,32 @@ const mapServerTraces = (serverTraces: any[]) => ([
   }))
 ]);
 
-const refreshTimeline = (serverSteps: any[] = [], serverTraces: any[] = []) => {
-  if (serverTraces.length > 0) {
-    acceptedTraces.value = serverTraces;
-    steps.value = mapServerTraces(serverTraces);
+const mapConfigureTimelineSteps = (session: any) => ([
+  { id: '0', title: 'Environment ready', description: 'Playwright browser is ready', status: 'completed', deletable: false },
+  ...mapRpaConfigureDisplaySteps(session).map((step: any, index: number) => ({
+    id: String(index + 1),
+    stepId: step.stepId || '',
+    traceId: step.traceId || '',
+    title: step.description || step.action,
+    description: step.description || step.action,
+    status: 'completed',
+    source: step.source || 'record',
+    sensitive: step.sensitive || false,
+    deletable: isRpaTimelineStepDeletable({ source: step.source || 'record', traceId: step.traceId || '' }),
+    locatorSummary: formatLocator(step.target),
+    frameSummary: formatFramePath(step.frame_path),
+    validationStatus: step.validation?.status || '',
+    validationDetails: step.validation?.details || '',
+  })),
+]);
+
+const refreshTimeline = (session: any) => {
+  const serverSteps = Array.isArray(session?.steps) ? session.steps : [];
+  const serverTraces = Array.isArray(session?.traces) ? session.traces : [];
+  acceptedTraces.value = serverTraces;
+  recordingDiagnostics.value = getManualRecordingDiagnostics(session);
+  if ((Array.isArray(session?.recorded_actions) && session.recorded_actions.length > 0) || serverTraces.length > 0) {
+    steps.value = mapConfigureTimelineSteps(session);
     return;
   }
   if (serverSteps.length > 0) {
@@ -245,6 +240,7 @@ interface ChatMessage {
   error?: string;
   showCode?: boolean;
   actions?: Array<{ description: string; code: string; showCode?: boolean }>;  // Track agent actions
+  run?: RpaAssistantRun;
   frameSummary?: string;
   locatorSummary?: string;
   collectionSummary?: string;
@@ -255,6 +251,55 @@ const chatMessages = ref<ChatMessage[]>([]);
 const newMessage = ref('');
 const sending = ref(false);
 const agentRunning = ref(false);
+const chatScrollRef = ref<HTMLElement | null>(null);
+
+const scrollAssistantToBottom = () => {
+  void nextTick(() => {
+    const container = chatScrollRef.value;
+    if (!container) return;
+    requestAnimationFrame(() => {
+      container.scrollTop = container.scrollHeight;
+    });
+  });
+};
+
+const runRoundCount = (run?: RpaAssistantRun) => run?.rounds.length || 0;
+
+const getRunTraceCount = (msg: ChatMessage) => (
+  msg.run?.traceCount || Math.max(acceptedTraces.value.length, 0)
+);
+
+const getRunStatusLabel = (msg: ChatMessage) => {
+  if (msg.status === 'error') return '未完成';
+  if (msg.status === 'done') return '已完成';
+  if (msg.processingLabel) return '处理中';
+  return '准备中';
+};
+
+const getRunStatusClass = (msg: ChatMessage) => {
+  if (msg.status === 'error') return 'bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300';
+  if (msg.status === 'done') return 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300';
+  return 'bg-[#f0dbff] text-[#6900b3] dark:bg-[#831bd7]/20 dark:text-purple-200';
+};
+
+const getRoundStatusLabel = (round: RpaAssistantRound) => {
+  if (round.status === 'error') return '需要修复';
+  if (round.status === 'done') return '已接收';
+  return '处理中';
+};
+
+const getRoundStatusClass = (round: RpaAssistantRound) => {
+  if (round.status === 'error') return 'bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300';
+  if (round.status === 'done') return 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300';
+  return 'bg-[#edeef0] text-gray-700 dark:bg-white/10 dark:text-gray-300';
+};
+
+const getRunItemToneClass = (item: RpaAssistantRunItem) => {
+  if (item.kind === 'diagnostic') return 'bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-200';
+  if (item.kind === 'trace') return 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-200';
+  if (item.kind === 'action') return 'bg-[#f6f0ff] text-[#4f00d0] dark:bg-[#831bd7]/15 dark:text-purple-200';
+  return 'bg-[#f2f4f6] text-gray-700 dark:bg-white/[0.08] dark:text-gray-300';
+};
 
 interface PendingConfirm {
   description: string;
@@ -276,8 +321,6 @@ const syncTabs = (nextTabs: BrowserTab[]) => {
   activeTabId.value = active?.tab_id || null;
   syncAddressBar();
 };
-
-const codeActionIndex = (part: string) => Number(part.match(/\[\[CODE_(\d+)\]\]/)?.[1] ?? -1);
 
 const cleanupAssistantText = (text: string, script = '') => {
   let next = text;
@@ -335,9 +378,7 @@ const startPollingSteps = () => {
     if (!sessionId.value) return;
     try {
       const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
-      const serverSteps = resp.data.session?.steps || [];
-      const serverTraces = resp.data.session?.traces || [];
-      refreshTimeline(serverSteps, serverTraces);
+      refreshTimeline(resp.data.session || {});
     } catch (err) {
       // Ignore polling errors
     }
@@ -848,6 +889,12 @@ const stopRecording = async () => {
       console.error('Failed to stop session:', err);
     }
   }
+  if (launchSource.value === 'mcp-tool-studio') {
+    router.push(buildRpaToolEditorLocation({
+      sessionId: sessionId.value || '',
+    }));
+    return;
+  }
   router.push(`/rpa/configure?sessionId=${sessionId.value}`);
 };
 
@@ -859,14 +906,22 @@ const goToSkills = () => {
   router.push('/chat/skills');
 };
 
-const deleteStep = async (stepIndex: number) => {
+const deleteStep = async (step: any, fallbackStepIndex: number) => {
   if (!sessionId.value) return;
   try {
-    await apiClient.delete(`/rpa/session/${sessionId.value}/step/${stepIndex}`);
+    if (step.stepId) {
+      await apiClient.delete(`/rpa/session/${sessionId.value}/timeline-item`, {
+        data: { kind: 'manual_step', step_id: step.stepId },
+      });
+    } else if (step.traceId) {
+      await apiClient.delete(`/rpa/session/${sessionId.value}/timeline-item`, {
+        data: { kind: 'trace', trace_id: step.traceId },
+      });
+    } else {
+      await apiClient.delete(`/rpa/session/${sessionId.value}/step/${fallbackStepIndex}`);
+    }
     const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
-    const serverSteps = resp.data.session?.steps || [];
-    const serverTraces = resp.data.session?.traces || [];
-    refreshTimeline(serverSteps, serverTraces);
+    refreshTimeline(resp.data.session || {});
   } catch (err) {
     console.error('Failed to delete step:', err);
   }
@@ -900,9 +955,11 @@ const sendMessage = async () => {
     time: now,
     status: initialProgress.status,
     processingLabel: initialProgress.label,
+    run: createRpaAssistantRun(now),
   };
   chatMessages.value.push(assistantMsg);
   const msgIdx = chatMessages.value.length - 1;
+  scrollAssistantToBottom();
 
   try {
     const resp = await fetch(`/api/v1/rpa/session/${sessionId.value}/chat`, {
@@ -948,6 +1005,13 @@ const sendMessage = async () => {
             if (progress) {
               chatMessages.value[msgIdx].status = progress.status;
               chatMessages.value[msgIdx].processingLabel = progress.label;
+            }
+            if (chatMessages.value[msgIdx].run) {
+              chatMessages.value[msgIdx].run = applyRpaAssistantRunEvent(
+                chatMessages.value[msgIdx].run!,
+                eventType,
+                data,
+              );
             }
             if (eventType === 'message_chunk') {
               chatMessages.value[msgIdx].text += data.text || '';
@@ -1031,6 +1095,7 @@ const sendMessage = async () => {
               chatMessages.value[msgIdx].error = data.message || '未知错误';
               agentRunning.value = false;
             }
+            scrollAssistantToBottom();
           } catch { /* ignore parse errors */ }
           eventType = '';
         }
@@ -1054,118 +1119,36 @@ const sendMessage = async () => {
 <template>
   <div class="flex flex-col h-screen bg-[#f5f6f7] dark:bg-[#161618] overflow-hidden">
     <!-- Header -->
-    <header class="h-16 flex-shrink-0 bg-gradient-to-r from-[#831bd7] to-[#ac0089] shadow-lg flex justify-between items-center px-8 z-50">
-      <div class="flex items-center gap-4">
-        <Radio class="text-white animate-pulse" :size="24" />
-        <h1 class="text-white font-extrabold text-xl tracking-tight">技能录制器</h1>
-        <div class="ml-4 px-3 py-1 bg-white/20 rounded-full flex items-center gap-2">
-          <div class="w-2 h-2 rounded-full bg-red-400 animate-pulse"></div>
-          <span class="text-white/90 text-[10px] font-bold uppercase tracking-wider">正在录制 ({{ recordingTime }})</span>
-        </div>
-      </div>
-      <div class="flex items-center gap-4">
-        <button
-          @click="goToHome"
-          class="flex items-center gap-2 bg-white/10 text-white font-medium px-4 py-2 rounded-full hover:bg-white/20 transition-all text-sm"
-        >
-          <House :size="16" />
-          返回首页
-        </button>
-        <button
-          @click="goToSkills"
-          class="flex items-center gap-2 bg-white/10 text-white font-medium px-4 py-2 rounded-full hover:bg-white/20 transition-all text-sm"
-        >
-          <FolderOpen :size="16" />
-          技能库
-        </button>
-        <button
-          @click="stopRecording"
-          class="bg-white dark:bg-[#272728] text-[#831bd7] font-bold px-6 py-2 rounded-full hover:bg-white/90 transition-all shadow-md active:scale-95 text-sm"
-        >
-          完成录制
-        </button>
-      </div>
-    </header>
+    <RpaFlowGuide
+      current-step="record"
+      :session-id="sessionId"
+      :recorded-step-count="Math.max(steps.length - 1, 0)"
+      :diagnostic-count="recordingDiagnostics.length"
+      :is-recording="isRecording"
+      :recording-time="recordingTime"
+      primary-label="完成录制"
+      @home="goToHome"
+      @skills="goToSkills"
+      @go-configure="stopRecording"
+      @primary-action="stopRecording"
+    />
 
     <!-- Main Content -->
     <div class="flex-1 flex overflow-hidden">
       <!-- Left Sidebar: Steps -->
-      <aside class="w-80 bg-[#eff1f2] dark:bg-[#212122] border-r border-gray-200 dark:border-gray-700 p-6 overflow-y-auto flex flex-col">
-        <div class="flex items-center justify-between mb-8">
-          <h2 class="text-gray-900 dark:text-gray-100 font-extrabold text-lg">录制步骤</h2>
-          <span class="text-[#831bd7] text-[10px] font-bold bg-[#c384ff]/20 px-2 py-1 rounded-md">{{ steps.length }} 步</span>
-        </div>
-
-        <div class="space-y-4">
-          <div
-            v-for="(step, index) in steps"
-            :key="step.id"
-            class="bg-white dark:bg-[#272728] p-4 rounded-xl shadow-sm border-l-4 transition-all group relative"
-            :class="[ step.source === 'ai' ? 'border-[#ac0089]' : (step.status === 'active' ? 'border-[#831bd7]' : 'border-gray-200 dark:border-gray-700 opacity-70') ]"
-          >
-            <div class="flex justify-between items-start mb-1">
-              <div class="flex items-center gap-1.5">
-                <Bot v-if="step.source === 'ai'" class="text-[#ac0089]" :size="12" />
-                <span
-                  v-if="getStepFileOperation(step)"
-                  class="inline-flex size-4 items-center justify-center rounded-full"
-                  :class="getStepFileOperation(step) === 'upload' ? 'bg-violet-100 text-violet-600 dark:bg-violet-900/40 dark:text-violet-300' : 'bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-200'"
-                  :title="getStepFileOperation(step) === 'upload' ? '文件上传' : '文件下载'"
-                >
-                  <FileUp v-if="getStepFileOperation(step) === 'upload'" :size="11" />
-                  <FileDown v-else :size="11" />
-                </span>
-                <p class="text-[10px] font-bold" :class="step.source === 'ai' ? 'text-[#ac0089]' : (step.status === 'active' ? 'text-[#831bd7]' : 'text-gray-400 dark:text-gray-500')">
-                  {{ step.source === 'ai' ? 'AI' : '步骤' }} {{ step.id.padStart(2, '0') }}
-                </p>
-              </div>
-              <div class="flex items-center gap-1">
-                <button
-                  v-if="index > 0 && step.deletable !== false"
-                  @click="deleteStep(index - 1)"
-                  class="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-red-50 rounded"
-                  title="删除步骤"
-                >
-                  <X class="text-red-500" :size="14" />
-                </button>
-                <CheckCircle v-if="step.status === 'completed'" class="text-green-500" :size="14" />
-              </div>
-            </div>
-            <h3 class="text-gray-900 dark:text-gray-100 font-semibold text-sm">{{ step.title }}</h3>
-            <p class="text-gray-500 dark:text-gray-400 text-[11px] mt-2 leading-relaxed">{{ step.description }}</p>
-            <div v-if="step.locatorSummary || step.frameSummary || getStepFileName(step) || step.validationStatus" class="mt-3 space-y-1.5 text-[10px] text-gray-500 dark:text-gray-400">
-              <p v-if="step.locatorSummary" class="break-all">
-                <span class="font-semibold text-gray-600 dark:text-gray-400">Locator:</span>
-                <span class="font-mono ml-1">{{ step.locatorSummary }}</span>
-              </p>
-              <p v-if="step.frameSummary" class="break-all">
-                <span class="font-semibold text-gray-600 dark:text-gray-400">Frame:</span>
-                <span class="font-mono ml-1">{{ step.frameSummary }}</span>
-              </p>
-              <p v-if="getStepFileName(step)" class="break-all">
-                <span class="font-semibold text-gray-600 dark:text-gray-400">文件:</span>
-                <span class="font-mono ml-1">{{ getStepFileName(step) }}</span>
-              </p>
-              <p v-if="step.validationStatus" class="break-all">
-                <span class="font-semibold text-gray-600 dark:text-gray-400">Validation:</span>
-                <span
-                  class="ml-1 px-1.5 py-0.5 rounded-full"
-                  :class="getValidationClass(step.validationStatus)"
-                >
-                  {{ getValidationLabel(step.validationStatus) }}
-                </span>
-                <span v-if="step.validationDetails" class="ml-1">{{ step.validationDetails }}</span>
-              </p>
-            </div>
-          </div>
-
-          <div v-if="isRecording" class="flex flex-col items-center justify-center py-8 gap-3 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-xl opacity-60">
-            <div class="animate-spin text-[#831bd7]">
-              <Wand2 :size="20" />
-            </div>
-            <p class="text-xs text-gray-500 dark:text-gray-400 font-medium">检测新操作中...</p>
-          </div>
-        </div>
+      <aside class="flex w-80 flex-shrink-0 overflow-hidden bg-[#eff1f2] dark:bg-[#212122]">
+        <RpaStepTimeline
+          :steps="steps"
+          mode="record"
+          :is-recording="isRecording"
+          :auto-scroll="true"
+          :active-index="isRecording && steps.length ? steps.length - 1 : null"
+          :diagnostics-count="recordingDiagnostics.length"
+          diagnostics-message="这些步骤不会进入 accepted timeline，完成录制后需要在配置页修复或删除。"
+          show-delete
+          empty-message="在浏览器中操作后，步骤会自动出现在这里。"
+          @delete-step="deleteStep($event.step, $event.index - 1)"
+        />
       </aside>
 
       <!-- Center: Screencast Viewport -->
@@ -1430,7 +1413,7 @@ const sendMessage = async () => {
                 <p
                   class="text-[10px] font-bold"
                   :class="agentRunning ? 'text-orange-500' : 'text-[#831bd7]'"
-                  v-text="agentRunning ? 'Agent 运行中...' : 'Trace-first 智能录制'"
+                  v-text="agentRunning ? '正在处理你的操作...' : '按描述录制操作'"
                 ></p>
               </div>
             </div>
@@ -1444,7 +1427,7 @@ const sendMessage = async () => {
           </div>
         </div>
 
-        <div class="flex-1 overflow-y-auto p-6 space-y-6 bg-[#eff1f2] dark:bg-[#212122]">
+        <div ref="chatScrollRef" class="flex-1 overflow-y-auto p-6 space-y-6 bg-[#eff1f2] dark:bg-[#212122]">
           <div v-if="chatMessages.length === 0" class="text-center text-gray-400 dark:text-gray-500 text-xs mt-8">
             在 VNC 中操作浏览器，步骤会自动记录到左侧面板。
           </div>
@@ -1455,66 +1438,121 @@ const sendMessage = async () => {
             :class="msg.role === 'user' ? 'items-end' : 'items-start'"
           >
             <div
-              class="max-w-[85%] min-w-0 overflow-hidden p-3 rounded-2xl text-xs leading-relaxed break-words [overflow-wrap:anywhere]"
-              :class="msg.role === 'user' ? 'bg-[#831bd7] text-white rounded-tr-none shadow-md shadow-purple-100' : 'bg-white dark:bg-[#272728] text-gray-700 dark:text-gray-300 rounded-tl-none border border-gray-100 dark:border-gray-800'"
+              v-if="msg.role === 'user'"
+              class="max-w-[85%] min-w-0 overflow-hidden rounded-2xl rounded-tr-none bg-[#831bd7] p-3 text-xs leading-relaxed text-white shadow-md shadow-purple-100 break-words [overflow-wrap:anywhere]"
             >
-              <!-- Message text with inline code blocks for agent actions -->
-              <div v-if="msg.actions && msg.actions.length > 0">
-                <template v-for="(part, pidx) in msg.text.split(/(\[\[CODE_\d+\]\])/)" :key="pidx">
-                  <span v-if="!part.match(/\[\[CODE_(\d+)\]\]/)" class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ part }}</span>
-                  <div v-else class="inline-block ml-2">
-                    <button
-                      @click="msg.actions[codeActionIndex(part)].showCode = !msg.actions[codeActionIndex(part)].showCode"
-                      class="inline-flex items-center gap-1 text-[10px] text-[#831bd7] hover:underline font-medium"
-                    >
-                      <Code :size="10" />
-                      {{ msg.actions[codeActionIndex(part)].showCode ? '收起' : '查看代码' }}
-                    </button>
-                    <pre v-if="msg.actions[codeActionIndex(part)].showCode" class="mt-1 bg-gray-900 dark:bg-gray-800 text-green-300 text-[10px] p-2 rounded-lg overflow-x-auto max-h-32 overflow-y-auto"><code>{{ msg.actions[codeActionIndex(part)].code }}</code></pre>
+              <div class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ msg.text }}</div>
+            </div>
+
+            <div
+              v-else-if="msg.run"
+              class="w-full max-w-[94%] overflow-hidden rounded-lg bg-white p-3 text-xs text-gray-800 shadow-[0_16px_36px_rgba(25,28,30,0.06)] dark:bg-[#272728] dark:text-gray-200"
+            >
+              <div class="flex min-w-0 items-start justify-between gap-2">
+                <div class="flex min-w-0 items-center gap-2">
+                  <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-[#831bd7] to-[#ac0089] text-white">
+                    <Wand2 :size="16" />
                   </div>
-                </template>
+                  <div class="min-w-0">
+                    <div class="truncate text-[12px] font-bold text-gray-950 dark:text-gray-100">任务处理进度</div>
+                    <div class="mt-0.5 flex flex-wrap gap-1 text-[9px] font-semibold text-gray-500 dark:text-gray-400">
+                      <span>{{ runRoundCount(msg.run) }} 次尝试</span>
+                      <span>·</span>
+                      <span>已记录 {{ getRunTraceCount(msg) }} 步</span>
+                      <span>·</span>
+                      <span>{{ msg.time }}</span>
+                    </div>
+                  </div>
+                </div>
+                <span class="shrink-0 rounded px-2 py-1 text-[9px] font-bold" :class="getRunStatusClass(msg)">
+                  {{ getRunStatusLabel(msg) }}
+                </span>
               </div>
-              <div v-else class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ msg.text }}</div>
-              <div v-if="msg.status === 'executing'" class="mt-2 flex items-center gap-1.5 text-[10px] text-[#831bd7] font-medium">
-                <div class="w-2 h-2 rounded-full bg-[#831bd7] animate-pulse"></div>
-                <span>{{ msg.processingLabel || '正在执行...' }}</span>
+
+              <div v-if="msg.run.rounds.length === 0" class="mt-3 rounded-lg bg-[#f2f4f6] p-3 dark:bg-white/[0.08]">
+                <div class="flex items-center gap-2 text-[11px] font-semibold text-[#831bd7] dark:text-purple-200">
+                  <Loader2 :size="13" class="animate-spin" />
+                  <span>{{ msg.processingLabel || 'Agent 正在规划录制步骤...' }}</span>
+                </div>
               </div>
-              <div v-if="msg.status === 'error' && msg.error" class="mt-2 text-[10px] text-red-500 bg-red-50 dark:bg-red-900/30 p-2 rounded-lg">
-                {{ msg.error }}
+
+              <div v-else class="mt-3 space-y-2">
+                <section
+                  v-for="round in msg.run.rounds"
+                  :key="round.id"
+                  class="rounded-lg bg-[#f8f9fb] p-2.5 dark:bg-white/[0.06]"
+                >
+                  <div class="mb-2 flex items-center justify-between gap-2">
+                    <div class="text-[10px] font-bold text-gray-900 dark:text-gray-100">第 {{ round.index }} 次尝试</div>
+                    <span class="rounded px-1.5 py-0.5 text-[9px] font-bold" :class="getRoundStatusClass(round)">
+                      {{ getRoundStatusLabel(round) }}
+                    </span>
+                  </div>
+
+                  <div class="space-y-1.5">
+                    <div
+                      v-for="item in round.items"
+                      :key="item.id"
+                      class="min-w-0 rounded-md p-2"
+                      :class="getRunItemToneClass(item)"
+                    >
+                      <div class="flex min-w-0 gap-2">
+                        <div class="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded bg-white/70 dark:bg-black/20">
+                          <Bot v-if="item.kind === 'plan'" :size="12" />
+                          <Terminal v-else-if="item.kind === 'action'" :size="12" />
+                          <ClipboardCheck v-else-if="item.kind === 'trace'" :size="12" />
+                          <AlertCircle v-else-if="item.kind === 'diagnostic'" :size="12" />
+                          <CheckCircle v-else :size="12" />
+                        </div>
+                        <div class="min-w-0 flex-1">
+                          <div class="break-words text-[11px] font-bold leading-snug [overflow-wrap:anywhere]">{{ item.title }}</div>
+                          <div v-if="item.detail" class="mt-1 whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed opacity-85 [overflow-wrap:anywhere]">{{ item.detail }}</div>
+                          <button
+                            v-if="item.code"
+                            @click="item.showCode = !item.showCode"
+                            class="mt-2 inline-flex items-center gap-1 rounded bg-white/70 px-2 py-1 text-[10px] font-bold text-[#831bd7] transition hover:bg-white dark:bg-black/20 dark:text-purple-200"
+                          >
+                            <Code :size="11" />
+                            {{ item.showCode ? '收起技术细节' : '查看技术细节' }}
+                            <ChevronUp v-if="item.showCode" :size="11" />
+                            <ChevronDown v-else :size="11" />
+                          </button>
+                          <pre v-if="item.code && item.showCode" class="mt-2 max-h-40 overflow-auto rounded-md bg-[#101828] p-2 text-[10px] leading-relaxed text-emerald-200"><code>{{ item.code }}</code></pre>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </section>
               </div>
-              <div v-if="msg.status === 'error' && msg.diagnostics?.length" class="mt-2 text-[10px] text-red-600 bg-red-50 dark:bg-red-900/30 border border-red-100 dark:border-red-800/60 p-2 rounded-lg space-y-1">
-                <div class="font-bold">失败诊断</div>
-                <div v-for="(diagnostic, didx) in msg.diagnostics" :key="didx" class="font-mono whitespace-pre-wrap break-words">
+
+              <div
+                v-if="msg.status === 'done'"
+                class="mt-3 flex items-start gap-2 rounded-lg bg-emerald-50 p-2 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-200"
+              >
+                <CheckCircle :size="13" class="mt-0.5 shrink-0" />
+                <span class="min-w-0 break-words">任务完成，已记录 {{ getRunTraceCount(msg) }} 个可回放步骤。</span>
+              </div>
+
+              <div
+                v-if="msg.status === 'error' && (msg.run.error || msg.run.diagnostics.length)"
+                class="mt-3 rounded-lg bg-red-50 p-2 text-[10px] text-red-700 dark:bg-red-950/30 dark:text-red-200"
+              >
+                <div class="mb-1 flex items-center gap-1 font-bold">
+                  <AlertCircle :size="12" />
+                  <span>失败诊断</span>
+                </div>
+                <div v-if="msg.run.error" class="whitespace-pre-wrap break-words font-mono [overflow-wrap:anywhere]">{{ msg.run.error }}</div>
+                <div v-for="(diagnostic, didx) in msg.run.diagnostics" :key="didx" class="mt-1 whitespace-pre-wrap break-words font-mono opacity-90 [overflow-wrap:anywhere]">
                   {{ didx + 1 }}. {{ diagnostic }}
                 </div>
               </div>
-              <div v-if="msg.frameSummary || msg.collectionSummary || msg.locatorSummary" class="mt-2 space-y-1 text-[10px] text-gray-500 dark:text-gray-400">
-                <div v-if="msg.frameSummary">
-                  <span class="font-semibold text-gray-600 dark:text-gray-400">Frame:</span>
-                  <span class="ml-1 font-mono">{{ msg.frameSummary }}</span>
-                </div>
-                <div v-if="msg.collectionSummary">
-                  <span class="font-semibold text-gray-600 dark:text-gray-400">Collection:</span>
-                  <span class="ml-1">{{ msg.collectionSummary }}</span>
-                </div>
-                <div v-if="msg.locatorSummary">
-                  <span class="font-semibold text-gray-600 dark:text-gray-400">Locator:</span>
-                  <span class="ml-1">{{ msg.locatorSummary }}</span>
-                </div>
-              </div>
-              <div v-if="msg.status === 'done' && msg.role === 'assistant'" class="mt-2 flex items-center gap-1 text-[10px] text-green-600 font-medium">
-                <CheckCircle :size="10" /> 执行成功
-              </div>
-              <!-- Legacy script toggle (for non-agent mode) -->
-              <button
-                v-if="msg.script"
-                @click="msg.showCode = !msg.showCode"
-                class="mt-2 flex items-center gap-1 text-[10px] text-[#831bd7] hover:underline font-medium"
-              >
-                <Code :size="10" />
-                {{ msg.showCode ? '收起代码' : '查看代码' }}
-              </button>
-              <pre v-if="msg.script && msg.showCode" class="mt-2 bg-gray-900 dark:bg-gray-800 text-green-300 text-[10px] p-3 rounded-lg overflow-x-auto max-h-48 overflow-y-auto"><code>{{ msg.script }}</code></pre>
+            </div>
+
+            <div
+              v-else
+              class="max-w-[85%] min-w-0 overflow-hidden rounded-2xl rounded-tl-none bg-white p-3 text-xs leading-relaxed text-gray-700 shadow-sm dark:bg-[#272728] dark:text-gray-300"
+            >
+              <div class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ msg.text }}</div>
             </div>
             <span class="text-[9px] text-gray-400 dark:text-gray-500 font-medium px-1">{{ msg.time }}</span>
           </div>
