@@ -19,7 +19,7 @@ from backend.config import settings
 from .cdp_connector import get_cdp_connector
 from .frame_selectors import build_frame_path
 from .playwright_security import get_context_kwargs
-from .trace_models import RPAAcceptedTrace, RPATraceDiagnostic, RPARuntimeResults
+from .trace_models import RPAAcceptedTrace, RPAAIExecution, RPATraceDiagnostic, RPARuntimeResults, RPATraceType
 from .trace_recorder import infer_dataflow_for_fill, manual_step_to_trace
 from .upload_source import default_asset_path, default_upload_source_from_staging, download_result_key, safe_asset_filename
 
@@ -457,38 +457,50 @@ class RPASessionManager:
 
         for index, step in reversed(list(enumerate(session.steps[-20:], start=max(0, len(session.steps) - 20)))):
             download_signal = self._download_signal_for_step(step)
+            transform_signal = {}
             if not download_signal:
+                step_signals = step.signals if isinstance(step.signals, dict) else {}
+                transform_signal = step_signals.get("file_transform") if isinstance(step_signals.get("file_transform"), dict) else {}
+            if not download_signal and not transform_signal:
                 continue
-            download_name = str(download_signal.get("filename") or "")
-            download_size = download_signal.get("size")
-            download_sha = str(download_signal.get("sha256") or "")
+            if download_signal:
+                artifact_name = str(download_signal.get("filename") or "")
+                artifact_size = download_signal.get("size")
+                artifact_sha = str(download_signal.get("sha256") or "")
+                result_key = str(download_signal.get("result_key") or download_result_key(artifact_name))
+            else:
+                result_key = str(transform_signal.get("output_result_key") or step.result_key or "")
+                runtime = session.runtime_results.values.get(result_key)
+                runtime = runtime if isinstance(runtime, dict) else {}
+                artifact_name = str(runtime.get("filename") or transform_signal.get("output_filename") or step.value or "")
+                artifact_size = runtime.get("size")
+                artifact_sha = str(runtime.get("sha256") or "")
 
             confidence = ""
             reason = ""
-            if upload_sha and download_sha and upload_sha == download_sha:
+            if upload_sha and artifact_sha and upload_sha == artifact_sha:
                 confidence = "high"
                 reason = "sha256"
             elif (
                 upload_name
-                and download_name
-                and self._same_filename(upload_name, download_name)
+                and artifact_name
+                and self._same_filename(upload_name, artifact_name)
                 and upload_size is not None
-                and download_size is not None
-                and self._same_size(upload_size, download_size)
+                and artifact_size is not None
+                and self._same_size(upload_size, artifact_size)
             ):
                 confidence = "high"
                 reason = "filename+size"
-            elif upload_name and download_name and self._same_filename(upload_name, download_name):
+            elif upload_name and artifact_name and self._same_filename(upload_name, artifact_name):
                 confidence = "medium"
                 reason = "filename"
-            elif upload_name and download_name and self._same_stem(upload_name, download_name):
+            elif upload_name and artifact_name and self._same_stem(upload_name, artifact_name):
                 confidence = "low"
                 reason = "filename_stem"
 
             if not confidence:
                 continue
 
-            result_key = str(download_signal.get("result_key") or download_result_key(download_name))
             signals["upload_hint"] = {
                 "suggested_mode": "dataflow",
                 "source_step_id": step.id,
@@ -496,7 +508,7 @@ class RPASessionManager:
                 "source_result_key": result_key,
                 "match_reason": reason,
                 "confidence": confidence,
-                "filename": download_name,
+                "filename": artifact_name,
             }
             return
 
@@ -1310,6 +1322,141 @@ class RPASessionManager:
         await self._broadcast_step(session_id, step)
         return step
 
+    async def add_file_transform_step(
+        self,
+        session_id: str,
+        *,
+        source_result_key: str,
+        source_step_id: str,
+        instruction: str,
+        output_filename: str,
+        output_result_key: str,
+        code: str,
+        script_path: str,
+        output_path: str,
+        result: Dict[str, Any],
+        auto_link_next_upload: bool = True,
+    ) -> RPAStep:
+        session = self.sessions.get(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+
+        source_index = next(
+            (index for index, item in enumerate(session.steps) if item.id == source_step_id),
+            len(session.steps) - 1,
+        )
+        insert_at = min(max(source_index + 1, 0), len(session.steps))
+        signals = {
+            "file_transform": {
+                "input": {
+                    "mode": "dataflow",
+                    "source_step_id": source_step_id,
+                    "source_result_key": source_result_key,
+                    "file_field": "path",
+                },
+                "instruction": instruction,
+                "output_filename": output_filename,
+                "output_result_key": output_result_key,
+                "script_path": script_path,
+                "output_path": output_path,
+                "code": code,
+            }
+        }
+        step = RPAStep(
+            id=str(uuid.uuid4()),
+            action="file_transform",
+            target="",
+            signals=signals,
+            value=output_filename,
+            description=f"处理文件生成 {output_filename}",
+            source="ai",
+            result_key=output_result_key,
+        )
+        session.steps.insert(insert_at, step)
+
+        runtime_payload = dict(result or {})
+        runtime_payload.setdefault("filename", output_filename)
+        runtime_payload.setdefault("path", output_path)
+        session.runtime_results.write(output_result_key, runtime_payload)
+
+        trace = RPAAcceptedTrace(
+            trace_id=f"trace-{step.id}",
+            trace_type=RPATraceType.FILE_TRANSFORM,
+            source="ai",
+            user_instruction=instruction,
+            action="file_transform",
+            description=step.description or "",
+            signals=signals,
+            value=output_filename,
+            output_key=output_result_key,
+            output=runtime_payload,
+            ai_execution=RPAAIExecution(
+                language="python",
+                code=code,
+                output=runtime_payload,
+            ),
+        )
+        trace_insert_at = self._trace_insert_index_after_step(session, source_step_id)
+        session.traces.insert(trace_insert_at, trace)
+
+        if auto_link_next_upload:
+            await self._link_next_upload_to_result(
+                session_id,
+                start_index=insert_at + 1,
+                source_step_id=step.id,
+                source_result_key=output_result_key,
+                filename=output_filename,
+            )
+
+        await self._broadcast_step(session_id, step)
+        await self._broadcast_trace(session_id, trace)
+        return step
+
+    @staticmethod
+    def _trace_insert_index_after_step(session: RPASession, source_step_id: str) -> int:
+        source_trace_id = f"trace-{source_step_id}"
+        for index, trace in enumerate(session.traces):
+            if trace.trace_id == source_trace_id:
+                return index + 1
+        return len(session.traces)
+
+    async def _link_next_upload_to_result(
+        self,
+        session_id: str,
+        *,
+        start_index: int,
+        source_step_id: str,
+        source_result_key: str,
+        filename: str,
+    ) -> None:
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+        for index in range(start_index, len(session.steps)):
+            step = session.steps[index]
+            if step.action != "set_input_files":
+                continue
+            signals = dict(step.signals or {})
+            signals["upload_source"] = {
+                "mode": "dataflow",
+                "source_step_id": source_step_id,
+                "source_result_key": source_result_key,
+                "file_field": "path",
+                "original_filename": filename,
+            }
+            signals["upload_hint"] = {
+                "suggested_mode": "dataflow",
+                "source_step_id": source_step_id,
+                "source_step_index": start_index - 1,
+                "source_result_key": source_result_key,
+                "filename": filename,
+                "reason": "file_transform",
+            }
+            step.signals = signals
+            await self._sync_trace_signals_for_step(session_id, step)
+            await self._broadcast_step(session_id, step)
+            return
+
     async def attach_step_asset(
         self,
         session_id: str,
@@ -1420,9 +1567,58 @@ class RPASessionManager:
                     "size": download_signal.get("size"),
                     "sha256": download_signal.get("sha256"),
                     "path": download_signal.get("path") or download_signal.get("saved_path"),
+                    "kind": "download",
+                }
+            )
+        for index, step in enumerate(session.steps):
+            signals = step.signals if isinstance(step.signals, dict) else {}
+            transform = signals.get("file_transform")
+            if not isinstance(transform, dict):
+                continue
+            output_result_key = str(transform.get("output_result_key") or step.result_key or "")
+            if not output_result_key:
+                continue
+            runtime = session.runtime_results.values.get(output_result_key)
+            runtime = runtime if isinstance(runtime, dict) else {}
+            filename = str(
+                runtime.get("filename")
+                or transform.get("output_filename")
+                or step.value
+                or "converted.xlsx"
+            )
+            result.append(
+                {
+                    "step_index": index,
+                    "step_id": step.id,
+                    "filename": filename,
+                    "description": step.description or filename,
+                    "result_key": output_result_key,
+                    "size": runtime.get("size"),
+                    "sha256": runtime.get("sha256"),
+                    "path": runtime.get("path") or transform.get("output_path"),
+                    "kind": "transform",
                 }
             )
         return result
+
+    def resolve_file_result_source(
+        self,
+        session_id: str,
+        source_result_key: Optional[str] = None,
+        source_step_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        candidates = self.downloadable_steps(session_id)
+        if source_result_key:
+            for item in candidates:
+                if item.get("result_key") == source_result_key:
+                    return item
+        if source_step_id:
+            for item in candidates:
+                if item.get("step_id") == source_step_id:
+                    return item
+        if candidates:
+            return candidates[-1]
+        raise ValueError("No downloadable or transformed file is available")
 
     def pause_recording(self, session_id: str):
         """Pause event recording (used during AI execution)."""

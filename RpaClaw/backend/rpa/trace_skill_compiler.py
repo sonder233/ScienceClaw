@@ -211,6 +211,8 @@ class TraceSkillCompiler:
             return self._render_manual_action_trace(index, trace, previous_traces)
         if trace.trace_type == RPATraceType.DATA_CAPTURE:
             return self._render_data_capture_trace(index, trace, used_output_keys)
+        if trace.trace_type == RPATraceType.FILE_TRANSFORM:
+            return self._render_file_transform_trace(index, trace)
         if trace.trace_type == RPATraceType.AI_OPERATION:
             return self._render_ai_operation_trace(index, trace, previous_traces, used_output_keys)
         return ["", f"    # trace {index}: unsupported trace type {trace.trace_type.value}"]
@@ -322,6 +324,44 @@ class TraceSkillCompiler:
         else:
             lines.append(f"    _result = {trace.output!r}")
         lines.append(f"    _results[{key!r}] = _result")
+        return lines
+
+    def _render_file_transform_trace(self, index: int, trace: RPAAcceptedTrace) -> List[str]:
+        signals = trace.signals if isinstance(trace.signals, dict) else {}
+        transform = signals.get("file_transform") if isinstance(signals, dict) else {}
+        transform = transform if isinstance(transform, dict) else {}
+        input_source = transform.get("input") if isinstance(transform.get("input"), dict) else {}
+        source_result_key = str(input_source.get("source_result_key") or transform.get("source_result_key") or "")
+        file_field = str(input_source.get("file_field") or "path")
+        output_result_key = str(transform.get("output_result_key") or trace.output_key or "")
+        output_filename = str(transform.get("output_filename") or trace.value or "converted.xlsx")
+        instruction = str(transform.get("instruction") or trace.user_instruction or trace.description or "")
+        code = str(transform.get("code") or (trace.ai_execution.code if trace.ai_execution else "") or "")
+        lines = ["", f"    # trace {index}: {trace.description or 'file transform'}"]
+        if not source_result_key or not output_result_key or not code:
+            lines.append("    # File transform trace is missing source/result/code and was skipped.")
+            return lines
+        lines.extend(
+            [
+                "    import os as _os",
+                f"    _transform_input = _results[{source_result_key!r}][{file_field!r}]",
+                "    _transform_dir = kwargs.get('_downloads_dir', '.')",
+                "    _os.makedirs(_transform_dir, exist_ok=True)",
+                f"    _transform_output = _os.path.join(_transform_dir, {output_filename!r})",
+                "    _transform_ns = {'__name__': 'rpa_transform'}",
+                f"    exec({code!r}, _transform_ns, _transform_ns)",
+                "    _transform_fn = _transform_ns.get('transform_file')",
+                "    if not callable(_transform_fn):",
+                "        raise RuntimeError('file transform script has no transform_file function')",
+                f"    _transform_fn(_transform_input, _transform_output, {instruction!r})",
+                "    if not _os.path.exists(_transform_output):",
+                "        raise RuntimeError('file transform did not create output file')",
+                "    from openpyxl import load_workbook as _load_workbook",
+                "    _wb = _load_workbook(_transform_output, read_only=True, data_only=True)",
+                "    _wb.close()",
+                f"    _results[{output_result_key!r}] = {{'filename': {output_filename!r}, 'path': _transform_output}}",
+            ]
+        )
         return lines
 
     def _render_ai_operation_trace(

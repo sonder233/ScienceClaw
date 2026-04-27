@@ -12,6 +12,7 @@ import {
   Upload,
   FileUp,
   FileDown,
+  FileCog,
 } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -101,6 +102,7 @@ interface DownloadableStep {
   filename: string;
   description: string;
   result_key: string;
+  kind?: string;
   size?: number;
   path?: string;
 }
@@ -116,6 +118,7 @@ const credentials = ref<CredentialItem[]>([]);
 const downloadableSteps = ref<DownloadableStep[]>([]);
 const promotingStepIndex = ref<number | null>(null);
 const uploadingStepIndex = ref<number | null>(null);
+const transformingStepIndex = ref<number | null>(null);
 const expandedStepIndex = ref<number | null>(null);
 const isScriptDrawerOpen = ref(false);
 
@@ -202,6 +205,7 @@ const getActionLabel = (action: string) => {
     close_tab: '关闭标签',
     download_click: '点击下载',
     download: '下载',
+    file_transform: '处理文件',
     set_input_files: '上传文件',
   };
   return map[action] || action;
@@ -222,17 +226,23 @@ const getActionColor = (action: string) => {
     close_tab: 'bg-rose-100 dark:bg-rose-900/40 text-rose-700 dark:text-rose-400',
     download_click: 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-200',
     download: 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-200',
+    file_transform: 'bg-teal-100 dark:bg-teal-900/40 text-teal-700 dark:text-teal-300',
     set_input_files: 'bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-400',
   };
   return map[action] || 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300';
 };
 
-const getStepFileOperation = (step: StepItem): 'upload' | 'download' | '' => {
+const getStepFileOperation = (step: StepItem): 'upload' | 'download' | 'transform' | '' => {
   const signals = step.signals || {};
   if (step.action === 'set_input_files' || signals.set_input_files) return 'upload';
   if (step.action === 'download' || step.action === 'download_click' || signals.download) return 'download';
+  if (step.action === 'file_transform' || signals.file_transform) return 'transform';
   return '';
 };
+
+const isDownloadStep = (step: StepItem) => getStepFileOperation(step) === 'download';
+
+const isTransformStep = (step: StepItem) => step.action === 'file_transform' || !!step.signals?.file_transform;
 
 const downloadFilename = (step: StepItem) => {
   const download = step.signals?.download;
@@ -364,7 +374,7 @@ const resetUploadSourceRadios = (event: Event | undefined, mode: string) => {
 const sourceModeLabel = (mode?: string) => {
   if (mode === 'parameter') return '运行时参数';
   if (mode === 'path') return '指定路径';
-  if (mode === 'dataflow') return '关联下载';
+  if (mode === 'dataflow') return '关联产物';
   return '固定文件';
 };
 
@@ -570,6 +580,43 @@ const chooseDataflowSource = async (step: StepItem, displayIndex: number, select
 
 const onDataflowSelect = (step: StepItem, displayIndex: number, event: Event) => {
   chooseDataflowSource(step, displayIndex, (event.target as HTMLSelectElement).value);
+};
+
+const sourceOptionLabel = (item: DownloadableStep) => {
+  const kind = item.kind === 'transform' ? '转换结果' : '下载文件';
+  return `第 ${item.step_index + 1} 步：${kind} · ${item.filename}`;
+};
+
+const createFileTransform = async (step: StepItem, displayIndex: number) => {
+  if (!sessionId.value) return;
+  const source = downloadableSteps.value.find((item) => item.step_id === step.id)
+    || downloadableSteps.value.find((item) => item.result_key === step.signals?.download?.result_key);
+  const instruction = window.prompt('请输入文件处理要求', '')?.trim() || '';
+  if (!instruction) return;
+  const defaultName = source?.filename
+    ? `${source.filename.replace(/\.[^.]+$/, '')}_处理后.xlsx`
+    : 'converted.xlsx';
+  const outputFilename = window.prompt('输出 Excel 文件名', defaultName)?.trim() || defaultName;
+  transformingStepIndex.value = displayIndex;
+  error.value = null;
+  try {
+    await apiClient.post(`/rpa/session/${sessionId.value}/file-transform`, {
+      instruction,
+      source_step_id: source?.step_id || step.id,
+      source_result_key: source?.result_key || step.signals?.download?.result_key,
+      output_filename: outputFilename,
+      auto_link_next_upload: true,
+    });
+    await loadSession();
+    await loadDownloadableSteps();
+    await generateScript({ openDrawer: false });
+    const insertedIndex = steps.value.findIndex((item) => item.action === 'file_transform' && item.value === outputFilename);
+    expandedStepIndex.value = insertedIndex >= 0 ? insertedIndex : displayIndex + 1;
+  } catch (err: any) {
+    error.value = `处理文件失败: ${err.response?.data?.detail || err.message}`;
+  } finally {
+    transformingStepIndex.value = null;
+  }
 };
 
 const loadCredentials = async () => {
@@ -865,10 +912,11 @@ onMounted(async () => {
                       <span
                         class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide"
                         :class="getActionColor(step.action)"
-                        :title="getStepFileOperation(step) === 'upload' ? '文件上传' : (getStepFileOperation(step) === 'download' ? '文件下载' : undefined)"
+                        :title="getStepFileOperation(step) === 'upload' ? '文件上传' : (getStepFileOperation(step) === 'download' ? '文件下载' : (getStepFileOperation(step) === 'transform' ? '文件处理' : undefined))"
                       >
                         <FileUp v-if="getStepFileOperation(step) === 'upload'" :size="12" />
                         <FileDown v-else-if="getStepFileOperation(step) === 'download'" :size="12" />
+                        <FileCog v-else-if="getStepFileOperation(step) === 'transform'" :size="12" />
                         {{ getActionLabel(step.action) }}
                       </span>
                       <span
@@ -898,6 +946,14 @@ onMounted(async () => {
                       >
                         <FileDown :size="12" />
                         文件下载
+                      </span>
+                      <span
+                        v-if="isTransformStep(step)"
+                        class="inline-flex items-center gap-1.5 rounded-full bg-teal-100 px-2.5 py-1 text-[10px] font-semibold text-teal-700 ring-1 ring-teal-200 dark:bg-teal-900/40 dark:text-teal-300 dark:ring-teal-800/70"
+                        title="文件处理"
+                      >
+                        <FileCog :size="12" />
+                        文件处理
                       </span>
                       <span
                         v-if="downloadFilename(step)"
@@ -938,6 +994,24 @@ onMounted(async () => {
                 @click.stop
               >
                 <div class="grid gap-3 rounded-2xl bg-white dark:bg-[#272728] p-4 ring-1 ring-[#831bd7]/10">
+                  <div v-if="isDownloadStep(step)" class="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-teal-100 dark:border-teal-900/60 bg-teal-50/70 dark:bg-teal-950/20 p-4">
+                    <div class="min-w-0">
+                      <p class="text-sm font-bold text-gray-900 dark:text-gray-100">下载产物</p>
+                      <p class="mt-1 truncate text-xs text-gray-500 dark:text-gray-400">
+                        {{ downloadFilename(step) || '已记录下载文件' }}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      class="inline-flex items-center gap-1.5 rounded-lg bg-teal-700 px-3 py-2 text-xs font-bold text-white transition-opacity hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-60"
+                      :disabled="transformingStepIndex === idx"
+                      @click="createFileTransform(step, idx)"
+                    >
+                      <FileCog :size="14" />
+                      {{ transformingStepIndex === idx ? '处理中...' : '插入文件处理' }}
+                    </button>
+                  </div>
+
                   <div v-if="isUploadStep(step)" class="space-y-3 rounded-2xl border border-violet-100 dark:border-violet-900/60 bg-violet-50/70 dark:bg-violet-950/20 p-4">
                     <div
                       v-if="uploadHint(step).suggested_mode === 'dataflow' && uploadSource(step).mode !== 'dataflow'"
@@ -1022,7 +1096,7 @@ onMounted(async () => {
                           :disabled="downloadableSteps.length === 0 && !uploadHint(step).source_result_key"
                           @change="chooseDataflowSource(step, idx)"
                         />
-                        关联下载步骤
+                        关联文件产物
                       </label>
                     </div>
 
@@ -1067,19 +1141,19 @@ onMounted(async () => {
                     </div>
 
                     <div v-else-if="uploadSource(step).mode === 'dataflow'" class="grid gap-2 rounded-xl bg-white dark:bg-[#272728] p-3 ring-1 ring-violet-100 dark:ring-violet-900/60">
-                      <label class="text-xs font-bold uppercase tracking-wide text-gray-400 dark:text-gray-500">下载步骤</label>
+                      <label class="text-xs font-bold uppercase tracking-wide text-gray-400 dark:text-gray-500">文件产物</label>
                       <select
                         class="w-full rounded-xl border border-gray-200 dark:border-gray-700 bg-[#fafafa] dark:bg-[#383739] px-3 py-2 text-sm outline-none transition-colors focus:border-[#831bd7]"
                         :value="uploadSource(step).source_result_key || uploadHint(step).source_result_key || ''"
                         @change="onDataflowSelect(step, idx, $event)"
                       >
-                        <option value="">选择下载步骤...</option>
+                        <option value="">选择文件产物...</option>
                         <option
                           v-for="downloadStep in downloadableSteps"
                           :key="downloadStep.result_key"
                           :value="downloadStep.result_key"
                         >
-                          第 {{ downloadStep.step_index + 1 }} 步：{{ downloadStep.filename }}
+                          {{ sourceOptionLabel(downloadStep) }}
                         </option>
                       </select>
                     </div>

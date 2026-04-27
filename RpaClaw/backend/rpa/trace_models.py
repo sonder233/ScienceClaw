@@ -13,6 +13,7 @@ class RPATraceType(str, Enum):
     AI_OPERATION = "ai_operation"
     DATA_CAPTURE = "data_capture"
     DATAFLOW_FILL = "dataflow_fill"
+    FILE_TRANSFORM = "file_transform"
     NAVIGATION = "navigation"
 
 

@@ -60,6 +60,7 @@ interface DownloadableFile {
   path: string;
   size?: number;
   result_key: string;
+  kind?: string;
 }
 const pendingFileInput = ref<PendingFileInput | null>(null);
 const fileBridgeStatus = ref('');
@@ -155,6 +156,7 @@ const getStepFileOperation = (step: any): 'upload' | 'download' | '' => {
   const signals = step?.signals || {};
   if (step?.action === 'set_input_files' || signals.set_input_files) return 'upload';
   if (step?.action === 'download' || step?.action === 'download_click' || signals.download) return 'download';
+  if (step?.action === 'file_transform' || signals.file_transform) return 'download';
   return '';
 };
 
@@ -196,6 +198,7 @@ const formatTraceType = (traceType?: string) => {
   if (value === 'ai_operation') return 'AI Trace';
   if (value === 'data_capture') return 'Data Capture';
   if (value === 'dataflow_fill') return 'Dataflow Fill';
+  if (value === 'file_transform') return 'File Transform';
   if (value === 'navigation') return 'Navigation';
   if (value === 'manual_action') return 'Manual';
   return value || 'Trace';
@@ -210,7 +213,7 @@ const mapServerTraces = (serverTraces: any[]) => ([
     status: 'completed',
     action: t.action,
     signals: t.signals || {},
-    source: t.source === 'ai' || t.trace_type === 'ai_operation' ? 'ai' : 'record',
+    source: t.source === 'ai' || t.trace_type === 'ai_operation' || t.trace_type === 'file_transform' ? 'ai' : 'record',
     traceType: t.trace_type,
     sensitive: false,
     deletable: false,
@@ -747,6 +750,10 @@ const pickDownloadable = (downloadable: DownloadableFile) => {
     fileBridgeStatus.value = err?.message || '设置上传文件失败';
   }
 };
+
+const downloadableKindLabel = (downloadable: DownloadableFile) => (
+  downloadable.kind === 'transform' ? '转换结果' : '下载文件'
+);
 
 const sendInputEvent = (e: Event) => {
   if (!screencastWs || screencastWs.readyState !== WebSocket.OPEN) return;
@@ -1329,7 +1336,9 @@ const sendMessage = async () => {
                       </span>
                       <span class="min-w-0 flex-1">
                         <span class="block truncate text-xs font-semibold text-slate-700 dark:text-gray-200">{{ downloadable.filename }}</span>
-                        <span v-if="downloadable.path" class="mt-0.5 block truncate text-[11px] text-slate-500 dark:text-gray-400">{{ downloadable.path }}</span>
+                        <span class="mt-0.5 block truncate text-[11px] text-slate-500 dark:text-gray-400">
+                          {{ downloadableKindLabel(downloadable) }} · {{ downloadable.path || '路径不可用' }}
+                        </span>
                       </span>
                       <span v-if="downloadable.size" class="shrink-0 text-[11px] text-slate-500 dark:text-gray-400">{{ (downloadable.size / 1024).toFixed(1) }} KB</span>
                     </button>

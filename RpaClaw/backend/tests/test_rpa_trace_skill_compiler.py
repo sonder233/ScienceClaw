@@ -129,6 +129,56 @@ def test_compiler_writes_download_result_for_dataflow_upload():
     assert f"set_input_files(_results[{result_key!r}]['path'])" in script
 
 
+def test_compiler_renders_file_transform_for_dataflow_upload():
+    transform_code = "def transform_file(input_file, output_file, instruction=''):\\n    open(output_file, 'wb').write(open(input_file, 'rb').read())"
+    script = TraceSkillCompiler().generate_script(
+        [
+            RPAAcceptedTrace(
+                trace_id="trace-transform",
+                trace_type=RPATraceType.FILE_TRANSFORM,
+                action="file_transform",
+                value="converted.xlsx",
+                output_key="transform_converted",
+                ai_execution=RPAAIExecution(language="python", code=transform_code),
+                signals={
+                    "file_transform": {
+                        "input": {
+                            "mode": "dataflow",
+                            "source_result_key": "download_report",
+                            "file_field": "path",
+                        },
+                        "instruction": "convert it",
+                        "output_filename": "converted.xlsx",
+                        "output_result_key": "transform_converted",
+                        "code": transform_code,
+                    },
+                },
+            ),
+            RPAAcceptedTrace(
+                trace_id="trace-upload",
+                trace_type=RPATraceType.MANUAL_ACTION,
+                action="set_input_files",
+                value="converted.xlsx",
+                locator_candidates=[
+                    {"locator": {"method": "role", "role": "button", "name": "Choose File"}},
+                ],
+                signals={
+                    "upload_source": {
+                        "mode": "dataflow",
+                        "source_result_key": "transform_converted",
+                        "file_field": "path",
+                    },
+                },
+            ),
+        ],
+        is_local=True,
+    )
+
+    assert "_transform_input = _results['download_report']['path']" in script
+    assert "_results['transform_converted'] = {'filename': 'converted.xlsx', 'path': _transform_output}" in script
+    assert "set_input_files(_results['transform_converted']['path'])" in script
+
+
 def test_compiler_generalizes_highest_star_trace_instead_of_hardcoding_url():
     script = TraceSkillCompiler().generate_script(
         [

@@ -22,6 +22,7 @@ from backend.rpa.trace_skill_compiler import TraceSkillCompiler
 from backend.rpa.cdp_connector import get_cdp_connector
 from backend.rpa.screencast import SessionScreencastController
 from backend.rpa.upload_source import default_upload_source_from_staging, download_result_key
+from backend.rpa.file_transform import FileTransformService, transform_result_key
 from backend.user.dependencies import get_current_user, User
 from backend.config import settings
 from backend.storage import get_repository
@@ -38,6 +39,7 @@ executor = ScriptExecutor()
 exporter = SkillExporter()
 assistant = RPAAssistant()
 trace_compiler = TraceSkillCompiler()
+file_transform_service = FileTransformService()
 
 
 class StartSessionRequest(BaseModel):
@@ -69,6 +71,116 @@ class NavigateRequest(BaseModel):
 
 class PromoteLocatorRequest(BaseModel):
     candidate_index: int
+
+
+class FileTransformRequest(BaseModel):
+    instruction: str
+    source_result_key: str | None = None
+    source_step_id: str | None = None
+    output_filename: str | None = None
+    output_result_key: str | None = None
+    auto_link_next_upload: bool = True
+
+
+def _looks_like_file_transform_request(message: str) -> bool:
+    text = str(message or "").lower()
+    file_terms = ("文件", "excel", "xlsx", "表格", "downloaded file", "download file", "spreadsheet")
+    transform_terms = (
+        "处理",
+        "转换",
+        "转成",
+        "生成",
+        "重新生成",
+        "修改",
+        "改为",
+        "格式",
+        "清洗",
+        "整理",
+        "convert",
+        "transform",
+        "reformat",
+        "format",
+        "clean",
+    )
+    source_terms = ("刚才下载", "下载的", "下载文件", "downloaded", "download")
+    return (
+        any(term in text for term in file_terms)
+        and any(term in text for term in transform_terms)
+        and any(term in text for term in source_terms)
+    )
+
+
+async def _create_file_transform_for_session(
+    *,
+    session_id: str,
+    current_user: User,
+    request: FileTransformRequest,
+) -> Dict[str, Any]:
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    instruction = request.instruction.strip()
+    if not instruction:
+        raise HTTPException(status_code=400, detail="instruction is required")
+
+    try:
+        source = rpa_manager.resolve_file_result_source(
+            session_id,
+            source_result_key=request.source_result_key,
+            source_step_id=request.source_step_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    input_path_text = str(source.get("path") or "")
+    if not input_path_text:
+        raise HTTPException(status_code=400, detail="Selected file source has no persisted path")
+    input_path = Path(input_path_text)
+    if not input_path.exists():
+        raise HTTPException(status_code=400, detail=f"Selected file does not exist: {input_path}")
+
+    output_filename = request.output_filename or f"{input_path.stem}_converted.xlsx"
+    if not output_filename.lower().endswith(".xlsx"):
+        output_filename = f"{Path(output_filename).stem or input_path.stem}_converted.xlsx"
+    output_result_key = request.output_result_key or transform_result_key(output_filename)
+    model_config = await _resolve_user_model_config(str(current_user.id))
+
+    try:
+        transform = await file_transform_service.create_transform(
+            session_id=session_id,
+            input_path=input_path,
+            instruction=instruction,
+            output_filename=output_filename,
+            output_key=output_result_key,
+            model_config=model_config,
+        )
+        step = await rpa_manager.add_file_transform_step(
+            session_id,
+            source_result_key=str(source.get("result_key") or ""),
+            source_step_id=str(source.get("step_id") or ""),
+            instruction=instruction,
+            output_filename=str(transform["output_filename"]),
+            output_result_key=str(transform["output_result_key"]),
+            code=str(transform["code"]),
+            script_path=str(transform["script_path"]),
+            output_path=str(transform["output_path"]),
+            result=transform["result"],
+            auto_link_next_upload=request.auto_link_next_upload,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("file transform failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        "step": step,
+        "artifact": transform["result"],
+        "result_key": transform["output_result_key"],
+    }
 
 
 def _generate_session_script(session, params: Dict[str, Any], *, test_mode: bool = False) -> str:
@@ -165,7 +277,8 @@ def _download_dataflow_source_for_upload_path(session, upload_source: Dict[str, 
         return {}
     normalized_path = raw_path.replace("\\", "/")
     session_download_dir = (Path(settings.workspace_dir) / "rpa_downloads" / session.id).as_posix()
-    if session_download_dir not in normalized_path:
+    session_transform_dir = (Path(settings.workspace_dir) / "rpa_transforms" / session.id).as_posix()
+    if session_download_dir not in normalized_path and session_transform_dir not in normalized_path:
         return {}
 
     filename = Path(raw_path).name or str(upload_source.get("original_filename") or "")
@@ -185,6 +298,23 @@ def _download_dataflow_source_for_upload_path(session, upload_source: Dict[str, 
                 "file_field": "path",
                 "original_filename": filename or download_filename,
             }
+    for step in getattr(session, "steps", []) or []:
+        signals = step.signals if isinstance(step.signals, dict) else {}
+        transform = signals.get("file_transform")
+        if not isinstance(transform, dict):
+            continue
+        transform_filename = str(transform.get("output_filename") or step.value or "")
+        transform_path = str(transform.get("output_path") or "").replace("\\", "/")
+        if (transform_path and transform_path == normalized_path) or (filename and transform_filename == filename):
+            result_key = str(transform.get("output_result_key") or step.result_key or "")
+            if result_key:
+                return {
+                    "mode": "dataflow",
+                    "source_step_id": step.id,
+                    "source_result_key": result_key,
+                    "file_field": "path",
+                    "original_filename": filename or transform_filename,
+                }
     return {}
 
 
@@ -688,6 +818,23 @@ async def promote_step_upload_staging(
     }
 
 
+@router.post("/session/{session_id}/file-transform")
+async def create_file_transform_step(
+    session_id: str,
+    request: FileTransformRequest,
+    current_user: User = Depends(get_current_user),
+):
+    result = await _create_file_transform_for_session(
+        session_id=session_id,
+        current_user=current_user,
+        request=request,
+    )
+    return {
+        "status": "success",
+        **result,
+    }
+
+
 @router.post("/session/{session_id}/generate")
 async def generate_script(
     session_id: str,
@@ -847,6 +994,75 @@ async def chat_with_assistant(
 
     # Resolve user's model config
     model_config = await _resolve_user_model_config(str(current_user.id))
+
+    if _looks_like_file_transform_request(request.message):
+        async def file_transform_event_generator():
+            try:
+                rpa_manager.pause_recording(session_id)
+                yield {
+                    "event": "agent_thought",
+                    "data": json.dumps({"text": "识别到文件处理请求，正在处理最近的文件产物。"}, ensure_ascii=False),
+                }
+                result = await _create_file_transform_for_session(
+                    session_id=session_id,
+                    current_user=current_user,
+                    request=FileTransformRequest(
+                        instruction=request.message,
+                        auto_link_next_upload=True,
+                    ),
+                )
+                step = result["step"]
+                artifact = result["artifact"]
+                yield {
+                    "event": "trace_added",
+                    "data": json.dumps(
+                        {
+                            "trace_type": "file_transform",
+                            "description": getattr(step, "description", ""),
+                            "signals": getattr(step, "signals", {}),
+                            "value": getattr(step, "value", ""),
+                            "output_key": result["result_key"],
+                            "output": artifact,
+                        },
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                }
+                yield {
+                    "event": "agent_step_done",
+                    "data": json.dumps(
+                        {
+                            "success": True,
+                            "description": getattr(step, "description", ""),
+                            "output": artifact,
+                            "step": step.model_dump(mode="json") if hasattr(step, "model_dump") else {},
+                        },
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                }
+                yield {
+                    "event": "agent_done",
+                    "data": json.dumps(
+                        {
+                            "message": f"文件已处理完成：{artifact.get('filename')}",
+                            "total_steps": len(session.traces),
+                            "trace_count": len(session.traces),
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            except Exception as e:
+                logger.error(f"File transform chat error: {e}")
+                yield {"event": "error", "data": json.dumps({"message": str(e)}, ensure_ascii=False)}
+                yield {
+                    "event": "agent_aborted",
+                    "data": json.dumps({"reason": str(e), "diagnostics": []}, ensure_ascii=False),
+                }
+            finally:
+                rpa_manager.resume_recording(session_id)
+
+        return EventSourceResponse(file_transform_event_generator())
 
     # Get the page object for this session
     page = rpa_manager.get_page(session_id)

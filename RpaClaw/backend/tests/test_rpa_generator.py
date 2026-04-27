@@ -482,6 +482,48 @@ class PlaywrightGeneratorTests(unittest.TestCase):
 
         self.assertIn("set_input_files(_results['download_report']['path'])", script)
 
+    def test_generate_script_runs_file_transform_before_dataflow_upload(self):
+        generator = PlaywrightGenerator()
+        transform_code = "def transform_file(input_file, output_file, instruction=''):\\n    open(output_file, 'wb').write(open(input_file, 'rb').read())"
+        steps = [
+            {
+                "action": "file_transform",
+                "value": "converted.xlsx",
+                "result_key": "transform_converted",
+                "signals": {
+                    "file_transform": {
+                        "input": {
+                            "mode": "dataflow",
+                            "source_result_key": "download_report",
+                            "file_field": "path",
+                        },
+                        "instruction": "convert it",
+                        "output_filename": "converted.xlsx",
+                        "output_result_key": "transform_converted",
+                        "code": transform_code,
+                    }
+                },
+            },
+            {
+                "action": "set_input_files",
+                "target": json.dumps({"method": "label", "value": "Upload edited report"}),
+                "value": "converted.xlsx",
+                "signals": {
+                    "upload_source": {
+                        "mode": "dataflow",
+                        "source_result_key": "transform_converted",
+                        "file_field": "path",
+                    },
+                },
+            },
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("_transform_input = _results['download_report']['path']", script)
+        self.assertIn("_results['transform_converted'] = {'filename': 'converted.xlsx', 'path': _transform_output}", script)
+        self.assertIn("set_input_files(_results['transform_converted']['path'])", script)
+
     def test_generate_script_docker_upload_source_falls_back_to_recorded_filename(self):
         generator = PlaywrightGenerator()
         steps = [

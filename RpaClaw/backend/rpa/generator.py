@@ -191,6 +191,12 @@ class StepExecutionError(Exception):
                 lines.append("")
                 continue
 
+            if action == "file_transform":
+                self._append_file_transform_lines(step_lines, step)
+                lines.extend(self._wrap_step_lines(step_lines, step_index, test_mode))
+                lines.append("")
+                continue
+
             # Navigation
             if action == "navigate" or (action == "goto" and url):
                 step_lines.append(f'    await current_page.goto("{url}")')
@@ -477,6 +483,43 @@ class StepExecutionError(Exception):
         step_lines.append(f'    _results[{json.dumps(result_key)}] = {{"filename": _dl_filename, "path": _dl_dest}}')
 
     @staticmethod
+    def _append_file_transform_lines(step_lines: List[str], step: Dict[str, Any]) -> None:
+        signals = step.get("signals") if isinstance(step, dict) else {}
+        transform = signals.get("file_transform") if isinstance(signals, dict) else {}
+        transform = transform if isinstance(transform, dict) else {}
+        input_source = transform.get("input") if isinstance(transform.get("input"), dict) else {}
+        source_result_key = str(input_source.get("source_result_key") or transform.get("source_result_key") or "")
+        file_field = str(input_source.get("file_field") or "path")
+        output_result_key = str(transform.get("output_result_key") or step.get("result_key") or "")
+        output_filename = str(transform.get("output_filename") or step.get("value") or "converted.xlsx")
+        instruction = str(transform.get("instruction") or step.get("description") or "")
+        code = str(transform.get("code") or "")
+        if not source_result_key or not output_result_key or not code:
+            step_lines.append("    # File transform step is missing source/result/code and was skipped.")
+            return
+        step_lines.extend(
+            [
+                "    import os as _os",
+                f"    _transform_input = _results[{source_result_key!r}][{file_field!r}]",
+                "    _transform_dir = kwargs.get('_downloads_dir', '.')",
+                "    _os.makedirs(_transform_dir, exist_ok=True)",
+                f"    _transform_output = _os.path.join(_transform_dir, {output_filename!r})",
+                "    _transform_ns = {'__name__': 'rpa_transform'}",
+                f"    exec({code!r}, _transform_ns, _transform_ns)",
+                "    _transform_fn = _transform_ns.get('transform_file')",
+                "    if not callable(_transform_fn):",
+                "        raise RuntimeError('file transform script has no transform_file function')",
+                f"    _transform_fn(_transform_input, _transform_output, {instruction!r})",
+                "    if not _os.path.exists(_transform_output):",
+                "        raise RuntimeError('file transform did not create output file')",
+                "    from openpyxl import load_workbook as _load_workbook",
+                "    _wb = _load_workbook(_transform_output, read_only=True, data_only=True)",
+                "    _wb.close()",
+                f"    _results[{output_result_key!r}] = {{'filename': {output_filename!r}, 'path': _transform_output}}",
+            ]
+        )
+
+    @staticmethod
     def _download_signal(step: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         signals = step.get("signals")
         if not isinstance(signals, dict):
@@ -587,7 +630,7 @@ class StepExecutionError(Exception):
             # BUT: never deduplicate AI steps (each AI instruction is unique)
             if (step.get("action") == prev.get("action")
                     and step.get("target") == prev.get("target")
-                    and step.get("action") not in ("navigate", "ai_script")):
+                    and step.get("action") not in ("navigate", "ai_script", "file_transform")):
                 result[-1] = step  # Replace previous with current (keep last)
                 continue
             result.append(step)

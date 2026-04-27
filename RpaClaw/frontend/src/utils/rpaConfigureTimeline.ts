@@ -23,6 +23,7 @@ const TRACE_LABELS: Record<string, string> = {
   ai_operation: 'AI Trace',
   data_capture: 'Data Capture',
   dataflow_fill: 'Dataflow Fill',
+  file_transform: 'File Transform',
   navigation: 'Navigation',
   manual_action: 'Manual',
 };
@@ -54,6 +55,7 @@ const normalizeTraceCandidates = (trace: any) => {
 
 const traceAction = (trace: any) => {
   if (trace?.trace_type === 'navigation') return 'navigate';
+  if (trace?.trace_type === 'file_transform') return 'file_transform';
   if (trace?.trace_type === 'manual_action') return trace?.action || 'manual_action';
   return trace?.trace_type || trace?.action || 'trace';
 };
