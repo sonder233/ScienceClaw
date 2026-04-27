@@ -87,8 +87,8 @@ class TraceSkillCompiler:
     def _looks_like_export_task_download_code(code: str) -> bool:
         text = str(code or "")
         return (
-            "tbody tr" in text
-            and "td[data-colid=" in text
+            ("tbody tr" in text or "tr.grid-row" in text)
+            and ("td[data-colid=" in text or "td[field=" in text)
             and ".locator(" in text
             and ".click(" in text
         )
@@ -137,7 +137,7 @@ class TraceSkillCompiler:
             "    if not isinstance(value, list) or not value:",
             "        raise RuntimeError(f'AI trace output {key} is empty')",
             "",
-            "async def _download_from_export_task(page, kwargs, results, download_key, *, table_heading='', action_selector='a', row_index=0, timeout_ms=60000):",
+            "async def _download_from_export_task(page, kwargs, results, download_key, *, table_heading='', row_selector='tbody tr', action_selector='a', row_index=0, timeout_ms=60000):",
             "    import os as _os",
             "    _dl_dir = kwargs.get('_downloads_dir', '.')",
             "    _os.makedirs(_dl_dir, exist_ok=True)",
@@ -150,9 +150,9 @@ class TraceSkillCompiler:
             "                if await heading.count():",
             "                    rows = heading.locator(\"xpath=following::table[.//tbody/tr][1]//tbody/tr\")",
             "                else:",
-            "                    rows = page.locator('tbody tr')",
+            "                    rows = page.locator(row_selector)",
             "            else:",
-            "                rows = page.locator('tbody tr')",
+            "                rows = page.locator(row_selector)",
             "            if await rows.count() <= row_index:",
             "                await page.wait_for_timeout(1000)",
             "                continue",
@@ -578,12 +578,13 @@ class TraceSkillCompiler:
             download_name = str(download_signal.get("filename") or "file")
             safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", download_name.split(".")[0]) or "file"
             download_key = "download_" + safe_name
-            heading, action_selector = self._export_task_download_hints(code)
+            heading, row_selector, action_selector = self._export_task_download_hints(code)
             lines.append(
                 "    _download_payload = await _download_from_export_task("
                 "current_page, kwargs, _results, "
                 f"{json.dumps(download_key, ensure_ascii=False)}, "
                 f"table_heading={heading!r}, "
+                f"row_selector={row_selector!r}, "
                 f"action_selector={action_selector!r})"
             )
             lines.append(f"    _results[{json.dumps(download_key, ensure_ascii=False)}] = _download_payload")
@@ -616,17 +617,22 @@ class TraceSkillCompiler:
         return str(download_signal.get("trigger_mode") or "immediate").strip().lower()
 
     @staticmethod
-    def _export_task_download_hints(code: str) -> tuple[str, str]:
+    def _export_task_download_hints(code: str) -> tuple[str, str, str]:
         heading = ""
         heading_match = re.search(r"get_by_text\((['\"])(.*?)\1,\s*exact=True\)", code)
         if heading_match:
             heading = heading_match.group(2)
 
+        row_selector = "tbody tr"
+        row_selector_match = re.search(r"page\.locator\((['\"])(.*?(?:tbody tr|tr\.grid-row).*?)\1\)", code)
+        if row_selector_match:
+            row_selector = row_selector_match.group(2)
+
         action_selector = "a"
-        selector_match = re.search(r"\.locator\((['\"])(td\[data-colid=.*?)\1\)\.click\(", code)
+        selector_match = re.search(r"\.locator\((['\"])(td\[(?:data-colid|field)=.*?)\1\)\.click\(", code)
         if selector_match:
             action_selector = selector_match.group(2)
-        return heading, action_selector
+        return heading, row_selector, action_selector
 
     def _render_dataflow_fill_trace(self, index: int, trace: RPAAcceptedTrace) -> List[str]:
         ref = trace.dataflow.selected_source_ref if trace.dataflow else None
@@ -868,7 +874,18 @@ def _rewrite_random_like_locator_in_code(code: str, trace: RPAAcceptedTrace) -> 
 
 
 def _code_uses_positional_collection_locator(code: str, selector: str) -> bool:
-    return f"page.locator({selector!r}).nth(" in str(code or "")
+    text = str(code or "")
+    if f"page.locator({selector!r}).nth(" in text:
+        return True
+    selector_literal = repr(selector)
+    assignment_pattern = re.compile(
+        rf"(?P<var>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*page\.locator\({re.escape(selector_literal)}\)"
+    )
+    for match in assignment_pattern.finditer(text):
+        var_name = re.escape(match.group("var"))
+        if re.search(rf"\b{var_name}\.nth\(", text[match.end():]):
+            return True
+    return False
 
 
 def _should_preserve_runtime_ai_instruction(trace: RPAAcceptedTrace) -> bool:
