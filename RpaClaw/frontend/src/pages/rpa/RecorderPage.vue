@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen, Globe } from 'lucide-vue-next';
+import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen, Globe, AlertCircle, ChevronDown, ChevronUp, ClipboardCheck, Loader2 } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import { getBackendWsUrl } from '@/utils/sandbox';
 import {
@@ -19,6 +19,23 @@ import {
   shouldShowScreencastReconnectNotice,
 } from '@/utils/screencastReconnect';
 import { buildRpaToolEditorLocation } from '@/utils/rpaMcpConvert';
+import {
+  getInitialRpaAgentProgress,
+  getRpaAgentProgressForEvent,
+  type RpaAgentMessageStatus,
+} from '@/utils/rpaAgentProgress';
+import {
+  applyRpaAssistantRunEvent,
+  createRpaAssistantRun,
+  type RpaAssistantRun,
+  type RpaAssistantRunItem,
+  type RpaAssistantRound,
+} from '@/utils/rpaAssistantRun';
+import {
+  getManualRecordingDiagnostics,
+  isRpaTimelineStepDeletable,
+  mapRpaConfigureDisplaySteps,
+} from '@/utils/rpaConfigureTimeline';
 
 const router = useRouter();
 const route = useRoute();
@@ -62,6 +79,8 @@ const MOVE_THROTTLE = 50; // 50ms 节流
 const steps = ref<any[]>([
   { id: '0', title: '初始化环境', description: '正在配置沙箱录制环境...', status: 'active' }
 ]);
+const acceptedTraces = ref<any[]>([]);
+const recordingDiagnostics = ref<any[]>([]);
 
 const parseLocator = (raw: unknown) => {
   if (!raw) return null;
@@ -140,15 +159,82 @@ const mapServerSteps = (serverSteps: any[]) => ([
   }))
 ]);
 
+const formatTraceType = (traceType?: string) => {
+  const value = traceType || '';
+  if (value === 'ai_operation') return 'AI Trace';
+  if (value === 'data_capture') return 'Data Capture';
+  if (value === 'dataflow_fill') return 'Dataflow Fill';
+  if (value === 'navigation') return 'Navigation';
+  if (value === 'manual_action') return 'Manual';
+  return value || 'Trace';
+};
+
+const mapServerTraces = (serverTraces: any[]) => ([
+  { id: '0', title: 'Environment ready', description: 'Playwright browser is ready', status: 'completed', deletable: false },
+  ...serverTraces.map((t: any, i: number) => ({
+    id: String(i + 1),
+    traceId: t.trace_id || '',
+    title: t.description || t.user_instruction || formatTraceType(t.trace_type),
+    description: t.user_instruction || t.action || formatTraceType(t.trace_type),
+    status: 'completed',
+    source: t.source === 'ai' || t.trace_type === 'ai_operation' ? 'ai' : 'record',
+    traceType: t.trace_type,
+    sensitive: false,
+    deletable: isRpaTimelineStepDeletable({
+      source: t.source === 'ai' || t.trace_type === 'ai_operation' ? 'ai' : 'record',
+      traceId: t.trace_id || '',
+    }),
+    locatorSummary: t.locator_candidates?.length ? formatLocator(t.locator_candidates[0]?.locator || t.locator_candidates[0]) : '',
+    frameSummary: t.after_page?.url || '',
+    validationStatus: t.accepted === false ? 'warning' : 'ok',
+    validationDetails: formatTraceType(t.trace_type),
+  }))
+]);
+
+const mapConfigureTimelineSteps = (session: any) => ([
+  { id: '0', title: 'Environment ready', description: 'Playwright browser is ready', status: 'completed', deletable: false },
+  ...mapRpaConfigureDisplaySteps(session).map((step: any, index: number) => ({
+    id: String(index + 1),
+    stepId: step.stepId || '',
+    traceId: step.traceId || '',
+    title: step.description || step.action,
+    description: step.description || step.action,
+    status: 'completed',
+    source: step.source || 'record',
+    sensitive: step.sensitive || false,
+    deletable: isRpaTimelineStepDeletable({ source: step.source || 'record', traceId: step.traceId || '' }),
+    locatorSummary: formatLocator(step.target),
+    frameSummary: formatFramePath(step.frame_path),
+    validationStatus: step.validation?.status || '',
+    validationDetails: step.validation?.details || '',
+  })),
+]);
+
+const refreshTimeline = (session: any) => {
+  const serverSteps = Array.isArray(session?.steps) ? session.steps : [];
+  const serverTraces = Array.isArray(session?.traces) ? session.traces : [];
+  acceptedTraces.value = serverTraces;
+  recordingDiagnostics.value = getManualRecordingDiagnostics(session);
+  if ((Array.isArray(session?.recorded_actions) && session.recorded_actions.length > 0) || serverTraces.length > 0) {
+    steps.value = mapConfigureTimelineSteps(session);
+    return;
+  }
+  if (serverSteps.length > 0) {
+    steps.value = mapServerSteps(serverSteps);
+  }
+};
+
 interface ChatMessage {
   role: 'user' | 'assistant';
   text: string;
   time: string;
   script?: string;
-  status?: 'streaming' | 'executing' | 'done' | 'error';
+  status?: RpaAgentMessageStatus;
+  processingLabel?: string;
   error?: string;
   showCode?: boolean;
   actions?: Array<{ description: string; code: string; showCode?: boolean }>;  // Track agent actions
+  run?: RpaAssistantRun;
   frameSummary?: string;
   locatorSummary?: string;
   collectionSummary?: string;
@@ -158,8 +244,56 @@ interface ChatMessage {
 const chatMessages = ref<ChatMessage[]>([]);
 const newMessage = ref('');
 const sending = ref(false);
-const agentMode = ref(false);
 const agentRunning = ref(false);
+const chatScrollRef = ref<HTMLElement | null>(null);
+
+const scrollAssistantToBottom = () => {
+  void nextTick(() => {
+    const container = chatScrollRef.value;
+    if (!container) return;
+    requestAnimationFrame(() => {
+      container.scrollTop = container.scrollHeight;
+    });
+  });
+};
+
+const runRoundCount = (run?: RpaAssistantRun) => run?.rounds.length || 0;
+
+const getRunTraceCount = (msg: ChatMessage) => (
+  msg.run?.traceCount || Math.max(acceptedTraces.value.length, 0)
+);
+
+const getRunStatusLabel = (msg: ChatMessage) => {
+  if (msg.status === 'error') return '未完成';
+  if (msg.status === 'done') return '已完成';
+  if (msg.processingLabel) return '处理中';
+  return '准备中';
+};
+
+const getRunStatusClass = (msg: ChatMessage) => {
+  if (msg.status === 'error') return 'bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300';
+  if (msg.status === 'done') return 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300';
+  return 'bg-[#f0dbff] text-[#6900b3] dark:bg-[#831bd7]/20 dark:text-purple-200';
+};
+
+const getRoundStatusLabel = (round: RpaAssistantRound) => {
+  if (round.status === 'error') return '需要修复';
+  if (round.status === 'done') return '已接收';
+  return '处理中';
+};
+
+const getRoundStatusClass = (round: RpaAssistantRound) => {
+  if (round.status === 'error') return 'bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300';
+  if (round.status === 'done') return 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300';
+  return 'bg-[#edeef0] text-gray-700 dark:bg-white/10 dark:text-gray-300';
+};
+
+const getRunItemToneClass = (item: RpaAssistantRunItem) => {
+  if (item.kind === 'diagnostic') return 'bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-200';
+  if (item.kind === 'trace') return 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-200';
+  if (item.kind === 'action') return 'bg-[#f6f0ff] text-[#4f00d0] dark:bg-[#831bd7]/15 dark:text-purple-200';
+  return 'bg-[#f2f4f6] text-gray-700 dark:bg-white/[0.08] dark:text-gray-300';
+};
 
 interface PendingConfirm {
   description: string;
@@ -182,8 +316,6 @@ const syncTabs = (nextTabs: BrowserTab[]) => {
   syncAddressBar();
 };
 
-const codeActionIndex = (part: string) => Number(part.match(/\[\[CODE_(\d+)\]\]/)?.[1] ?? -1);
-
 const cleanupAssistantText = (text: string, script = '') => {
   let next = text;
   next = next.replace(/^正在分析当前页面\.\.\.\s*/u, '');
@@ -193,6 +325,15 @@ const cleanupAssistantText = (text: string, script = '') => {
   }
   return next.trim();
 };
+
+const formatAgentDiagnostics = (diagnostics: any[] = []) => diagnostics
+  .map((item: any) => {
+    const message = String(item?.message || '').trim();
+    const rawError = item?.raw?.result?.error ? String(item.raw.result.error).trim() : '';
+    if (message && rawError && rawError !== message) return `${message}: ${rawError}`;
+    return message || rawError;
+  })
+  .filter(Boolean);
 
 const initSession = async () => {
   try {
@@ -231,10 +372,7 @@ const startPollingSteps = () => {
     if (!sessionId.value) return;
     try {
       const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
-      const serverSteps = resp.data.session?.steps || [];
-      if (serverSteps.length > 0) {
-        steps.value = mapServerSteps(serverSteps);
-      }
+      refreshTimeline(resp.data.session || {});
     } catch (err) {
       // Ignore polling errors
     }
@@ -584,13 +722,22 @@ const goToSkills = () => {
   router.push('/chat/skills');
 };
 
-const deleteStep = async (stepIndex: number) => {
+const deleteStep = async (step: any, fallbackStepIndex: number) => {
   if (!sessionId.value) return;
   try {
-    await apiClient.delete(`/rpa/session/${sessionId.value}/step/${stepIndex}`);
+    if (step.stepId) {
+      await apiClient.delete(`/rpa/session/${sessionId.value}/timeline-item`, {
+        data: { kind: 'manual_step', step_id: step.stepId },
+      });
+    } else if (step.traceId) {
+      await apiClient.delete(`/rpa/session/${sessionId.value}/timeline-item`, {
+        data: { kind: 'trace', trace_id: step.traceId },
+      });
+    } else {
+      await apiClient.delete(`/rpa/session/${sessionId.value}/step/${fallbackStepIndex}`);
+    }
     const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
-    const serverSteps = resp.data.session?.steps || [];
-    steps.value = mapServerSteps(serverSteps);
+    refreshTimeline(resp.data.session || {});
   } catch (err) {
     console.error('Failed to delete step:', err);
   }
@@ -612,14 +759,23 @@ const sendMessage = async () => {
   const userText = newMessage.value.trim();
   newMessage.value = '';
   sending.value = true;
-  if (agentMode.value) agentRunning.value = true;
+  agentRunning.value = true;
+  const initialProgress = getInitialRpaAgentProgress();
 
   const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   chatMessages.value.push({ role: 'user', text: userText, time: now });
 
-  const assistantMsg: ChatMessage = { role: 'assistant', text: '', time: now, status: 'streaming' };
+  const assistantMsg: ChatMessage = {
+    role: 'assistant',
+    text: '',
+    time: now,
+    status: initialProgress.status,
+    processingLabel: initialProgress.label,
+    run: createRpaAssistantRun(now),
+  };
   chatMessages.value.push(assistantMsg);
   const msgIdx = chatMessages.value.length - 1;
+  scrollAssistantToBottom();
 
   try {
     const resp = await fetch(`/api/v1/rpa/session/${sessionId.value}/chat`, {
@@ -628,12 +784,13 @@ const sendMessage = async () => {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
       },
-      body: JSON.stringify({ message: userText, mode: agentMode.value ? 'react' : 'chat' }),
+      body: JSON.stringify({ message: userText, mode: 'trace_first' }),
     });
 
     if (!resp.ok || !resp.body) {
       chatMessages.value[msgIdx].text = '请求失败，请重试。';
       chatMessages.value[msgIdx].status = 'error';
+      chatMessages.value[msgIdx].processingLabel = '';
       sending.value = false;
       agentRunning.value = false;
       return;
@@ -660,6 +817,18 @@ const sendMessage = async () => {
           if (!raw) continue;
           try {
             const data = JSON.parse(raw);
+            const progress = getRpaAgentProgressForEvent(eventType);
+            if (progress) {
+              chatMessages.value[msgIdx].status = progress.status;
+              chatMessages.value[msgIdx].processingLabel = progress.label;
+            }
+            if (chatMessages.value[msgIdx].run) {
+              chatMessages.value[msgIdx].run = applyRpaAssistantRunEvent(
+                chatMessages.value[msgIdx].run!,
+                eventType,
+                data,
+              );
+            }
             if (eventType === 'message_chunk') {
               chatMessages.value[msgIdx].text += data.text || '';
             } else if (eventType === 'script') {
@@ -679,11 +848,13 @@ const sendMessage = async () => {
               }
             } else if (eventType === 'executing') {
               chatMessages.value[msgIdx].status = 'executing';
+              chatMessages.value[msgIdx].processingLabel = '正在执行浏览器操作...';
               if (!chatMessages.value[msgIdx].text.trim()) {
                 chatMessages.value[msgIdx].text = '代码已生成，正在执行浏览器操作。';
               }
             } else if (eventType === 'result') {
               chatMessages.value[msgIdx].status = data.success ? 'done' : 'error';
+              chatMessages.value[msgIdx].processingLabel = '';
               if (data.error) chatMessages.value[msgIdx].error = data.error;
               if (data.output && data.output !== 'ok' && data.output !== 'None') {
                 chatMessages.value[msgIdx].text += `${chatMessages.value[msgIdx].text ? '\n' : ''}输出: ${data.output}`;
@@ -696,6 +867,10 @@ const sendMessage = async () => {
               if (!chatMessages.value[msgIdx].actions) chatMessages.value[msgIdx].actions = [];
               chatMessages.value[msgIdx].actions!.push({ description: data.description || '', code: data.code || '', showCode: false });
             } else if (eventType === 'agent_step_done') {
+              if (data.trace) {
+                acceptedTraces.value = [...acceptedTraces.value.filter((t: any) => t.trace_id !== data.trace.trace_id), data.trace];
+                steps.value = mapServerTraces(acceptedTraces.value);
+              }
               if (data.step) {
                 const s = data.step;
                 steps.value.push({
@@ -709,18 +884,26 @@ const sendMessage = async () => {
               }
               // Show output if present
               if (data.output) {
-                chatMessages.value[msgIdx].text += `\n✓ 输出：${data.output}`;
+                const outputText = typeof data.output === 'string' ? data.output : JSON.stringify(data.output);
+                chatMessages.value[msgIdx].text += `\nOutput: ${outputText}`;
+              }
+            } else if (eventType === 'trace_added') {
+              if (data?.trace_id) {
+                acceptedTraces.value = [...acceptedTraces.value.filter((t: any) => t.trace_id !== data.trace_id), data];
+                steps.value = mapServerTraces(acceptedTraces.value);
               }
             } else if (eventType === 'confirm_required') {
               pendingConfirm.value = data;
             } else if (eventType === 'agent_done') {
               chatMessages.value[msgIdx].status = 'done';
-              chatMessages.value[msgIdx].text += `\n✅ 任务完成，共执行 ${data.total_steps ?? 0} 步`;
+              const completedCount = data.trace_count ?? data.total_steps ?? Math.max(steps.value.length - 1, 0);
+              chatMessages.value[msgIdx].text += `\nTask completed, accepted ${completedCount} trace(s).`;
               agentRunning.value = false;
               pendingConfirm.value = null;
             } else if (eventType === 'agent_aborted') {
               chatMessages.value[msgIdx].status = 'error';
               chatMessages.value[msgIdx].text += `\n⚠️ Agent 已停止：${data.reason || ''}`;
+              chatMessages.value[msgIdx].diagnostics = formatAgentDiagnostics(data.diagnostics || []);
               agentRunning.value = false;
               pendingConfirm.value = null;
             } else if (eventType === 'error') {
@@ -728,6 +911,7 @@ const sendMessage = async () => {
               chatMessages.value[msgIdx].error = data.message || '未知错误';
               agentRunning.value = false;
             }
+            scrollAssistantToBottom();
           } catch { /* ignore parse errors */ }
           eventType = '';
         }
@@ -740,6 +924,7 @@ const sendMessage = async () => {
   } catch (err: any) {
     chatMessages.value[msgIdx].text = `连接失败: ${err.message}`;
     chatMessages.value[msgIdx].status = 'error';
+    chatMessages.value[msgIdx].processingLabel = '';
     agentRunning.value = false;
   } finally {
     sending.value = false;
@@ -792,6 +977,14 @@ const sendMessage = async () => {
           <span class="text-[#831bd7] text-[10px] font-bold bg-[#c384ff]/20 px-2 py-1 rounded-md">{{ steps.length }} 步</span>
         </div>
 
+        <div
+          v-if="recordingDiagnostics.length"
+          class="mb-4 rounded-xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/80 dark:bg-rose-950/20 p-3 text-xs text-rose-700 dark:text-rose-300"
+        >
+          <p class="font-semibold">当前有 {{ recordingDiagnostics.length }} 个待修复步骤</p>
+          <p class="mt-1">这些步骤不会进入 accepted timeline，完成录制后需要在配置页修复或删除。</p>
+        </div>
+
         <div class="space-y-4">
           <div
             v-for="(step, index) in steps"
@@ -808,8 +1001,8 @@ const sendMessage = async () => {
               </div>
               <div class="flex items-center gap-1">
                 <button
-                  v-if="index > 0"
-                  @click="deleteStep(index - 1)"
+                  v-if="index > 0 && step.deletable !== false"
+                  @click="deleteStep(step, index - 1)"
                   class="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-red-50 rounded"
                   title="删除步骤"
                 >
@@ -937,9 +1130,11 @@ const sendMessage = async () => {
               </div>
               <div>
                 <h3 class="text-gray-900 dark:text-gray-100 font-bold text-sm">AI 录制助手</h3>
-                <p class="text-[10px] font-bold" :class="agentRunning ? 'text-orange-500' : 'text-[#831bd7]'">
-                  {{ agentRunning ? 'Agent 运行中...' : (agentMode ? 'Agent 模式' : '已就绪 · 协助录制中') }}
-                </p>
+                <p
+                  class="text-[10px] font-bold"
+                  :class="agentRunning ? 'text-orange-500' : 'text-[#831bd7]'"
+                  v-text="agentRunning ? '正在处理你的操作...' : '按描述录制操作'"
+                ></p>
               </div>
             </div>
             <div class="flex items-center gap-2">
@@ -948,23 +1143,11 @@ const sendMessage = async () => {
                 @click="abortAgent"
                 class="text-[10px] font-bold text-red-500 border border-red-200 dark:border-red-800 px-2 py-1 rounded-lg hover:bg-red-50 transition-colors"
               >中止</button>
-              <label class="flex items-center gap-1.5 cursor-pointer" :class="agentRunning ? 'opacity-50 pointer-events-none' : ''">
-                <span class="text-[10px] text-gray-500 dark:text-gray-400 font-medium">Agent</span>
-                <div
-                  @click="agentMode = !agentMode"
-                  class="w-8 h-4 rounded-full transition-colors relative"
-                  :class="agentMode ? 'bg-[#831bd7]' : 'bg-gray-300'"
-                >
-                  <div class="w-3 h-3 bg-white dark:bg-[#272728] rounded-full absolute top-0.5 transition-transform shadow-sm"
-                    :class="agentMode ? 'translate-x-4' : 'translate-x-0.5'"
-                  ></div>
-                </div>
-              </label>
             </div>
           </div>
         </div>
 
-        <div class="flex-1 overflow-y-auto p-6 space-y-6 bg-[#eff1f2] dark:bg-[#212122]">
+        <div ref="chatScrollRef" class="flex-1 overflow-y-auto p-6 space-y-6 bg-[#eff1f2] dark:bg-[#212122]">
           <div v-if="chatMessages.length === 0" class="text-center text-gray-400 dark:text-gray-500 text-xs mt-8">
             在 VNC 中操作浏览器，步骤会自动记录到左侧面板。
           </div>
@@ -975,60 +1158,121 @@ const sendMessage = async () => {
             :class="msg.role === 'user' ? 'items-end' : 'items-start'"
           >
             <div
-              class="max-w-[85%] p-3 rounded-2xl text-xs leading-relaxed"
-              :class="msg.role === 'user' ? 'bg-[#831bd7] text-white rounded-tr-none shadow-md shadow-purple-100' : 'bg-white dark:bg-[#272728] text-gray-700 dark:text-gray-300 rounded-tl-none border border-gray-100 dark:border-gray-800'"
+              v-if="msg.role === 'user'"
+              class="max-w-[85%] min-w-0 overflow-hidden rounded-2xl rounded-tr-none bg-[#831bd7] p-3 text-xs leading-relaxed text-white shadow-md shadow-purple-100 break-words [overflow-wrap:anywhere]"
             >
-              <!-- Message text with inline code blocks for agent actions -->
-              <div v-if="msg.actions && msg.actions.length > 0">
-                <template v-for="(part, pidx) in msg.text.split(/(\[\[CODE_\d+\]\])/)" :key="pidx">
-                  <span v-if="!part.match(/\[\[CODE_(\d+)\]\]/)">{{ part }}</span>
-                  <div v-else class="inline-block ml-2">
-                    <button
-                      @click="msg.actions[codeActionIndex(part)].showCode = !msg.actions[codeActionIndex(part)].showCode"
-                      class="inline-flex items-center gap-1 text-[10px] text-[#831bd7] hover:underline font-medium"
-                    >
-                      <Code :size="10" />
-                      {{ msg.actions[codeActionIndex(part)].showCode ? '收起' : '查看代码' }}
-                    </button>
-                    <pre v-if="msg.actions[codeActionIndex(part)].showCode" class="mt-1 bg-gray-900 dark:bg-gray-800 text-green-300 text-[10px] p-2 rounded-lg overflow-x-auto max-h-32 overflow-y-auto"><code>{{ msg.actions[codeActionIndex(part)].code }}</code></pre>
+              <div class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ msg.text }}</div>
+            </div>
+
+            <div
+              v-else-if="msg.run"
+              class="w-full max-w-[94%] overflow-hidden rounded-lg bg-white p-3 text-xs text-gray-800 shadow-[0_16px_36px_rgba(25,28,30,0.06)] dark:bg-[#272728] dark:text-gray-200"
+            >
+              <div class="flex min-w-0 items-start justify-between gap-2">
+                <div class="flex min-w-0 items-center gap-2">
+                  <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-[#831bd7] to-[#ac0089] text-white">
+                    <Wand2 :size="16" />
                   </div>
-                </template>
-              </div>
-              <div v-else class="whitespace-pre-wrap">{{ msg.text }}</div>
-              <div v-if="msg.status === 'executing'" class="mt-2 flex items-center gap-1.5 text-[10px] text-[#831bd7] font-medium">
-                <div class="w-2 h-2 rounded-full bg-[#831bd7] animate-pulse"></div>
-                正在执行...
-              </div>
-              <div v-if="msg.status === 'error' && msg.error" class="mt-2 text-[10px] text-red-500 bg-red-50 dark:bg-red-900/30 p-2 rounded-lg">
-                {{ msg.error }}
-              </div>
-              <div v-if="msg.frameSummary || msg.collectionSummary || msg.locatorSummary" class="mt-2 space-y-1 text-[10px] text-gray-500 dark:text-gray-400">
-                <div v-if="msg.frameSummary">
-                  <span class="font-semibold text-gray-600 dark:text-gray-400">Frame:</span>
-                  <span class="ml-1 font-mono">{{ msg.frameSummary }}</span>
+                  <div class="min-w-0">
+                    <div class="truncate text-[12px] font-bold text-gray-950 dark:text-gray-100">任务处理进度</div>
+                    <div class="mt-0.5 flex flex-wrap gap-1 text-[9px] font-semibold text-gray-500 dark:text-gray-400">
+                      <span>{{ runRoundCount(msg.run) }} 次尝试</span>
+                      <span>·</span>
+                      <span>已记录 {{ getRunTraceCount(msg) }} 步</span>
+                      <span>·</span>
+                      <span>{{ msg.time }}</span>
+                    </div>
+                  </div>
                 </div>
-                <div v-if="msg.collectionSummary">
-                  <span class="font-semibold text-gray-600 dark:text-gray-400">Collection:</span>
-                  <span class="ml-1">{{ msg.collectionSummary }}</span>
-                </div>
-                <div v-if="msg.locatorSummary">
-                  <span class="font-semibold text-gray-600 dark:text-gray-400">Locator:</span>
-                  <span class="ml-1">{{ msg.locatorSummary }}</span>
+                <span class="shrink-0 rounded px-2 py-1 text-[9px] font-bold" :class="getRunStatusClass(msg)">
+                  {{ getRunStatusLabel(msg) }}
+                </span>
+              </div>
+
+              <div v-if="msg.run.rounds.length === 0" class="mt-3 rounded-lg bg-[#f2f4f6] p-3 dark:bg-white/[0.08]">
+                <div class="flex items-center gap-2 text-[11px] font-semibold text-[#831bd7] dark:text-purple-200">
+                  <Loader2 :size="13" class="animate-spin" />
+                  <span>{{ msg.processingLabel || 'Agent 正在规划录制步骤...' }}</span>
                 </div>
               </div>
-              <div v-if="msg.status === 'done' && msg.role === 'assistant' && !agentMode" class="mt-2 flex items-center gap-1 text-[10px] text-green-600 font-medium">
-                <CheckCircle :size="10" /> 执行成功
+
+              <div v-else class="mt-3 space-y-2">
+                <section
+                  v-for="round in msg.run.rounds"
+                  :key="round.id"
+                  class="rounded-lg bg-[#f8f9fb] p-2.5 dark:bg-white/[0.06]"
+                >
+                  <div class="mb-2 flex items-center justify-between gap-2">
+                    <div class="text-[10px] font-bold text-gray-900 dark:text-gray-100">第 {{ round.index }} 次尝试</div>
+                    <span class="rounded px-1.5 py-0.5 text-[9px] font-bold" :class="getRoundStatusClass(round)">
+                      {{ getRoundStatusLabel(round) }}
+                    </span>
+                  </div>
+
+                  <div class="space-y-1.5">
+                    <div
+                      v-for="item in round.items"
+                      :key="item.id"
+                      class="min-w-0 rounded-md p-2"
+                      :class="getRunItemToneClass(item)"
+                    >
+                      <div class="flex min-w-0 gap-2">
+                        <div class="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded bg-white/70 dark:bg-black/20">
+                          <Bot v-if="item.kind === 'plan'" :size="12" />
+                          <Terminal v-else-if="item.kind === 'action'" :size="12" />
+                          <ClipboardCheck v-else-if="item.kind === 'trace'" :size="12" />
+                          <AlertCircle v-else-if="item.kind === 'diagnostic'" :size="12" />
+                          <CheckCircle v-else :size="12" />
+                        </div>
+                        <div class="min-w-0 flex-1">
+                          <div class="break-words text-[11px] font-bold leading-snug [overflow-wrap:anywhere]">{{ item.title }}</div>
+                          <div v-if="item.detail" class="mt-1 whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed opacity-85 [overflow-wrap:anywhere]">{{ item.detail }}</div>
+                          <button
+                            v-if="item.code"
+                            @click="item.showCode = !item.showCode"
+                            class="mt-2 inline-flex items-center gap-1 rounded bg-white/70 px-2 py-1 text-[10px] font-bold text-[#831bd7] transition hover:bg-white dark:bg-black/20 dark:text-purple-200"
+                          >
+                            <Code :size="11" />
+                            {{ item.showCode ? '收起技术细节' : '查看技术细节' }}
+                            <ChevronUp v-if="item.showCode" :size="11" />
+                            <ChevronDown v-else :size="11" />
+                          </button>
+                          <pre v-if="item.code && item.showCode" class="mt-2 max-h-40 overflow-auto rounded-md bg-[#101828] p-2 text-[10px] leading-relaxed text-emerald-200"><code>{{ item.code }}</code></pre>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </section>
               </div>
-              <!-- Legacy script toggle (for non-agent mode) -->
-              <button
-                v-if="msg.script"
-                @click="msg.showCode = !msg.showCode"
-                class="mt-2 flex items-center gap-1 text-[10px] text-[#831bd7] hover:underline font-medium"
+
+              <div
+                v-if="msg.status === 'done'"
+                class="mt-3 flex items-start gap-2 rounded-lg bg-emerald-50 p-2 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-200"
               >
-                <Code :size="10" />
-                {{ msg.showCode ? '收起代码' : '查看代码' }}
-              </button>
-              <pre v-if="msg.script && msg.showCode" class="mt-2 bg-gray-900 dark:bg-gray-800 text-green-300 text-[10px] p-3 rounded-lg overflow-x-auto max-h-48 overflow-y-auto"><code>{{ msg.script }}</code></pre>
+                <CheckCircle :size="13" class="mt-0.5 shrink-0" />
+                <span class="min-w-0 break-words">任务完成，已记录 {{ getRunTraceCount(msg) }} 个可回放步骤。</span>
+              </div>
+
+              <div
+                v-if="msg.status === 'error' && (msg.run.error || msg.run.diagnostics.length)"
+                class="mt-3 rounded-lg bg-red-50 p-2 text-[10px] text-red-700 dark:bg-red-950/30 dark:text-red-200"
+              >
+                <div class="mb-1 flex items-center gap-1 font-bold">
+                  <AlertCircle :size="12" />
+                  <span>失败诊断</span>
+                </div>
+                <div v-if="msg.run.error" class="whitespace-pre-wrap break-words font-mono [overflow-wrap:anywhere]">{{ msg.run.error }}</div>
+                <div v-for="(diagnostic, didx) in msg.run.diagnostics" :key="didx" class="mt-1 whitespace-pre-wrap break-words font-mono opacity-90 [overflow-wrap:anywhere]">
+                  {{ didx + 1 }}. {{ diagnostic }}
+                </div>
+              </div>
+            </div>
+
+            <div
+              v-else
+              class="max-w-[85%] min-w-0 overflow-hidden rounded-2xl rounded-tl-none bg-white p-3 text-xs leading-relaxed text-gray-700 shadow-sm dark:bg-[#272728] dark:text-gray-300"
+            >
+              <div class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ msg.text }}</div>
             </div>
             <span class="text-[9px] text-gray-400 dark:text-gray-500 font-medium px-1">{{ msg.time }}</span>
           </div>
@@ -1052,7 +1296,7 @@ const sendMessage = async () => {
               @keyup.enter="sendMessage"
               :disabled="sending || agentRunning"
               class="w-full bg-white dark:bg-[#272728] border border-gray-200 dark:border-gray-700 rounded-2xl py-3 pl-4 pr-12 text-xs focus:ring-2 focus:ring-[#831bd7] focus:border-transparent shadow-sm placeholder:text-gray-400 outline-none disabled:opacity-50"
-              :placeholder="agentRunning ? 'Agent 运行中...' : (sending ? 'AI 正在处理...' : (agentMode ? '描述目标任务...' : '向助手提问...'))"
+              :placeholder="agentRunning ? 'Agent 运行中...' : (sending ? 'AI 正在处理...' : '描述录制目标或操作...')"
               type="text"
             />
             <button
