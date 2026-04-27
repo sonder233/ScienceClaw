@@ -617,5 +617,17 @@ export default {
   'Failed to discover MCP tools': 'Failed to discover tools for {name}',
   'Delete MCP server confirm': 'Delete "{name}"?',
   'MCP server deleted': 'MCP server deleted',
-  'Failed to delete MCP server': 'Failed to delete MCP server'
+  'Failed to delete MCP server': 'Failed to delete MCP server',
+  'Upload File': 'Upload File',
+  'File Source': 'File Source',
+  'Fixed File': 'Fixed File',
+  'Runtime Parameter': 'Runtime Parameter',
+  'From Previous Download': 'From Previous Download',
+  'From this session download': 'From this session download',
+  'No downloads yet in this session': 'No downloads yet in this session',
+  'Use recorded file': 'Use recorded file',
+  'Re-upload': 'Re-upload',
+  'Linked to step': 'Linked to step',
+  'File missing, please re-upload': 'File missing, please re-upload',
+  'Upload hint confirm': 'Possible download to upload chain detected'
 } 

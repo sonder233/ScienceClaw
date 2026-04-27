@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Dict, Any
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request, UploadFile, File, Body
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 import websockets
@@ -21,6 +21,7 @@ from backend.rpa.recording_runtime_agent import RecordingRuntimeAgent, Recording
 from backend.rpa.trace_skill_compiler import TraceSkillCompiler
 from backend.rpa.cdp_connector import get_cdp_connector
 from backend.rpa.screencast import SessionScreencastController
+from backend.rpa.upload_source import default_upload_source_from_staging, download_result_key
 from backend.user.dependencies import get_current_user, User
 from backend.config import settings
 from backend.storage import get_repository
@@ -71,6 +72,7 @@ class PromoteLocatorRequest(BaseModel):
 
 
 def _generate_session_script(session, params: Dict[str, Any], *, test_mode: bool = False) -> str:
+    _ensure_default_upload_sources(session)
     if getattr(session, "traces", None):
         return trace_compiler.generate_script(
             session.traces,
@@ -85,6 +87,183 @@ def _generate_session_script(session, params: Dict[str, Any], *, test_mode: bool
         is_local=(settings.storage_backend == "local"),
         test_mode=test_mode,
     )
+
+
+def _ensure_default_upload_sources(session) -> None:
+    trace_by_id = {
+        trace.trace_id: trace
+        for trace in (getattr(session, "traces", None) or [])
+    }
+    for step in getattr(session, "steps", []) or []:
+        step_signals = step.signals if isinstance(step.signals, dict) else {}
+        download_signal = step_signals.get("download")
+        if not isinstance(download_signal, dict):
+            continue
+        trace = trace_by_id.get(f"trace-{step.id}")
+        if trace is None:
+            continue
+        trace_signals = dict(trace.signals or {})
+        trace_signals["download"] = download_signal
+        trace.signals = trace_signals
+        trace.value = step.value or trace.value
+        if getattr(step, "description", None):
+            trace.description = step.description
+
+    for step in getattr(session, "steps", []) or []:
+        if getattr(step, "action", "") != "set_input_files":
+            continue
+        signals = step.signals if isinstance(step.signals, dict) else {}
+        if isinstance(signals.get("upload_source"), dict):
+            converted = _download_dataflow_source_for_upload_path(session, signals["upload_source"])
+            if converted:
+                signals = dict(signals)
+                signals["upload_source"] = converted
+                step.signals = signals
+                trace = trace_by_id.get(f"trace-{step.id}")
+                if trace is not None:
+                    trace_signals = dict(trace.signals or {})
+                    trace_signals["upload_source"] = converted
+                    trace.signals = trace_signals
+            continue
+        source = default_upload_source_from_staging(signals, fallback_filename=str(step.value or "upload.bin"))
+        if not source:
+            continue
+        source = _download_dataflow_source_for_upload_path(session, source) or source
+        signals = dict(signals)
+        signals["upload_source"] = source
+        step.signals = signals
+        trace = trace_by_id.get(f"trace-{step.id}")
+        if trace is not None:
+            trace_signals = dict(trace.signals or {})
+            trace_signals["upload_source"] = source
+            trace.signals = trace_signals
+
+    for trace in getattr(session, "traces", None) or []:
+        if getattr(trace, "action", "") != "set_input_files":
+            continue
+        signals = trace.signals if isinstance(trace.signals, dict) else {}
+        if isinstance(signals.get("upload_source"), dict):
+            converted = _download_dataflow_source_for_upload_path(session, signals["upload_source"])
+            if converted:
+                trace_signals = dict(signals)
+                trace_signals["upload_source"] = converted
+                trace.signals = trace_signals
+            continue
+        source = default_upload_source_from_staging(signals, fallback_filename=str(trace.value or "upload.bin"))
+        source = _download_dataflow_source_for_upload_path(session, source) or source
+        if source:
+            trace_signals = dict(signals)
+            trace_signals["upload_source"] = source
+            trace.signals = trace_signals
+
+
+def _download_dataflow_source_for_upload_path(session, upload_source: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(upload_source, dict) or upload_source.get("mode") != "path":
+        return {}
+    raw_path = str(upload_source.get("path") or "").strip()
+    if not raw_path:
+        return {}
+    normalized_path = raw_path.replace("\\", "/")
+    session_download_dir = (Path(settings.workspace_dir) / "rpa_downloads" / session.id).as_posix()
+    if session_download_dir not in normalized_path:
+        return {}
+
+    filename = Path(raw_path).name or str(upload_source.get("original_filename") or "")
+    for step in getattr(session, "steps", []) or []:
+        signals = step.signals if isinstance(step.signals, dict) else {}
+        download = signals.get("download")
+        if not isinstance(download, dict):
+            continue
+        download_filename = str(download.get("filename") or step.value or "")
+        download_path = str(download.get("path") or download.get("saved_path") or "").replace("\\", "/")
+        if (download_path and download_path == normalized_path) or (filename and download_filename == filename):
+            result_key = str(download.get("result_key") or download_result_key(download_filename or filename))
+            return {
+                "mode": "dataflow",
+                "source_step_id": step.id,
+                "source_result_key": result_key,
+                "file_field": "path",
+                "original_filename": filename or download_filename,
+            }
+    return {}
+
+
+def _staging_file_path(session_id: str, staging: Dict[str, Any]) -> str:
+    explicit = staging.get("path")
+    if explicit:
+        return str(explicit)
+    staging_id = str(staging.get("staging_id") or "")
+    stored = str(staging.get("stored_filename") or staging.get("original_filename") or "")
+    if not staging_id or not stored:
+        return ""
+    return str(Path(settings.rpa_uploads_dir) / session_id / staging_id / stored)
+
+
+def _first_staging_item(signals: Dict[str, Any]) -> Dict[str, Any]:
+    staging = signals.get("upload_staging")
+    if not isinstance(staging, dict):
+        return {}
+    items = staging.get("items")
+    if isinstance(items, list) and items and isinstance(items[0], dict):
+        return items[0]
+    return staging
+
+
+def _collect_asset_overrides(session) -> Dict[str, str]:
+    overrides: Dict[str, str] = {}
+    for step in getattr(session, "steps", []) or []:
+        signals = step.signals if isinstance(step.signals, dict) else {}
+        source = signals.get("upload_source")
+        if not isinstance(source, dict):
+            continue
+        staging = signals.get("upload_staging")
+
+        def add_override(asset_path: str, staging_item: Dict[str, Any]) -> None:
+            if not asset_path or not isinstance(staging_item, dict):
+                return
+            path = _staging_file_path(session.id, staging_item)
+            if path and Path(path).exists():
+                overrides[str(asset_path).replace("\\", "/")] = path
+
+        if source.get("multi") and isinstance(source.get("items"), list) and isinstance(staging, dict):
+            staging_items = staging.get("items") if isinstance(staging.get("items"), list) else []
+            for index, item_source in enumerate(source["items"]):
+                if not isinstance(item_source, dict):
+                    continue
+                staging_item = staging_items[index] if index < len(staging_items) and isinstance(staging_items[index], dict) else {}
+                asset_path = item_source.get("asset_path") or item_source.get("default_asset_path")
+                add_override(str(asset_path or ""), staging_item)
+            continue
+
+        staging_item = _first_staging_item(signals)
+        asset_path = source.get("asset_path") or source.get("default_asset_path")
+        add_override(str(asset_path or ""), staging_item)
+    return overrides
+
+
+def _resolve_file_param_values(session, params: Dict[str, Any], kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    result = dict(kwargs)
+    overrides = _collect_asset_overrides(session)
+    if overrides:
+        result.setdefault("_asset_overrides", overrides)
+    for param_name, param_info in (params or {}).items():
+        if not isinstance(param_info, dict) or param_info.get("type") != "file":
+            continue
+        if param_name not in result:
+            continue
+        raw_value = str(result.get(param_name) or "")
+        if not raw_value:
+            continue
+        normalized = raw_value.replace("\\", "/")
+        if normalized in overrides:
+            result[param_name] = overrides[normalized]
+            continue
+        value_path = Path(raw_value)
+        if value_path.is_absolute():
+            result[param_name] = str(value_path)
+        else:
+            result[param_name] = str(Path(settings.workspace_dir) / raw_value)
+    return result
 
 
 async def _apply_recording_agent_result(session_id: str, result: RecordingAgentResult) -> None:
@@ -413,6 +592,102 @@ async def promote_step_locator(
     return {"status": "success", "step": step}
 
 
+@router.get("/session/{session_id}/downloadable_steps")
+async def list_downloadable_steps(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    try:
+        steps = rpa_manager.downloadable_steps(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "success", "steps": steps}
+
+
+@router.put("/session/{session_id}/step/{step_index}/upload_source")
+async def update_step_upload_source(
+    session_id: str,
+    step_index: int,
+    upload_source: Dict[str, Any] = Body(...),
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    try:
+        step = await rpa_manager.update_step_upload_source(session_id, step_index, upload_source)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "success", "step": step}
+
+
+@router.post("/session/{session_id}/step/{step_index}/asset")
+async def upload_step_asset(
+    session_id: str,
+    step_index: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    try:
+        step = await rpa_manager.attach_step_asset(
+            session_id,
+            step_index,
+            filename=file.filename or "upload.bin",
+            content=content,
+            mime=file.content_type or "",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    source = step.signals.get("upload_source") if isinstance(step.signals, dict) else {}
+    asset_path = ""
+    if isinstance(source, dict):
+        asset_path = source.get("asset_path") or source.get("default_asset_path") or ""
+    return {
+        "status": "success",
+        "step": step,
+        "asset_path": asset_path,
+    }
+
+
+@router.post("/session/{session_id}/step/{step_index}/promote_staging")
+async def promote_step_upload_staging(
+    session_id: str,
+    step_index: int,
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    try:
+        step = await rpa_manager.promote_upload_staging(session_id, step_index)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    source = step.signals.get("upload_source") if isinstance(step.signals, dict) else {}
+    return {
+        "status": "success",
+        "step": step,
+        "asset_path": source.get("asset_path") if isinstance(source, dict) else "",
+    }
+
+
 @router.post("/session/{session_id}/generate")
 async def generate_script(
     session_id: str,
@@ -455,6 +730,7 @@ async def test_script(
         test_kwargs: Dict[str, Any] = {"_downloads_dir": downloads_dir}
         if request.params:
             test_kwargs.update(await inject_credentials(str(current_user.id), request.params, {}))
+        test_kwargs = _resolve_file_param_values(session, request.params, test_kwargs)
         result = await executor.execute(
             browser,
             script,
@@ -474,6 +750,7 @@ async def test_script(
             docker_kwargs = await inject_credentials(
                 str(current_user.id), request.params, {}
             )
+        docker_kwargs = _resolve_file_param_values(session, request.params, docker_kwargs)
         result = await executor.execute(
             browser,
             script,
@@ -548,6 +825,8 @@ async def save_skill(
         description=request.description,
         script=script,
         params=request.params,
+        steps=[step.model_dump() for step in session.steps],
+        session_id=session_id,
     )
 
     session.status = "saved"
@@ -797,6 +1076,7 @@ async def rpa_screencast(websocket: WebSocket, session_id: str):
     screencast = SessionScreencastController(
         page_provider=lambda: rpa_manager.get_page(session_id),
         tabs_provider=lambda: rpa_manager.list_tabs(session_id),
+        session_id=session_id,
     )
     try:
         await screencast.start(websocket)

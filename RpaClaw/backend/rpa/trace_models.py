@@ -55,6 +55,7 @@ class RPAAcceptedTrace(BaseModel):
     before_page: RPAPageState = Field(default_factory=RPAPageState)
     after_page: RPAPageState = Field(default_factory=RPAPageState)
     locator_candidates: List[Dict[str, Any]] = Field(default_factory=list)
+    signals: Dict[str, Any] = Field(default_factory=dict)
     value: Any = None
     output_key: Optional[str] = None
     output: Any = None
@@ -113,4 +114,3 @@ class RPARuntimeResults(BaseModel):
 
         visit(self.values, [])
         return refs
-

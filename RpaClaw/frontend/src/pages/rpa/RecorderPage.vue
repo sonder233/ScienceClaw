@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen, Globe } from 'lucide-vue-next';
+import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen, Globe, FileUp, FileDown, Workflow, CloudUpload, ArrowRight, Loader2, FileText } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import { getBackendWsUrl } from '@/utils/sandbox';
 import {
@@ -36,6 +36,7 @@ const loading = ref(true);
 const error = ref<string | null>(null);
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
+const fileBridgeInputRef = ref<HTMLInputElement | null>(null);
 const screencastFrameSize = ref<ScreencastSize>({ width: 1280, height: 720 });
 const screencastInputSize = ref<ScreencastSize>({ width: 1280, height: 720 });
 let screencastWs: WebSocket | null = null;
@@ -46,6 +47,28 @@ let screencastReconnectStartedAt = 0;
 let shouldReconnectScreencast = true;
 let currentScreencastSessionId: string | null = null;
 let lastMoveTime = 0;
+interface PendingFileInput {
+  token: string;
+  accept: string;
+  multiple: boolean;
+  name?: string;
+  id?: string;
+}
+interface DownloadableFile {
+  step_id: string;
+  filename: string;
+  path: string;
+  size?: number;
+  result_key: string;
+}
+const pendingFileInput = ref<PendingFileInput | null>(null);
+const fileBridgeStatus = ref('');
+const fileBridgeMode = ref<'fixed' | 'path' | 'download'>('fixed');
+const fileBridgePath = ref('');
+const fileBridgeFiles = ref<File[]>([]);
+const downloadableFiles = ref<DownloadableFile[]>([]);
+const fileBridgeDragging = ref(false);
+const fileBridgeBusy = ref(false);
 interface BrowserTab {
   tab_id: string;
   title: string;
@@ -128,6 +151,27 @@ const getValidationClass = (status?: string) => {
   return VALIDATION_CLASS_MAP[status] || 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300';
 };
 
+const getStepFileOperation = (step: any): 'upload' | 'download' | '' => {
+  const signals = step?.signals || {};
+  if (step?.action === 'set_input_files' || signals.set_input_files) return 'upload';
+  if (step?.action === 'download' || step?.action === 'download_click' || signals.download) return 'download';
+  return '';
+};
+
+const getStepFileName = (step: any): string => {
+  const signals = step?.signals || {};
+  const operation = getStepFileOperation(step);
+  if (operation === 'download') {
+    return String(signals.download?.filename || signals.download?.suggested_filename || step?.value || '').trim();
+  }
+  if (operation === 'upload') {
+    const files = signals.set_input_files?.files;
+    if (Array.isArray(files) && files.length > 0) return files.map((item) => String(item)).filter(Boolean).join(', ');
+    return String(step?.value || '').trim();
+  }
+  return '';
+};
+
 const mapServerSteps = (serverSteps: any[]) => ([
   { id: '0', title: '环境就绪', description: '已成功启动 Playwright 浏览器', status: 'completed' },
   ...serverSteps.map((s: any, i: number) => ({
@@ -135,6 +179,9 @@ const mapServerSteps = (serverSteps: any[]) => ([
     title: s.description || s.action,
     description: s.source === 'ai' ? (s.prompt || s.description || 'AI 操作') : `${s.action} -> ${formatLocator(s.target || s.label || '')}`,
     status: 'completed',
+    action: s.action,
+    value: s.value,
+    signals: s.signals || {},
     source: s.source || 'record',
     sensitive: s.sensitive || false,
     locatorSummary: formatLocator(s.target),
@@ -161,6 +208,8 @@ const mapServerTraces = (serverTraces: any[]) => ([
     title: t.description || t.user_instruction || formatTraceType(t.trace_type),
     description: t.user_instruction || t.action || formatTraceType(t.trace_type),
     status: 'completed',
+    action: t.action,
+    signals: t.signals || {},
     source: t.source === 'ai' || t.trace_type === 'ai_operation' ? 'ai' : 'record',
     traceType: t.trace_type,
     sensitive: false,
@@ -439,7 +488,7 @@ const connectScreencast = (sid: string) => {
     error.value = null;
   };
 
-  ws.onmessage = (ev) => {
+  ws.onmessage = async (ev) => {
     if (screencastWs !== ws) return;
     try {
       const msg = JSON.parse(ev.data);
@@ -453,6 +502,37 @@ const connectScreencast = (sid: string) => {
         syncTabs(msg.tabs || []);
       } else if (msg.type === 'preview_error') {
         error.value = msg.message || '预览切换失败';
+      } else if (msg.type === 'file_input_requested') {
+        pendingFileInput.value = {
+          token: msg.token,
+          accept: msg.accept || '',
+          multiple: !!msg.multiple,
+          name: msg.name || '',
+          id: msg.id || '',
+        };
+        fileBridgeMode.value = 'fixed';
+        fileBridgePath.value = '';
+        fileBridgeFiles.value = [];
+        fileBridgeBusy.value = false;
+        fileBridgeDragging.value = false;
+        fileBridgeStatus.value = '';
+        try {
+          const resp = await apiClient.get(`/rpa/session/${sessionId.value}/downloadable_steps`);
+          downloadableFiles.value = resp.data.steps || [];
+        } catch {
+          downloadableFiles.value = [];
+        }
+      } else if (msg.type === 'file_input_applied') {
+        const names = Array.isArray(msg.filenames) ? msg.filenames.join(', ') : '文件';
+        if (msg.source_mode === 'dataflow') fileBridgeStatus.value = `已关联下载文件 ${names}`;
+        else fileBridgeStatus.value = msg.source_mode === 'path' ? `已使用路径 ${names}` : `已固定 ${names}`;
+        fileBridgeBusy.value = false;
+        fileBridgeFiles.value = [];
+        pendingFileInput.value = null;
+        focusCanvas();
+      } else if (msg.type === 'file_input_error') {
+        fileBridgeBusy.value = false;
+        fileBridgeStatus.value = msg.message || '设置上传文件失败';
       }
     } catch (parseError) {
       console.error('[RecorderPage] Screencast parse error:', parseError);
@@ -521,8 +601,151 @@ const handleAddressBlur = () => {
   syncAddressBar();
 };
 
+const isAboutBlankAddress = () => addressInput.value.trim().toLowerCase() === 'about:blank';
+
+const selectAboutBlankAddress = (target: EventTarget | null) => {
+  if (!isAboutBlankAddress() || !(target instanceof HTMLInputElement)) return;
+  requestAnimationFrame(() => target.select());
+};
+
+const handleAddressFocus = (event: FocusEvent) => {
+  isAddressEditing.value = true;
+  selectAboutBlankAddress(event.target);
+};
+
+const handleAddressMouseUp = (event: MouseEvent) => {
+  if (!isAboutBlankAddress()) return;
+  event.preventDefault();
+  selectAboutBlankAddress(event.target);
+};
+
 const focusCanvas = () => {
   canvasRef.value?.focus();
+};
+
+const readFileAsBase64 = (file: File): Promise<Record<string, any>> => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const result = String(reader.result || '');
+    const comma = result.indexOf(',');
+    resolve({
+      name: file.name,
+      size: file.size,
+      mime: file.type,
+      last_modified: file.lastModified,
+      data_base64: comma >= 0 ? result.slice(comma + 1) : result,
+    });
+  };
+  reader.onerror = () => reject(reader.error || new Error('读取文件失败'));
+  reader.readAsDataURL(file);
+});
+
+const openFileBridgePicker = () => {
+  fileBridgeInputRef.value?.click();
+};
+
+const setFileBridgeFiles = (files: File[]) => {
+  const request = pendingFileInput.value;
+  fileBridgeFiles.value = request?.multiple ? files : files.slice(0, 1);
+  fileBridgeStatus.value = '';
+};
+
+const handleFileBridgeInputChange = (event: Event) => {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files || []);
+  input.value = '';
+  if (files.length > 0) setFileBridgeFiles(files);
+};
+
+const handleFileBridgeDrop = (event: DragEvent) => {
+  fileBridgeDragging.value = false;
+  const files = Array.from(event.dataTransfer?.files || []);
+  if (files.length > 0) setFileBridgeFiles(files);
+};
+
+const cancelFileBridge = () => {
+  pendingFileInput.value = null;
+  fileBridgeFiles.value = [];
+  fileBridgePath.value = '';
+  downloadableFiles.value = [];
+  fileBridgeBusy.value = false;
+  fileBridgeDragging.value = false;
+  fileBridgeStatus.value = '';
+  focusCanvas();
+};
+
+const sendFileBridgeSelection = async () => {
+  const files = fileBridgeFiles.value;
+  if (!pendingFileInput.value || !screencastWs || screencastWs.readyState !== WebSocket.OPEN) return;
+  if (files.length === 0) {
+    openFileBridgePicker();
+    return;
+  }
+  const request = pendingFileInput.value;
+  fileBridgeBusy.value = true;
+  fileBridgeStatus.value = '正在设置上传文件...';
+  try {
+    const payloadFiles = await Promise.all(files.map(readFileAsBase64));
+    screencastWs.send(JSON.stringify({
+      type: 'file_upload_selection',
+      token: request.token,
+      source_mode: 'fixed',
+      files: payloadFiles,
+    }));
+  } catch (err: any) {
+    fileBridgeBusy.value = false;
+    fileBridgeStatus.value = err?.message || '读取文件失败';
+  }
+};
+
+const sendFileBridgePath = () => {
+  if (!pendingFileInput.value || !screencastWs || screencastWs.readyState !== WebSocket.OPEN) return;
+  const path = fileBridgePath.value.trim();
+  if (!path) {
+    fileBridgeStatus.value = '请输入本机文件路径';
+    return;
+  }
+  fileBridgeBusy.value = true;
+  fileBridgeStatus.value = '正在按路径设置上传文件...';
+  try {
+    screencastWs.send(JSON.stringify({
+      type: 'file_upload_selection',
+      token: pendingFileInput.value.token,
+      source_mode: 'path',
+      path,
+    }));
+  } catch (err: any) {
+    fileBridgeBusy.value = false;
+    fileBridgeStatus.value = err?.message || '设置上传文件失败';
+  }
+};
+
+const pickDownloadable = (downloadable: DownloadableFile) => {
+  if (!pendingFileInput.value || !screencastWs || screencastWs.readyState !== WebSocket.OPEN) return;
+  if (!downloadable.path) {
+    fileBridgeStatus.value = '这个下载记录没有可用路径';
+    return;
+  }
+  fileBridgeBusy.value = true;
+  fileBridgeStatus.value = `正在使用下载文件 ${downloadable.filename}...`;
+  try {
+    screencastWs.send(JSON.stringify({
+      type: 'file_upload_selection',
+      token: pendingFileInput.value.token,
+      source_mode: 'dataflow',
+      path: downloadable.path,
+      upload_source: {
+        mode: 'dataflow',
+        source_step_id: downloadable.step_id,
+        source_result_key: downloadable.result_key,
+        file_field: 'path',
+        original_filename: downloadable.filename,
+      },
+    }));
+  } catch (err: any) {
+    fileBridgeBusy.value = false;
+    fileBridgeStatus.value = err?.message || '设置上传文件失败';
+  }
 };
 
 const sendInputEvent = (e: Event) => {
@@ -566,7 +789,7 @@ const sendInputEvent = (e: Event) => {
       x: point.x,
       y: point.y,
       button: buttonMap[e.button] || 'left',
-      clickCount: e.type === 'mousedown' ? 1 : 0,
+      clickCount: e.type === 'mousedown' || e.type === 'mouseup' ? 1 : 0,
       modifiers: getModifiers(e),
     }));
   } else if (e instanceof WheelEvent) {
@@ -876,6 +1099,15 @@ const sendMessage = async () => {
             <div class="flex justify-between items-start mb-1">
               <div class="flex items-center gap-1.5">
                 <Bot v-if="step.source === 'ai'" class="text-[#ac0089]" :size="12" />
+                <span
+                  v-if="getStepFileOperation(step)"
+                  class="inline-flex size-4 items-center justify-center rounded-full"
+                  :class="getStepFileOperation(step) === 'upload' ? 'bg-violet-100 text-violet-600 dark:bg-violet-900/40 dark:text-violet-300' : 'bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-200'"
+                  :title="getStepFileOperation(step) === 'upload' ? '文件上传' : '文件下载'"
+                >
+                  <FileUp v-if="getStepFileOperation(step) === 'upload'" :size="11" />
+                  <FileDown v-else :size="11" />
+                </span>
                 <p class="text-[10px] font-bold" :class="step.source === 'ai' ? 'text-[#ac0089]' : (step.status === 'active' ? 'text-[#831bd7]' : 'text-gray-400 dark:text-gray-500')">
                   {{ step.source === 'ai' ? 'AI' : '步骤' }} {{ step.id.padStart(2, '0') }}
                 </p>
@@ -894,7 +1126,7 @@ const sendMessage = async () => {
             </div>
             <h3 class="text-gray-900 dark:text-gray-100 font-semibold text-sm">{{ step.title }}</h3>
             <p class="text-gray-500 dark:text-gray-400 text-[11px] mt-2 leading-relaxed">{{ step.description }}</p>
-            <div v-if="step.locatorSummary || step.frameSummary || step.validationStatus" class="mt-3 space-y-1.5 text-[10px] text-gray-500 dark:text-gray-400">
+            <div v-if="step.locatorSummary || step.frameSummary || getStepFileName(step) || step.validationStatus" class="mt-3 space-y-1.5 text-[10px] text-gray-500 dark:text-gray-400">
               <p v-if="step.locatorSummary" class="break-all">
                 <span class="font-semibold text-gray-600 dark:text-gray-400">Locator:</span>
                 <span class="font-mono ml-1">{{ step.locatorSummary }}</span>
@@ -902,6 +1134,10 @@ const sendMessage = async () => {
               <p v-if="step.frameSummary" class="break-all">
                 <span class="font-semibold text-gray-600 dark:text-gray-400">Frame:</span>
                 <span class="font-mono ml-1">{{ step.frameSummary }}</span>
+              </p>
+              <p v-if="getStepFileName(step)" class="break-all">
+                <span class="font-semibold text-gray-600 dark:text-gray-400">文件:</span>
+                <span class="font-mono ml-1">{{ getStepFileName(step) }}</span>
               </p>
               <p v-if="step.validationStatus" class="break-all">
                 <span class="font-semibold text-gray-600 dark:text-gray-400">Validation:</span>
@@ -955,7 +1191,8 @@ const sendMessage = async () => {
                 placeholder="输入网址并按回车跳转"
                 type="text"
                 spellcheck="false"
-                @focus="isAddressEditing = true"
+                @focus="handleAddressFocus"
+                @mouseup="handleAddressMouseUp"
                 @blur="handleAddressBlur"
               />
               <span v-if="isNavigating" class="text-[9px] text-[#831bd7] font-medium flex-shrink-0">打开中...</span>
@@ -985,6 +1222,176 @@ const sendMessage = async () => {
 
             <div v-if="error && sessionId" class="absolute top-4 right-4 max-w-xs bg-red-500/90 text-white text-[11px] px-3 py-2 rounded-lg shadow-lg">
               {{ error }}
+            </div>
+            <div
+              v-if="pendingFileInput"
+              class="absolute inset-0 z-30 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm"
+            >
+              <div class="flex w-full max-w-xl flex-col overflow-hidden rounded-xl border border-slate-200 bg-white text-slate-900 shadow-2xl dark:border-slate-800 dark:bg-[#272728] dark:text-gray-100">
+                <div class="flex items-center justify-between border-b border-slate-100 bg-white px-6 py-4 dark:border-slate-800 dark:bg-[#272728]">
+                  <div>
+                    <h2 class="text-lg font-bold leading-6">上传内容</h2>
+                    <p class="mt-1 text-xs text-slate-500 dark:text-gray-400">页面正在请求文件选择器，请选择录制技能要使用的上传来源。</p>
+                  </div>
+                  <button
+                    type="button"
+                    class="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-white/10 dark:hover:text-gray-100"
+                    title="关闭"
+                    @click="cancelFileBridge"
+                  >
+                    <X :size="18" />
+                  </button>
+                </div>
+
+                <div class="space-y-5 p-6">
+                  <div class="rounded-xl bg-slate-100 p-1 dark:bg-[#1f1f20]">
+                    <div
+                      class="grid gap-1"
+                      :class="downloadableFiles.length > 0 ? 'grid-cols-3' : 'grid-cols-2'"
+                    >
+                      <button
+                        type="button"
+                        class="inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition-all"
+                        :class="fileBridgeMode === 'fixed' ? 'bg-white text-[#831bd7] shadow-sm dark:bg-[#383739]' : 'text-slate-500 hover:text-slate-700 dark:text-gray-400 dark:hover:text-gray-200'"
+                        @click="fileBridgeMode = 'fixed'"
+                      >
+                        <FileUp :size="16" />
+                        固定文件
+                      </button>
+                      <button
+                        type="button"
+                        class="inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition-all"
+                        :class="fileBridgeMode === 'path' ? 'bg-white text-[#831bd7] shadow-sm dark:bg-[#383739]' : 'text-slate-500 hover:text-slate-700 dark:text-gray-400 dark:hover:text-gray-200'"
+                        @click="fileBridgeMode = 'path'"
+                      >
+                        <Workflow :size="16" />
+                        指定路径
+                      </button>
+                      <button
+                        v-if="downloadableFiles.length > 0"
+                        type="button"
+                        class="inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition-all"
+                        :class="fileBridgeMode === 'download' ? 'bg-white text-[#831bd7] shadow-sm dark:bg-[#383739]' : 'text-slate-500 hover:text-slate-700 dark:text-gray-400 dark:hover:text-gray-200'"
+                        @click="fileBridgeMode = 'download'"
+                      >
+                        <FileDown :size="16" />
+                        从本次下载
+                      </button>
+                    </div>
+                  </div>
+
+                  <div v-if="fileBridgeMode === 'fixed'" class="space-y-3">
+                    <button
+                      type="button"
+                      class="group flex w-full flex-col items-center justify-center rounded-xl border-2 border-dashed bg-slate-50/80 px-6 py-8 text-center transition-all dark:bg-[#1f1f20]/70"
+                      :class="fileBridgeDragging ? 'border-[#831bd7] bg-purple-50/80 dark:bg-purple-950/20' : 'border-slate-200 hover:border-[#831bd7]/60 hover:bg-purple-50/40 dark:border-slate-700'"
+                      @click="openFileBridgePicker"
+                      @dragenter.prevent="fileBridgeDragging = true"
+                      @dragover.prevent="fileBridgeDragging = true"
+                      @dragleave.prevent="fileBridgeDragging = false"
+                      @drop.prevent="handleFileBridgeDrop"
+                    >
+                      <CloudUpload class="mb-3 text-[#831bd7] transition-transform group-hover:scale-110" :size="34" />
+                      <p class="text-sm font-semibold text-slate-700 dark:text-gray-200">点击选择或拖拽文件到这里</p>
+                      <p class="mt-1 text-[11px] text-slate-500 dark:text-gray-400">
+                        {{ pendingFileInput.multiple ? '支持多文件' : '单文件上传' }}{{ pendingFileInput.accept ? ` · ${pendingFileInput.accept}` : '' }}
+                      </p>
+                    </button>
+
+                    <div v-if="fileBridgeFiles.length" class="space-y-2 rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-[#1f1f20]">
+                      <div
+                        v-for="file in fileBridgeFiles"
+                        :key="`${file.name}-${file.size}-${file.lastModified}`"
+                        class="flex min-w-0 items-center gap-3"
+                      >
+                        <div class="flex size-8 flex-shrink-0 items-center justify-center rounded-lg bg-purple-50 text-[#831bd7] dark:bg-purple-950/30">
+                          <FileText :size="16" />
+                        </div>
+                        <div class="min-w-0 flex-1">
+                          <p class="truncate text-xs font-semibold text-slate-700 dark:text-gray-200">{{ file.name }}</p>
+                          <p class="text-[11px] text-slate-500 dark:text-gray-400">{{ (file.size / 1024 / 1024).toFixed(2) }} MB</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div v-else-if="fileBridgeMode === 'download'" class="space-y-2">
+                    <button
+                      v-for="downloadable in downloadableFiles"
+                      :key="downloadable.step_id"
+                      type="button"
+                      class="flex w-full min-w-0 items-center gap-3 rounded-xl border border-teal-100 bg-teal-50/70 px-3 py-3 text-left transition-colors hover:border-teal-300 hover:bg-teal-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-teal-900/60 dark:bg-teal-950/20 dark:hover:bg-teal-950/30"
+                      :disabled="fileBridgeBusy || !downloadable.path"
+                      @click="pickDownloadable(downloadable)"
+                    >
+                      <span class="flex size-8 shrink-0 items-center justify-center rounded-lg bg-white text-teal-700 dark:bg-[#272728] dark:text-teal-300">
+                        <FileDown :size="16" />
+                      </span>
+                      <span class="min-w-0 flex-1">
+                        <span class="block truncate text-xs font-semibold text-slate-700 dark:text-gray-200">{{ downloadable.filename }}</span>
+                        <span v-if="downloadable.path" class="mt-0.5 block truncate text-[11px] text-slate-500 dark:text-gray-400">{{ downloadable.path }}</span>
+                      </span>
+                      <span v-if="downloadable.size" class="shrink-0 text-[11px] text-slate-500 dark:text-gray-400">{{ (downloadable.size / 1024).toFixed(1) }} KB</span>
+                    </button>
+                    <p v-if="!downloadableFiles.length" class="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:bg-[#1f1f20] dark:text-gray-400">
+                      本次会话还没有下载记录
+                    </p>
+                  </div>
+
+                  <div v-else class="space-y-3">
+                    <label class="grid gap-2">
+                      <span class="text-xs font-semibold text-slate-600 dark:text-gray-300">本机文件路径</span>
+                      <input
+                        v-model="fileBridgePath"
+                        class="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm outline-none transition-colors placeholder:text-slate-400 focus:border-[#831bd7] focus:bg-white dark:border-slate-700 dark:bg-[#1f1f20] dark:focus:bg-[#272728]"
+                        placeholder="/Users/gao/Desktop/采购明细导入模板.xlsx"
+                        :disabled="fileBridgeBusy"
+                        @keydown.enter.prevent="sendFileBridgePath"
+                      />
+                    </label>
+                    <p class="rounded-lg bg-slate-50 px-3 py-2 text-[11px] leading-relaxed text-slate-500 dark:bg-[#1f1f20] dark:text-gray-400">
+                      回放时会继续读取这个路径，不会把文件打包进技能。相对路径按工作区解析。
+                    </p>
+                  </div>
+
+                  <p v-if="fileBridgeStatus" class="rounded-lg bg-slate-100 px-3 py-2 text-xs font-medium text-slate-700 dark:bg-[#1f1f20] dark:text-gray-300">
+                    {{ fileBridgeStatus }}
+                  </p>
+                </div>
+
+                <div class="flex items-center justify-end gap-3 border-t border-slate-200 bg-slate-50 px-6 py-4 dark:border-slate-800 dark:bg-[#1f1f20]/80">
+                  <button
+                    type="button"
+                    class="rounded-lg px-4 py-2 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-200 dark:text-gray-300 dark:hover:bg-white/10"
+                    :disabled="fileBridgeBusy"
+                    @click="cancelFileBridge"
+                  >
+                    取消
+                  </button>
+                  <button
+                    v-if="fileBridgeMode !== 'download'"
+                    type="button"
+                    class="inline-flex items-center gap-2 rounded-lg bg-[#831bd7] px-5 py-2 text-sm font-bold text-white shadow-lg shadow-purple-900/10 transition-all hover:opacity-90 active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
+                    :disabled="fileBridgeBusy || (fileBridgeMode === 'fixed' && fileBridgeFiles.length === 0) || (fileBridgeMode === 'path' && !fileBridgePath.trim())"
+                    @click="fileBridgeMode === 'path' ? sendFileBridgePath() : sendFileBridgeSelection()"
+                  >
+                    <Loader2 v-if="fileBridgeBusy" class="animate-spin" :size="16" />
+                    <span>{{ fileBridgeMode === 'path' ? '使用路径' : '开始上传' }}</span>
+                    <ArrowRight v-if="!fileBridgeBusy" :size="16" />
+                  </button>
+                </div>
+              </div>
+            </div>
+            <input
+              ref="fileBridgeInputRef"
+              class="hidden"
+              type="file"
+              :accept="pendingFileInput?.accept || undefined"
+              :multiple="!!pendingFileInput?.multiple"
+              @change="handleFileBridgeInputChange"
+            />
+            <div v-if="fileBridgeStatus && !pendingFileInput" class="absolute left-1/2 top-4 z-10 -translate-x-1/2 rounded-full bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-lg">
+              {{ fileBridgeStatus }}
             </div>
             <div v-if="sessionId" class="absolute bottom-3 left-1/2 -translate-x-1/2 bg-white/10 backdrop-blur-md border border-white/20 px-3 py-1.5 rounded-full flex items-center gap-2">
               <Radio class="text-red-400 animate-pulse" :size="14" />

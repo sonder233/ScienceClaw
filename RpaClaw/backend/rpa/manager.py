@@ -1,5 +1,8 @@
-﻿import json
+﻿import base64
+import hashlib
+import json
 import logging
+import mimetypes
 import uuid
 import asyncio
 import re
@@ -11,11 +14,14 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field
 from playwright.async_api import Page, BrowserContext
 
+from backend.config import settings
+
 from .cdp_connector import get_cdp_connector
 from .frame_selectors import build_frame_path
 from .playwright_security import get_context_kwargs
 from .trace_models import RPAAcceptedTrace, RPATraceDiagnostic, RPARuntimeResults
 from .trace_recorder import infer_dataflow_for_fill, manual_step_to_trace
+from .upload_source import default_asset_path, default_upload_source_from_staging, download_result_key, safe_asset_filename
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +105,7 @@ class RPASessionManager:
         self._tab_meta: Dict[str, Dict[str, RPATab]] = {}
         self._page_tab_ids: Dict[str, Dict[int, str]] = {}
         self._bridged_context_ids: Dict[str, set[int]] = {}
+        self._recent_filechoosers: Dict[str, List[Dict[str, Any]]] = {}
 
     def attach_context(self, session_id: str, context: BrowserContext):
         self._contexts[session_id] = context
@@ -107,6 +114,7 @@ class RPASessionManager:
         self._tab_meta[session_id] = {}
         self._page_tab_ids[session_id] = {}
         self._bridged_context_ids[session_id] = set()
+        self._recent_filechoosers[session_id] = []
 
         session = self.sessions.get(session_id)
         if session:
@@ -123,6 +131,7 @@ class RPASessionManager:
         self._tab_meta.pop(session_id, None)
         self._page_tab_ids.pop(session_id, None)
         self._bridged_context_ids.pop(session_id, None)
+        self._recent_filechoosers.pop(session_id, None)
 
         session = self.sessions.get(session_id)
         if session:
@@ -233,6 +242,271 @@ class RPASessionManager:
         description = step.description or ""
         if suffix and suffix not in description:
             step.description = f"{description}{suffix}" if description else suffix.strip()
+
+    @staticmethod
+    def _sha256_bytes(data: bytes) -> str:
+        digest = hashlib.sha256()
+        digest.update(data)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _session_upload_dir(session_id: str) -> Path:
+        return Path(settings.rpa_uploads_dir) / session_id
+
+    async def _stage_upload_bytes(
+        self,
+        session_id: str,
+        *,
+        filename: str,
+        content: bytes,
+        mime: Optional[str] = None,
+        last_modified: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        staging_id = f"up_{uuid.uuid4().hex}"
+        safe_name = safe_asset_filename(filename)
+        target_dir = self._session_upload_dir(session_id) / staging_id
+        target_path = target_dir / safe_name
+        guessed_mime = mime or mimetypes.guess_type(safe_name)[0] or ""
+        sha256 = self._sha256_bytes(content)
+        meta = {
+            "staging_id": staging_id,
+            "original_filename": filename or safe_name,
+            "stored_filename": safe_name,
+            "path": str(target_path),
+            "size": len(content),
+            "mime": guessed_mime,
+            "sha256": sha256,
+            "last_modified": last_modified,
+            "recorded_at": datetime.now().isoformat(),
+        }
+
+        def write_files() -> None:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target_path.write_bytes(content)
+            (target_dir / "meta.json").write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+        await asyncio.to_thread(write_files)
+        return meta
+
+    @staticmethod
+    def _unique_download_path(download_dir: Path, filename: str) -> Path:
+        safe_name = safe_asset_filename(filename or "download")
+        candidate = download_dir / safe_name
+        if not candidate.exists():
+            return candidate
+        stem = candidate.stem or "download"
+        suffix = candidate.suffix
+        for index in range(1, 1000):
+            next_candidate = download_dir / f"{stem} ({index}){suffix}"
+            if not next_candidate.exists():
+                return next_candidate
+        return download_dir / f"{stem}-{uuid.uuid4().hex}{suffix}"
+
+    async def _download_meta(self, session_id: str, download, filename: str) -> Dict[str, Any]:
+        display_filename = filename or "download"
+        meta: Dict[str, Any] = {
+            "filename": display_filename,
+            "suggested_filename": display_filename,
+            "original_filename": display_filename,
+            "result_key": download_result_key(display_filename),
+        }
+        download_dir = Path(settings.workspace_dir) / "rpa_downloads" / session_id
+        saved_download_copy = False
+        try:
+            download_dir.mkdir(parents=True, exist_ok=True)
+            saved_path = self._unique_download_path(download_dir, display_filename)
+            await download.save_as(str(saved_path))
+            saved_download_copy = True
+            meta["path"] = str(saved_path)
+            meta["saved_path"] = str(saved_path)
+        except Exception as exc:
+            logger.debug("[RPA] Failed to persist download %s with suggested filename: %s", display_filename, exc)
+        if settings.storage_backend != "local":
+            return meta
+        try:
+            temp_path = await download.path()
+            if temp_path:
+                path = Path(temp_path)
+                if path.exists():
+                    stat = path.stat()
+                    meta["size"] = stat.st_size
+                    meta["sha256"] = await asyncio.to_thread(self._sha256_file, path)
+        except Exception as exc:
+            logger.debug("[RPA] Failed to inspect download bytes for %s: %s", display_filename, exc)
+        if saved_download_copy:
+            try:
+                await download.delete()
+            except Exception as exc:
+                logger.debug("[RPA] Failed to delete temp download for %s: %s", display_filename, exc)
+        return meta
+
+    def _push_filechooser_marker(self, session_id: str, payload: Dict[str, Any]) -> None:
+        markers = self._recent_filechoosers.setdefault(session_id, [])
+        payload["timestamp"] = datetime.now().timestamp()
+        markers.append(payload)
+        del markers[:-10]
+
+    async def _stage_upload_payloads(self, session_id: str, signals: Dict[str, Any]) -> None:
+        payloads = signals.pop("upload_payloads", None)
+        if settings.storage_backend != "local" or not isinstance(payloads, list):
+            return
+
+        staged_items: List[Dict[str, Any]] = []
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                continue
+            data_base64 = payload.get("data_base64")
+            if not isinstance(data_base64, str) or not data_base64:
+                continue
+            try:
+                content = base64.b64decode(data_base64, validate=True)
+            except Exception as exc:
+                logger.debug("[RPA] Invalid upload payload for %s: %s", payload.get("name"), exc)
+                continue
+            staged = await self._stage_upload_bytes(
+                session_id,
+                filename=str(payload.get("name") or "upload.bin"),
+                content=content,
+                mime=str(payload.get("mime") or ""),
+                last_modified=payload.get("last_modified"),
+            )
+            staged_items.append(staged)
+
+        if not staged_items:
+            return
+        if len(staged_items) == 1:
+            signals["upload_staging"] = staged_items[0]
+        else:
+            signals["upload_staging"] = {
+                "multi": True,
+                "items": staged_items,
+                "count": len(staged_items),
+            }
+        if not isinstance(signals.get("upload_source"), dict):
+            fallback_name = str(staged_items[0].get("original_filename") or staged_items[0].get("stored_filename") or "upload.bin")
+            source = default_upload_source_from_staging(signals, fallback_filename=fallback_name)
+            if source:
+                signals["upload_source"] = source
+
+    @staticmethod
+    def _first_upload_staging(signals: Dict[str, Any]) -> Dict[str, Any]:
+        staging = signals.get("upload_staging")
+        if not isinstance(staging, dict):
+            return {}
+        items = staging.get("items")
+        if isinstance(items, list) and items and isinstance(items[0], dict):
+            return items[0]
+        return staging
+
+    @staticmethod
+    def _download_signal_for_step(step: RPAStep) -> Dict[str, Any]:
+        signals = step.signals if isinstance(step.signals, dict) else {}
+        payload = signals.get("download")
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _same_filename(left: str, right: str) -> bool:
+        return str(left or "").strip().lower() == str(right or "").strip().lower()
+
+    @staticmethod
+    def _same_stem(left: str, right: str) -> bool:
+        left_stem = Path(str(left or "")).stem.lower()
+        right_stem = Path(str(right or "")).stem.lower()
+        return bool(left_stem and right_stem and left_stem == right_stem)
+
+    @staticmethod
+    def _same_size(left: Any, right: Any) -> bool:
+        try:
+            return int(left) == int(right)
+        except (TypeError, ValueError):
+            return False
+
+    def _attach_upload_hint(self, session_id: str, signals: Dict[str, Any]) -> None:
+        upload = self._first_upload_staging(signals)
+        set_input = signals.get("set_input_files") if isinstance(signals.get("set_input_files"), dict) else {}
+        meta_items = set_input.get("meta") if isinstance(set_input, dict) else None
+        if not upload and isinstance(meta_items, list) and meta_items and isinstance(meta_items[0], dict):
+            upload = {
+                "original_filename": meta_items[0].get("name") or "",
+                "size": meta_items[0].get("size"),
+                "mime": meta_items[0].get("mime") or "",
+            }
+        if not upload:
+            return
+
+        upload_name = str(upload.get("original_filename") or upload.get("name") or "")
+        upload_size = upload.get("size")
+        upload_sha = str(upload.get("sha256") or "")
+        if not upload_name and not upload_sha:
+            return
+
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+
+        for index, step in reversed(list(enumerate(session.steps[-20:], start=max(0, len(session.steps) - 20)))):
+            download_signal = self._download_signal_for_step(step)
+            if not download_signal:
+                continue
+            download_name = str(download_signal.get("filename") or "")
+            download_size = download_signal.get("size")
+            download_sha = str(download_signal.get("sha256") or "")
+
+            confidence = ""
+            reason = ""
+            if upload_sha and download_sha and upload_sha == download_sha:
+                confidence = "high"
+                reason = "sha256"
+            elif (
+                upload_name
+                and download_name
+                and self._same_filename(upload_name, download_name)
+                and upload_size is not None
+                and download_size is not None
+                and self._same_size(upload_size, download_size)
+            ):
+                confidence = "high"
+                reason = "filename+size"
+            elif upload_name and download_name and self._same_filename(upload_name, download_name):
+                confidence = "medium"
+                reason = "filename"
+            elif upload_name and download_name and self._same_stem(upload_name, download_name):
+                confidence = "low"
+                reason = "filename_stem"
+
+            if not confidence:
+                continue
+
+            result_key = str(download_signal.get("result_key") or download_result_key(download_name))
+            signals["upload_hint"] = {
+                "suggested_mode": "dataflow",
+                "source_step_id": step.id,
+                "source_step_index": index,
+                "source_result_key": result_key,
+                "match_reason": reason,
+                "confidence": confidence,
+                "filename": download_name,
+            }
+            return
+
+    async def _enrich_upload_event(self, session_id: str, evt: Dict[str, Any]) -> None:
+        signals = evt.get("signals")
+        if not isinstance(signals, dict):
+            signals = {}
+            evt["signals"] = signals
+        await self._stage_upload_payloads(session_id, signals)
+        self._attach_upload_hint(session_id, signals)
 
     def _find_recent_action_step(
         self,
@@ -529,8 +803,25 @@ class RPASessionManager:
 
         page.on("load", on_load)
 
+        async def on_filechooser(filechooser):
+            try:
+                is_multiple_attr = getattr(filechooser, "is_multiple", False)
+                is_multiple = is_multiple_attr() if callable(is_multiple_attr) else bool(is_multiple_attr)
+                self._push_filechooser_marker(
+                    session_id,
+                    {
+                        "tab_id": tab_id,
+                        "multiple": is_multiple,
+                    },
+                )
+            except Exception as exc:
+                logger.debug("[RPA] filechooser marker failed: %s", exc)
+
+        page.on("filechooser", on_filechooser)
+
         async def on_download(download):
-            suggested = download.suggested_filename
+            suggested = download.suggested_filename or "download"
+            download_meta = await self._download_meta(session_id, download, suggested)
             # Wait briefly for the click step to be recorded before upgrading it
             await asyncio.sleep(0.3)
             tab_meta = self._tab_meta.get(session_id, {}).get(tab_id)
@@ -544,13 +835,14 @@ class RPASessionManager:
                     step,
                     "download",
                     {
-                        "filename": suggested,
+                        **download_meta,
                         "tab_id": tab_id,
                         "opener_tab_id": opener_tab_id,
                     },
                 )
                 self._append_step_description(step, f" 并下载文件 {suggested}")
                 await self._broadcast_step(session_id, step)
+                await self._record_manual_trace_for_step(session_id, step)
                 return
             # Fallback: no preceding click found, record standalone
             evt = {
@@ -559,6 +851,7 @@ class RPASessionManager:
                 "url": getattr(page, "url", ""),
                 "timestamp": int(datetime.now().timestamp() * 1000),
                 "tab_id": tab_id,
+                "signals": {"download": download_meta},
             }
             await self._handle_event(session_id, evt)
 
@@ -944,6 +1237,193 @@ class RPASessionManager:
         await self._broadcast_step(session_id, step)
         return step
 
+    def _step_at(self, session_id: str, step_index: int) -> RPAStep:
+        session = self.sessions.get(session_id)
+        if not session or step_index < 0 or step_index >= len(session.steps):
+            raise ValueError("Invalid step index")
+        return session.steps[step_index]
+
+    async def _sync_trace_signals_for_step(self, session_id: str, step: RPAStep) -> None:
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+        trace_id = f"trace-{step.id}"
+        for trace in session.traces:
+            if trace.trace_id != trace_id:
+                continue
+            if hasattr(trace, "signals"):
+                trace.signals = dict(step.signals or {})
+            trace.value = step.value
+            await self._broadcast_trace(session_id, trace)
+            return
+
+    async def update_step_upload_source(
+        self,
+        session_id: str,
+        step_index: int,
+        upload_source: Dict[str, Any],
+    ) -> RPAStep:
+        step = self._step_at(session_id, step_index)
+        if step.action != "set_input_files":
+            raise ValueError("Step is not a file upload action")
+        if not isinstance(upload_source, dict):
+            raise ValueError("upload_source must be an object")
+
+        mode = str(upload_source.get("mode") or "").strip()
+        if mode not in {"fixed", "parameter", "path", "dataflow"}:
+            raise ValueError("upload_source.mode must be fixed, parameter, path, or dataflow")
+
+        signals = dict(step.signals or {})
+        staging = signals.get("upload_staging")
+        first_staging = self._first_upload_staging(signals)
+        original_filename = (
+            upload_source.get("original_filename")
+            or first_staging.get("original_filename")
+            or step.value
+            or "upload.bin"
+        )
+        normalized = dict(upload_source)
+        normalized["mode"] = mode
+        normalized.setdefault("original_filename", original_filename)
+
+        if mode == "fixed":
+            normalized.setdefault("asset_path", default_asset_path(str(original_filename)))
+        elif mode == "parameter":
+            param_name = str(normalized.get("param_name") or "").strip()
+            if not param_name:
+                raise ValueError("parameter upload source requires param_name")
+            if staging and not normalized.get("default_asset_path"):
+                normalized["default_asset_path"] = default_asset_path(str(original_filename))
+        elif mode == "path":
+            upload_path = str(normalized.get("path") or "").strip()
+            if not upload_path:
+                raise ValueError("path upload source requires path")
+            normalized["path"] = upload_path
+        elif mode == "dataflow":
+            if not normalized.get("source_result_key"):
+                raise ValueError("dataflow upload source requires source_result_key")
+            normalized.setdefault("file_field", "path")
+
+        signals["upload_source"] = normalized
+        step.signals = signals
+        await self._sync_trace_signals_for_step(session_id, step)
+        await self._broadcast_step(session_id, step)
+        return step
+
+    async def attach_step_asset(
+        self,
+        session_id: str,
+        step_index: int,
+        *,
+        filename: str,
+        content: bytes,
+        mime: Optional[str] = None,
+    ) -> RPAStep:
+        step = self._step_at(session_id, step_index)
+        if step.action != "set_input_files":
+            raise ValueError("Step is not a file upload action")
+
+        staged = await self._stage_upload_bytes(
+            session_id,
+            filename=filename,
+            content=content,
+            mime=mime,
+        )
+        asset_path = default_asset_path(filename)
+        signals = dict(step.signals or {})
+        signals["upload_staging"] = staged
+        set_input = dict(signals.get("set_input_files") or {})
+        set_input["files"] = [filename]
+        set_input["meta"] = [
+            {
+                "name": filename,
+                "size": staged.get("size"),
+                "mime": staged.get("mime"),
+                "last_modified": staged.get("last_modified"),
+            }
+        ]
+        signals["set_input_files"] = set_input
+
+        current_source = signals.get("upload_source")
+        current_source = current_source if isinstance(current_source, dict) else {}
+        if current_source.get("mode") == "parameter":
+            updated_source = dict(current_source)
+            updated_source["default_asset_path"] = asset_path
+            updated_source.setdefault("original_filename", filename)
+        else:
+            updated_source = {
+                "mode": "fixed",
+                "asset_path": asset_path,
+                "original_filename": filename,
+                "multi": False,
+            }
+        signals["upload_source"] = updated_source
+        step.signals = signals
+        step.value = filename
+        await self._sync_trace_signals_for_step(session_id, step)
+        await self._broadcast_step(session_id, step)
+        return step
+
+    async def promote_upload_staging(self, session_id: str, step_index: int) -> RPAStep:
+        step = self._step_at(session_id, step_index)
+        if step.action != "set_input_files":
+            raise ValueError("Step is not a file upload action")
+        signals = dict(step.signals or {})
+        staging = signals.get("upload_staging")
+        if not isinstance(staging, dict):
+            raise ValueError("No recorded upload file is available for this step")
+
+        if staging.get("multi") and isinstance(staging.get("items"), list):
+            items = []
+            for item in staging["items"]:
+                if not isinstance(item, dict):
+                    continue
+                filename = str(item.get("original_filename") or item.get("stored_filename") or "upload.bin")
+                items.append(
+                    {
+                        "mode": "fixed",
+                        "asset_path": default_asset_path(filename),
+                        "original_filename": filename,
+                    }
+                )
+            if not items:
+                raise ValueError("No recorded upload file is available for this step")
+            upload_source = {"mode": "fixed", "multi": True, "items": items}
+        else:
+            filename = str(staging.get("original_filename") or staging.get("stored_filename") or step.value or "upload.bin")
+            upload_source = {
+                "mode": "fixed",
+                "asset_path": default_asset_path(filename),
+                "original_filename": filename,
+                "multi": False,
+            }
+
+        return await self.update_step_upload_source(session_id, step_index, upload_source)
+
+    def downloadable_steps(self, session_id: str) -> List[Dict[str, Any]]:
+        session = self.sessions.get(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+        result: List[Dict[str, Any]] = []
+        for index, step in enumerate(session.steps):
+            download_signal = self._download_signal_for_step(step)
+            if not download_signal:
+                continue
+            filename = str(download_signal.get("filename") or step.value or "file")
+            result.append(
+                {
+                    "step_index": index,
+                    "step_id": step.id,
+                    "filename": filename,
+                    "description": step.description or filename,
+                    "result_key": str(download_signal.get("result_key") or download_result_key(filename)),
+                    "size": download_signal.get("size"),
+                    "sha256": download_signal.get("sha256"),
+                    "path": download_signal.get("path") or download_signal.get("saved_path"),
+                }
+            )
+        return result
+
     def pause_recording(self, session_id: str):
         """Pause event recording (used during AI execution)."""
         if session_id in self.sessions:
@@ -1048,6 +1528,9 @@ class RPASessionManager:
                             logger.debug(f"[RPA] Upgraded press to navigate_press: {evt.get('url', '')[:60]}")
                             return
                         logger.debug(f"[RPA] Preserving nav after {last_step.action}: {evt.get('url', '')[:60]}")
+
+        if evt.get("action") == "set_input_files":
+            await self._enrich_upload_event(session_id, evt)
 
         self._normalize_event_locator_payload(evt)
 
@@ -1292,4 +1775,3 @@ class RPASessionManager:
 
 # ── Global instance ──────────────────────────────────────────────────
 rpa_manager = RPASessionManager()
-

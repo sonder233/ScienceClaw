@@ -543,6 +543,10 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(step.signals["download"]["filename"], "ContractList20260411111546.xlsx")
         self.assertEqual(step.signals["download"]["tab_id"], popup_tab_id)
         self.assertEqual(step.value, "ContractList20260411111546.xlsx")
+        self.assertEqual(
+            self.session.traces[-1].signals.get("download", {}).get("filename"),
+            "ContractList20260411111546.xlsx",
+        )
         self.assertNotEqual(step.action, "open_tab_click")
         self.assertNotEqual(step.action, "download_click")
 

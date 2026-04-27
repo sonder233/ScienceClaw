@@ -69,6 +69,7 @@ def manual_step_to_trace(step: Dict[str, Any]) -> RPAAcceptedTrace:
         before_page=RPAPageState(url=str(_step_get(step, "before_url", "") or "")),
         after_page=after_page,
         locator_candidates=_locator_candidates(step),
+        signals=_step_get(step, "signals", {}) or {},
         value=_step_get(step, "value"),
         output_key=_step_get(step, "result_key"),
         output=_step_get(step, "output"),
@@ -98,4 +99,3 @@ def infer_dataflow_for_fill(trace: RPAAcceptedTrace, runtime_results: RPARuntime
         trace.dataflow.target_field.locator_candidates = [{"locator": selected_locator, "selected": True}]
     trace.trace_type = RPATraceType.DATAFLOW_FILL
     return trace
-

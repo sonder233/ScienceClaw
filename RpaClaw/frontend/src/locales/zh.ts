@@ -660,5 +660,17 @@ export default {
   'Failed to discover MCP tools': '发现 {name} 的工具失败',
   'Delete MCP server confirm': '删除“{name}”？',
   'MCP server deleted': 'MCP 服务已删除',
-  'Failed to delete MCP server': '删除 MCP 服务失败'
+  'Failed to delete MCP server': '删除 MCP 服务失败',
+  'Upload File': '上传文件',
+  'File Source': '文件来源',
+  'Fixed File': '固定文件',
+  'Runtime Parameter': '运行时参数',
+  'From Previous Download': '关联下载步骤',
+  'From this session download': '从本次下载',
+  'No downloads yet in this session': '本次会话还没有下载记录',
+  'Use recorded file': '使用录制时的文件',
+  'Re-upload': '重新上传',
+  'Linked to step': '已关联步骤',
+  'File missing, please re-upload': '文件缺失，请重新上传',
+  'Upload hint confirm': '检测到可能的下载→上传链路'
 } 

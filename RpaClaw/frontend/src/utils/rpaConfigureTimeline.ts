@@ -15,6 +15,8 @@ export interface RpaConfigureStep {
   url?: string;
   source?: string;
   configurable?: boolean;
+  signals?: Record<string, any>;
+  legacy_step_index?: number;
 }
 
 const TRACE_LABELS: Record<string, string> = {
@@ -58,14 +60,20 @@ const traceAction = (trace: any) => {
 
 export const mapRpaConfigureDisplaySteps = (session: any): RpaConfigureStep[] => {
   const traces = Array.isArray(session?.traces) ? session.traces : [];
+  const legacySteps = getLegacyRpaSteps(session);
+  const legacyByTraceId = new Map<string, any>();
+  legacySteps.forEach((step: any, index: number) => {
+    if (step?.id) legacyByTraceId.set(`trace-${step.id}`, { step, index });
+  });
   if (traces.length === 0) {
-    return getLegacyRpaSteps(session);
+    return legacySteps;
   }
 
   return traces.map((trace: any, index: number) => {
     const traceTypeLabel = formatRpaTraceType(trace?.trace_type);
     const locator = firstLocatorCandidate(trace);
     const afterUrl = trace?.after_page?.url || '';
+    const legacy = legacyByTraceId.get(String(trace?.trace_id || ''));
     return {
       id: String(trace?.trace_id || `trace-${index}`),
       action: traceAction(trace),
@@ -81,11 +89,15 @@ export const mapRpaConfigureDisplaySteps = (session: any): RpaConfigureStep[] =>
       sensitive: false,
       url: afterUrl,
       source: trace?.source === 'ai' || trace?.trace_type === 'ai_operation' ? 'ai' : 'record',
-      configurable: false,
+      configurable: trace?.action === 'set_input_files',
+      signals: trace?.signals || legacy?.step?.signals || {},
+      legacy_step_index: legacy?.index,
     };
   });
 };
 
 export const getLegacyRpaSteps = (session: any): RpaConfigureStep[] => (
-  Array.isArray(session?.steps) ? session.steps : []
+  Array.isArray(session?.steps)
+    ? session.steps.map((step: any, index: number) => ({ ...step, legacy_step_index: index }))
+    : []
 );

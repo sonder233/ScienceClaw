@@ -10,6 +10,8 @@ import {
   Globe,
   House,
   Loader2,
+  FileDown,
+  FileUp,
   Play,
   RotateCcw,
   Save,
@@ -17,6 +19,7 @@ import {
   XCircle,
 } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
+import { uploadFile } from '@/api/file';
 import { getBackendWsUrl } from '@/utils/sandbox';
 import {
   getFrameSizeFromMetadata,
@@ -33,8 +36,13 @@ import {
 const router = useRouter();
 const route = useRoute();
 
+const initialSkillName = () => {
+  const value = route.query.skillName;
+  return typeof value === 'string' && value.trim() ? value : '录制技能';
+};
+
 const sessionId = computed(() => route.query.sessionId as string);
-const skillName = computed(() => (route.query.skillName as string) || '录制技能');
+const skillName = ref(initialSkillName());
 const skillDescription = computed(() => (route.query.skillDescription as string) || '');
 const params = computed(() => {
   try {
@@ -43,6 +51,21 @@ const params = computed(() => {
     return {};
   }
 });
+const runtimeParams = ref<Record<string, any>>({});
+const uploadingFileParam = ref<string | null>(null);
+
+watch(params, (value) => {
+  runtimeParams.value = JSON.parse(JSON.stringify(value || {}));
+}, { immediate: true });
+
+const fileParams = computed(() => (
+  Object.entries(runtimeParams.value)
+    .filter(([, info]) => info && typeof info === 'object' && (info as any).type === 'file')
+    .map(([name, info]) => ({ name, info: info as Record<string, any> }))
+));
+const missingRequiredFileParams = computed(() => (
+  fileParams.value.filter((param) => param.info.required && !param.info.original_value)
+));
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 let screencastWs: WebSocket | null = null;
@@ -81,6 +104,27 @@ const saving = ref(false);
 const saved = ref(false);
 const showScript = ref(false);
 const error = ref<string | null>(null);
+
+const getStepFileOperation = (step: any): 'upload' | 'download' | '' => {
+  const signals = step?.signals || {};
+  if (step?.action === 'set_input_files' || signals.set_input_files) return 'upload';
+  if (step?.action === 'download' || step?.action === 'download_click' || signals.download) return 'download';
+  return '';
+};
+
+const getStepFileName = (step: any): string => {
+  const signals = step?.signals || {};
+  const operation = getStepFileOperation(step);
+  if (operation === 'download') {
+    return String(signals.download?.filename || signals.download?.suggested_filename || step?.value || '').trim();
+  }
+  if (operation === 'upload') {
+    const files = signals.set_input_files?.files;
+    if (Array.isArray(files) && files.length > 0) return files.map((item) => String(item)).filter(Boolean).join(', ');
+    return String(step?.value || '').trim();
+  }
+  return '';
+};
 
 interface LocatorCandidate {
   kind: string;
@@ -339,9 +383,38 @@ const activateTab = async (tabId: string) => {
   }
 };
 
+const uploadRuntimeFileParam = async (paramName: string, event: Event) => {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file || !sessionId.value) return;
+  uploadingFileParam.value = paramName;
+  error.value = null;
+  try {
+    const uploaded = await uploadFile(file, sessionId.value);
+    runtimeParams.value = {
+      ...runtimeParams.value,
+      [paramName]: {
+        ...(runtimeParams.value[paramName] || {}),
+        original_value: uploaded.file_id,
+      },
+    };
+  } catch (err: any) {
+    error.value = `上传运行时文件失败: ${err.response?.data?.detail || err.message}`;
+  } finally {
+    uploadingFileParam.value = null;
+  }
+};
+
 const runTest = async () => {
   if (!sessionId.value) {
     error.value = '缺少 sessionId';
+    return;
+  }
+  if (missingRequiredFileParams.value.length > 0) {
+    testLogs.value = ['请先选择必填的文件参数。'];
+    testDone.value = false;
+    error.value = `缺少文件参数: ${missingRequiredFileParams.value.map((item) => item.name).join(', ')}`;
     return;
   }
 
@@ -359,7 +432,7 @@ const runTest = async () => {
     connectScreencast(sessionId.value);
     const testPromise = apiClient.post(
       `/rpa/session/${sessionId.value}/test`,
-      { params: params.value },
+      { params: runtimeParams.value },
       { timeout: TEST_REQUEST_TIMEOUT_MS },
     );
 
@@ -439,14 +512,20 @@ const goToSkills = () => {
 
 const saveSkill = async () => {
   if (!sessionId.value) return;
+  const normalizedSkillName = skillName.value.trim();
+  if (!normalizedSkillName) {
+    error.value = '保存失败: 技能名称不能为空';
+    return;
+  }
+
   saving.value = true;
   error.value = null;
 
   try {
     const resp = await apiClient.post(`/rpa/session/${sessionId.value}/save`, {
-      skill_name: skillName.value,
+      skill_name: normalizedSkillName,
       description: skillDescription.value,
-      params: params.value,
+      params: runtimeParams.value,
     });
 
     if (resp.data.status === 'success') {
@@ -464,7 +543,11 @@ const saveSkill = async () => {
 
 onMounted(() => {
   loadSessionDiagnostics();
-  runTest();
+  if (missingRequiredFileParams.value.length > 0) {
+    testLogs.value = ['请先选择必填的文件参数。'];
+  } else {
+    runTest();
+  }
 });
 
 onBeforeUnmount(() => {
@@ -484,7 +567,13 @@ onBeforeUnmount(() => {
       </button>
       <Play class="text-[#831bd7]" :size="22" />
       <h1 class="text-lg font-extrabold text-gray-900 dark:text-gray-100">测试技能</h1>
-      <span class="max-w-48 truncate text-sm text-gray-500 dark:text-gray-400">{{ skillName }}</span>
+      <input
+        v-model="skillName"
+        class="min-w-0 max-w-64 rounded-md border border-transparent bg-transparent px-2 py-1 text-sm font-medium text-gray-500 outline-none transition-colors hover:border-gray-200 hover:bg-gray-50 focus:border-[#831bd7]/40 focus:bg-white focus:text-gray-900 dark:text-gray-400 dark:hover:border-gray-700 dark:hover:bg-[#323134] dark:focus:bg-[#323134] dark:focus:text-gray-100"
+        :disabled="saving"
+        aria-label="技能名称"
+        placeholder="请输入技能名称"
+      />
       <div class="flex-1" />
 
       <button
@@ -529,7 +618,16 @@ onBeforeUnmount(() => {
             :class="[ failedStepIndex === index ? 'border-red-500 ring-2 ring-red-100' : 'border-gray-200 dark:border-gray-700' ]"
           >
             <div class="mb-1 flex items-center justify-between gap-3">
-              <span class="text-[10px] font-bold text-gray-400 dark:text-gray-500">
+              <span class="inline-flex items-center gap-1.5 text-[10px] font-bold text-gray-400 dark:text-gray-500">
+                <span
+                  v-if="getStepFileOperation(step)"
+                  class="inline-flex size-4 items-center justify-center rounded-full"
+                  :class="getStepFileOperation(step) === 'upload' ? 'bg-violet-100 text-violet-600 dark:bg-violet-900/40 dark:text-violet-300' : 'bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-200'"
+                  :title="getStepFileOperation(step) === 'upload' ? '文件上传' : '文件下载'"
+                >
+                  <FileUp v-if="getStepFileOperation(step) === 'upload'" :size="11" />
+                  <FileDown v-else :size="11" />
+                </span>
                 步骤 {{ String(index + 1).padStart(2, '0') }}
               </span>
               <span
@@ -549,6 +647,13 @@ onBeforeUnmount(() => {
             <p class="mt-1 break-all text-[11px] text-gray-500 dark:text-gray-400">
               <span class="font-semibold text-gray-600 dark:text-gray-400">Frame:</span>
               <span class="ml-1 font-mono">{{ formatFramePath(step.frame_path) }}</span>
+            </p>
+            <p
+              v-if="getStepFileName(step)"
+              class="mt-1 break-all text-[11px] text-gray-500 dark:text-gray-400"
+            >
+              <span class="font-semibold text-gray-600 dark:text-gray-400">文件:</span>
+              <span class="ml-1 font-mono">{{ getStepFileName(step) }}</span>
             </p>
             <p
               v-if="step.validation?.details"
@@ -742,6 +847,33 @@ onBeforeUnmount(() => {
             >
               执行过程中出现错误，请查看日志后重新执行或返回修改。
             </p>
+          </div>
+
+          <div
+            v-if="fileParams.length"
+            class="rounded-xl border border-violet-200 dark:border-violet-900/70 bg-violet-50 dark:bg-violet-950/20 p-4"
+          >
+            <h3 class="mb-3 text-sm font-bold text-gray-900 dark:text-gray-100">文件参数</h3>
+            <div class="space-y-3">
+              <div
+                v-for="param in fileParams"
+                :key="param.name"
+                class="rounded-lg bg-white dark:bg-[#272728] p-3"
+              >
+                <div class="flex items-center justify-between gap-3">
+                  <div class="min-w-0">
+                    <p class="truncate text-xs font-bold text-gray-800 dark:text-gray-200">{{ param.name }}</p>
+                    <p class="mt-1 truncate text-[11px] text-gray-500 dark:text-gray-400">
+                      {{ param.info.original_value || '未选择文件' }}
+                    </p>
+                  </div>
+                  <label class="shrink-0 cursor-pointer rounded-lg bg-[#831bd7] px-2.5 py-1.5 text-[11px] font-bold text-white">
+                    {{ uploadingFileParam === param.name ? '上传中' : '选择文件' }}
+                    <input type="file" class="hidden" @change="uploadRuntimeFileParam(param.name, $event)" />
+                  </label>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div

@@ -1,12 +1,19 @@
 """Session-scoped CDP screencast streaming with active-tab switching."""
 
 import asyncio
+import base64
 import json
 import logging
+import mimetypes
 import time
+import uuid
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
+
+from backend.config import settings
+from backend.rpa.upload_source import safe_asset_filename
 
 logger = logging.getLogger(__name__)
 
@@ -173,9 +180,11 @@ class SessionScreencastController:
         self,
         page_provider: Callable[[], Any],
         tabs_provider: Callable[[], list[dict[str, Any]]],
+        session_id: str = "",
     ) -> None:
         self._page_provider = page_provider
         self._tabs_provider = tabs_provider
+        self._session_id = session_id
         self._ws: Optional[WebSocket] = None
         self._running = False
         self._page = None
@@ -189,6 +198,7 @@ class SessionScreencastController:
         self._last_preview_error = ""
         self._frames_sent = 0
         self._started_at = time.time()
+        self._suppress_next_mouse_release_until = 0.0
 
     async def start(self, websocket: WebSocket) -> None:
         self._ws = websocket
@@ -348,6 +358,8 @@ class SessionScreencastController:
                 await self._dispatch_key(msg)
             elif msg_type == "wheel":
                 await self._dispatch_wheel(msg)
+            elif msg_type == "file_upload_selection":
+                await self._apply_file_upload_selection(msg)
 
     async def _refresh_input_metrics(self, force: bool = False) -> None:
         if not self._cdp:
@@ -414,11 +426,18 @@ class SessionScreencastController:
         if not self._cdp:
             return
         x, y = _resolve_pointer_coordinates(event, self._input_width, self._input_height)
+        action = event.get("action", "mouseMoved")
+        if action == "mousePressed" and event.get("button", "left") == "left":
+            if await self._offer_file_input_bridge(x, y):
+                self._suppress_next_mouse_release_until = time.time() + 2
+                return
+        if action == "mouseReleased" and time.time() < self._suppress_next_mouse_release_until:
+            return
         params: Dict[str, Any] = {
-            "type": event.get("action", "mouseMoved"),
+            "type": action,
             "x": x,
             "y": y,
-            "button": event.get("button", "left") if event.get("action") != "mouseMoved" else "none",
+            "button": event.get("button", "left") if action != "mouseMoved" else "none",
             "clickCount": event.get("clickCount", 0),
             "modifiers": event.get("modifiers", 0),
         }
@@ -426,6 +445,191 @@ class SessionScreencastController:
             await self._cdp.send("Input.dispatchMouseEvent", params)
         except Exception as exc:
             logger.debug(f"[Screencast] mouse dispatch error: {exc}")
+
+    async def _offer_file_input_bridge(self, x: float, y: float) -> bool:
+        if not self._page or not self._ws or not self._running:
+            return False
+        token = f"file_{uuid.uuid4().hex}"
+        try:
+            payload = await self._page.evaluate(
+                """({ x, y, token }) => {
+                    const start = document.elementFromPoint(x, y);
+                    if (!start) return null;
+                    const isFileInput = (node) => node && node.nodeType === Node.ELEMENT_NODE
+                        && node.tagName === 'INPUT'
+                        && String(node.type || '').toLowerCase() === 'file';
+                    const fileInputFromLabel = (label) => {
+                        if (!label) return null;
+                        if (isFileInput(label.control)) return label.control;
+                        const nested = label.querySelector && label.querySelector('input[type="file"]');
+                        return nested || null;
+                    };
+                    const findFileInput = (node) => {
+                        if (isFileInput(node)) return node;
+
+                        const label = node.closest && node.closest('label');
+                        const labelInput = fileInputFromLabel(label);
+                        if (labelInput) return labelInput;
+
+                        // Only inspect descendants of the clicked element itself. Searching
+                        // every ancestor also matches sibling upload inputs in the same form.
+                        if (node.querySelector) {
+                            const nested = node.querySelector('input[type="file"]');
+                            if (nested) return nested;
+                        }
+                        return null;
+                    };
+                    const input = findFileInput(start);
+                    if (!input) return null;
+                    window.__rpaFileInputTargets = window.__rpaFileInputTargets || {};
+                    window.__rpaFileInputTargets[token] = input;
+                    return {
+                        token,
+                        accept: input.getAttribute('accept') || '',
+                        multiple: !!input.multiple,
+                        name: input.getAttribute('name') || '',
+                        id: input.id || '',
+                    };
+                }""",
+                {"x": x, "y": y, "token": token},
+            )
+        except Exception as exc:
+            logger.debug("[Screencast] file input hit-test failed: %s", exc)
+            return False
+        if not isinstance(payload, dict) or not payload.get("token"):
+            return False
+        try:
+            await self._ws.send_json({"type": "file_input_requested", **payload})
+            return True
+        except Exception as exc:
+            logger.debug("[Screencast] file bridge request send failed: %s", exc)
+            return False
+
+    async def _apply_file_upload_selection(self, event: Dict[str, Any]) -> None:
+        if not self._page or not self._ws:
+            return
+        token = str(event.get("token") or "")
+        source_mode = str(event.get("source_mode") or "fixed").strip() or "fixed"
+        files = event.get("files")
+        if not token:
+            return
+
+        file_paths: list[str] = []
+        filenames: list[str] = []
+
+        if source_mode in {"path", "dataflow"}:
+            raw_paths = event.get("paths")
+            if isinstance(raw_paths, list):
+                candidates = [str(item).strip() for item in raw_paths if str(item).strip()]
+            else:
+                raw_path = str(event.get("path") or "").strip()
+                candidates = [item.strip() for item in raw_path.splitlines() if item.strip()]
+            for raw_path in candidates:
+                path = Path(raw_path).expanduser()
+                if not path.is_absolute():
+                    path = Path(settings.workspace_dir) / path
+                if not path.exists() or not path.is_file():
+                    await self._ws.send_json({"type": "file_input_error", "message": f"文件不存在: {path}"})
+                    return
+                file_paths.append(str(path))
+                filenames.append(path.name)
+        else:
+            if not isinstance(files, list) or not files:
+                return
+            upload_dir = Path(settings.rpa_uploads_dir) / "_projection" / (self._session_id or "session") / token
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            for index, item in enumerate(files):
+                if not isinstance(item, dict):
+                    continue
+                encoded = str(item.get("data_base64") or "")
+                if not encoded:
+                    continue
+                try:
+                    content = base64.b64decode(encoded, validate=True)
+                except Exception:
+                    continue
+                filename = safe_asset_filename(str(item.get("name") or f"upload-{index + 1}.bin"))
+                target = upload_dir / filename
+                target.write_bytes(content)
+                file_paths.append(str(target))
+                filenames.append(filename)
+
+        if not file_paths:
+            await self._ws.send_json({"type": "file_input_error", "message": "No readable files were selected."})
+            return
+
+        try:
+            handle = await self._page.evaluate_handle(
+                "(token) => window.__rpaFileInputTargets && window.__rpaFileInputTargets[token]",
+                token,
+            )
+            element = handle.as_element()
+            if element is None:
+                await self._ws.send_json({"type": "file_input_error", "message": "The upload target is no longer available."})
+                return
+            if source_mode in {"path", "dataflow"} and len(file_paths) > 1:
+                is_multiple = await element.evaluate("(input) => !!input.multiple")
+                if not is_multiple:
+                    await self._ws.send_json({"type": "file_input_error", "message": "当前上传控件只支持单文件。"})
+                    return
+            source_payload: Optional[Dict[str, Any]] = None
+            requested_source = event.get("upload_source")
+            if source_mode == "dataflow" and isinstance(requested_source, dict):
+                source_payload = dict(requested_source)
+                source_payload["mode"] = "dataflow"
+                source_payload.setdefault("file_field", "path")
+                source_payload.setdefault("original_filename", filenames[0] if filenames else "")
+            elif source_mode == "path":
+                if len(file_paths) > 1:
+                    source_payload = {
+                        "mode": "path",
+                        "multi": True,
+                        "items": [
+                            {"mode": "path", "path": path, "original_filename": filenames[index]}
+                            for index, path in enumerate(file_paths)
+                        ],
+                    }
+                else:
+                    source_payload = {
+                        "mode": "path",
+                        "path": file_paths[0],
+                        "original_filename": filenames[0],
+                        "multi": False,
+                    }
+            await self._page.evaluate(
+                """({ token, source }) => {
+                    window.__rpaPendingUploadSources = window.__rpaPendingUploadSources || {};
+                    if (source) window.__rpaPendingUploadSources[token] = source;
+                }""",
+                {"token": token, "source": source_payload},
+            )
+            await self._page.evaluate("() => { window.__rpaSuppressFileInputEventsUntil = Date.now() + 2000; }")
+            await element.set_input_files(file_paths)
+            await self._page.evaluate(
+                """async (token) => {
+                    const input = window.__rpaFileInputTargets && window.__rpaFileInputTargets[token];
+                    if (input && window.__rpaEmitFileInput) {
+                        await window.__rpaEmitFileInput(input, token);
+                    }
+                    if (window.__rpaFileInputTargets) delete window.__rpaFileInputTargets[token];
+                    if (window.__rpaPendingUploadSources) delete window.__rpaPendingUploadSources[token];
+                }""",
+                token,
+            )
+            await self._ws.send_json(
+                {
+                    "type": "file_input_applied",
+                    "filenames": filenames,
+                    "source_mode": source_mode,
+                    "mime": mimetypes.guess_type(filenames[0])[0] or "",
+                }
+            )
+        except Exception as exc:
+            logger.warning("[Screencast] failed to apply file upload selection: %s", exc)
+            try:
+                await self._ws.send_json({"type": "file_input_error", "message": str(exc)})
+            except Exception:
+                pass
 
     async def _dispatch_key(self, event: Dict[str, Any]) -> None:
         if not self._cdp:

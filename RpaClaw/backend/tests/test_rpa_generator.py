@@ -171,7 +171,9 @@ class PlaywrightGeneratorTests(unittest.TestCase):
         self.assertIn("async with current_page.expect_download() as _dl_info:", script)
         self.assertIn('await current_page.locator("a.link-special").click()', script)
         self.assertIn("_dl = await _dl_info.value", script)
-        self.assertIn("_dl_dest = _os.path.join(_dl_dir, _dl.suggested_filename)", script)
+        self.assertIn('_dl_filename = "ContractList20260411111546.xlsx" or _dl.suggested_filename', script)
+        self.assertIn("_dl_dest = _os.path.join(_dl_dir, _dl_filename)", script)
+        self.assertIn('{"filename": _dl_filename, "path": _dl_dest}', script)
         self.assertIn('_results["download_ContractList20260411111546"]', script)
         self.assertNotIn("manually wrap the triggering click with expect_download()", script)
         self.assertNotIn("expect_popup", script)
@@ -375,6 +377,133 @@ class PlaywrightGeneratorTests(unittest.TestCase):
         script = generator.generate_script(steps, is_local=True)
 
         self.assertIn('await current_page.get_by_label("Upload file", exact=True).set_input_files(', script)
+
+    def test_generate_script_uses_fixed_upload_source_asset_path(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "set_input_files",
+                "target": json.dumps({"method": "label", "value": "Upload file"}),
+                "description": "上传文件",
+                "tag": "INPUT",
+                "url": "https://example.com/upload",
+                "value": "report.pdf",
+                "signals": {
+                    "set_input_files": {"files": ["report.pdf"]},
+                    "upload_source": {
+                        "mode": "fixed",
+                        "asset_path": "assets/report.pdf",
+                        "original_filename": "report.pdf",
+                    },
+                },
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("def _rpa_asset_path(relative_path):", script)
+        self.assertIn("set_input_files(_rpa_asset_path('assets/report.pdf'))", script)
+
+    def test_generate_script_uses_parameter_upload_source_default_asset(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "set_input_files",
+                "target": json.dumps({"method": "label", "value": "Resume"}),
+                "description": "上传简历",
+                "tag": "INPUT",
+                "url": "https://example.com/upload",
+                "value": "resume.pdf",
+                "signals": {
+                    "upload_source": {
+                        "mode": "parameter",
+                        "param_name": "resume_file",
+                        "default_asset_path": "assets/resume.pdf",
+                    },
+                },
+            }
+        ]
+
+        script = generator.generate_script(
+            steps,
+            params={"resume_file": {"type": "file", "original_value": "assets/resume.pdf"}},
+            is_local=True,
+        )
+
+        self.assertIn("set_input_files(kwargs.get('resume_file', _rpa_asset_path('assets/resume.pdf')))", script)
+
+    def test_generate_script_uses_path_upload_source(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "set_input_files",
+                "target": json.dumps({"method": "label", "value": "Upload file"}),
+                "description": "上传文件",
+                "tag": "INPUT",
+                "url": "https://example.com/upload",
+                "value": "采购明细导入模板.xlsx",
+                "signals": {
+                    "upload_source": {
+                        "mode": "path",
+                        "path": "/Users/gao/Desktop/采购明细导入模板.xlsx",
+                        "original_filename": "采购明细导入模板.xlsx",
+                    },
+                },
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("set_input_files('/Users/gao/Desktop/采购明细导入模板.xlsx')", script)
+        self.assertNotIn("_rpa_asset_path", script)
+
+    def test_generate_script_uses_dataflow_upload_source(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "set_input_files",
+                "target": json.dumps({"method": "label", "value": "Upload edited report"}),
+                "description": "上传下载产物",
+                "tag": "INPUT",
+                "url": "https://example.com/upload",
+                "value": "report.pdf",
+                "signals": {
+                    "upload_source": {
+                        "mode": "dataflow",
+                        "source_step_id": "step-download",
+                        "source_result_key": "download_report",
+                        "file_field": "path",
+                    },
+                },
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("set_input_files(_results['download_report']['path'])", script)
+
+    def test_generate_script_docker_upload_source_falls_back_to_recorded_filename(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "set_input_files",
+                "target": json.dumps({"method": "label", "value": "Upload file"}),
+                "description": "上传文件",
+                "tag": "INPUT",
+                "url": "https://example.com/upload",
+                "value": "report.pdf",
+                "signals": {
+                    "set_input_files": {"files": ["report.pdf"]},
+                    "upload_source": {"mode": "fixed", "asset_path": "assets/report.pdf"},
+                },
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=False)
+
+        self.assertIn("RPA_WARNING: upload step has no configured file source", script)
+        self.assertIn("set_input_files('report.pdf')", script)
+        self.assertNotIn("_rpa_asset_path", script)
 
     def test_generate_script_infers_open_tab_click_from_tab_id_change(self):
         generator = PlaywrightGenerator()

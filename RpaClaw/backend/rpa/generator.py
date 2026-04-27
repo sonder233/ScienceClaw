@@ -4,6 +4,14 @@ import re
 from typing import List, Dict, Any, Optional
 
 from backend.rpa.playwright_security import get_chromium_launch_kwargs, get_context_kwargs
+from backend.rpa.upload_source import (
+    download_result_key,
+    render_file_source_expr,
+    render_legacy_input_files_expr,
+    rpa_asset_helper_lines,
+    step_upload_source,
+    upload_source_uses_asset_helper,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +137,10 @@ class StepExecutionError(Exception):
         root_tab_id = deduped[0].get("tab_id") if deduped else None
         root_tab_id = root_tab_id or "tab-1"
         used_result_keys: Dict[str, int] = {}
+        needs_asset_helper = is_local and any(
+            upload_source_uses_asset_helper(step_upload_source(step))
+            for step in deduped
+        )
 
         lines = [
             "",
@@ -138,6 +150,8 @@ class StepExecutionError(Exception):
             f'    tabs = {{"{root_tab_id}": page}}',
             "    current_page = page",
         ]
+        if needs_asset_helper:
+            lines.extend(rpa_asset_helper_lines("    "))
 
         current_tab_id = root_tab_id
         prev_url = None
@@ -267,13 +281,9 @@ class StepExecutionError(Exception):
 
                 if download_signal:
                     download_name = download_signal.get("filename") or value or "file"
-                    safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', str(download_name).split('.')[0]) or "file"
+                    result_key = str(download_signal.get("result_key") or download_result_key(str(download_name)))
                     step_lines.append("    _dl = await _dl_info.value")
-                    step_lines.append("    _dl_dir = kwargs.get('_downloads_dir', '.')")
-                    step_lines.append("    import os as _os; _os.makedirs(_dl_dir, exist_ok=True)")
-                    step_lines.append("    _dl_dest = _os.path.join(_dl_dir, _dl.suggested_filename)")
-                    step_lines.append("    await _dl.save_as(_dl_dest)")
-                    step_lines.append(f'    _results["download_{safe_name}"] = {{"filename": _dl.suggested_filename, "path": _dl_dest}}')
+                    self._append_download_save_lines(step_lines, result_key, str(download_name))
 
                 lines.extend(self._wrap_step_lines(step_lines, step_index, test_mode))
                 lines.append("")
@@ -292,15 +302,12 @@ class StepExecutionError(Exception):
                 step_lines.append("    await current_page.wait_for_timeout(500)")
             elif action == "download_click":
                 # Click that triggers a file download — wrap with expect_download
-                safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', (value or "file").split('.')[0]) or "file"
+                download_name = (download_signal or {}).get("filename") or value or "file"
+                result_key = download_result_key(download_name)
                 step_lines.append(f"    async with current_page.expect_download() as _dl_info:")
                 step_lines.append(f"        await {locator}.click()")
                 step_lines.append(f"    _dl = await _dl_info.value")
-                step_lines.append(f"    _dl_dir = kwargs.get('_downloads_dir', '.')")
-                step_lines.append(f"    import os as _os; _os.makedirs(_dl_dir, exist_ok=True)")
-                step_lines.append(f"    _dl_dest = _os.path.join(_dl_dir, _dl.suggested_filename)")
-                step_lines.append(f"    await _dl.save_as(_dl_dest)")
-                step_lines.append(f'    _results["download_{safe_name}"] = {{"filename": _dl.suggested_filename, "path": _dl_dest}}')
+                self._append_download_save_lines(step_lines, result_key, str(download_name))
             elif action == "fill":
                 fill_value = self._maybe_parameterize(value, params)
                 step_lines.append(f"    await {locator}.fill({fill_value})")
@@ -309,7 +316,11 @@ class StepExecutionError(Exception):
             elif action == "uncheck":
                 step_lines.append(f"    await {locator}.uncheck()")
             elif action == "set_input_files":
-                input_files_value = self._build_input_files_value(step, value, params)
+                input_files_value = self._build_input_files_value(step, value, params, use_upload_source=is_local)
+                if not step_upload_source(step) or not is_local:
+                    step_lines.append(
+                        "    print('RPA_WARNING: upload step has no configured file source; replay may fail', file=__import__('sys').stderr)"
+                    )
                 step_lines.append(f"    await {locator}.set_input_files({input_files_value})")
             elif action == "extract_text":
                 result_var = f"extract_text_value_{step_index + 1}"
@@ -452,6 +463,18 @@ class StepExecutionError(Exception):
         if isinstance(popup_signal, dict):
             return popup_signal
         return None
+
+    @staticmethod
+    def _append_download_save_lines(step_lines: List[str], result_key: str, recorded_name: str) -> None:
+        step_lines.append("    _dl_dir = kwargs.get('_downloads_dir', '.')")
+        step_lines.append("    import os as _os; _os.makedirs(_dl_dir, exist_ok=True)")
+        step_lines.append(f"    _dl_filename = {json.dumps(recorded_name)} or _dl.suggested_filename")
+        step_lines.append("    _dl_filename = _os.path.basename(str(_dl_filename)) or _dl.suggested_filename")
+        step_lines.append("    _dl_dest = _os.path.join(_dl_dir, _dl_filename)")
+        step_lines.append("    if _os.path.exists(_dl_dest):")
+        step_lines.append("        _os.remove(_dl_dest)")
+        step_lines.append("    await _dl.save_as(_dl_dest)")
+        step_lines.append(f'    _results[{json.dumps(result_key)}] = {{"filename": _dl_filename, "path": _dl_dest}}')
 
     @staticmethod
     def _download_signal(step: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -735,20 +758,26 @@ class StepExecutionError(Exception):
         safe = value.replace("'", "\\'")
         return f"'{safe}'"
 
-    def _build_input_files_value(self, step: Dict[str, Any], value: str, params: Dict[str, Any]) -> str:
+    def _build_input_files_value(
+        self,
+        step: Dict[str, Any],
+        value: str,
+        params: Dict[str, Any],
+        *,
+        use_upload_source: bool = True,
+    ) -> str:
         signals = step.get("signals")
         files = None
+        upload_source = step_upload_source(step)
+        if upload_source and use_upload_source:
+            return render_file_source_expr(upload_source, params)
+
         if isinstance(signals, dict):
             payload = signals.get("set_input_files")
             if isinstance(payload, dict) and isinstance(payload.get("files"), list):
                 files = [str(item) for item in payload.get("files") if str(item)]
 
-        if files and len(files) > 1:
-            escaped = [item.replace("\\", "\\\\").replace("'", "\\'") for item in files]
-            return "[" + ", ".join(f"'{item}'" for item in escaped) + "]"
-
-        effective_value = files[0] if files else value
-        return self._maybe_parameterize(str(effective_value or ""), params)
+        return render_legacy_input_files_expr(files or [], value)
 
     @staticmethod
     def _sync_to_async(code: str) -> str:

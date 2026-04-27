@@ -68,6 +68,17 @@ def _resolve_tools_dir() -> str:
     return _sub("TOOLS_DIR", _resolve_home(), "tools", "/app/Tools")
 
 
+def _resolve_workspace_dir() -> str:
+    return _sub("WORKSPACE_DIR", _resolve_home(), "workspace", "/home/rpaclaw")
+
+
+def _resolve_rpa_uploads_dir() -> str:
+    explicit = os.environ.get("RPA_UPLOADS_DIR")
+    if explicit:
+        return explicit
+    return str(Path(_resolve_workspace_dir()) / "rpa_uploads")
+
+
 def _resolve_sandbox_tools_dir() -> str:
     return _env_or_default("SANDBOX_TOOLS_DIR", "/app/Tools").rstrip("/")
 
@@ -158,7 +169,8 @@ class Settings(BaseSettings):
     sandbox_rpa_claw_home: str = _resolve_sandbox_home()
 
     # 以下四个目录优先读取各自环境变量，未设置时从 rpa_claw_home 派生
-    workspace_dir: str = _sub("WORKSPACE_DIR", _resolve_home(), "workspace", "/home/rpaclaw")
+    workspace_dir: str = _resolve_workspace_dir()
+    rpa_uploads_dir: str = _resolve_rpa_uploads_dir()
     external_skills_dir: str = _sub("EXTERNAL_SKILLS_DIR", _resolve_home(), "external_skills", "./Skills")
     builtin_skills_dir: str = _sub("BUILTIN_SKILLS_DIR", _resolve_home(), "builtin_skills", "./builtin_skills")
     local_data_dir: str = _sub("LOCAL_DATA_DIR", _resolve_home(), "data", "./data")

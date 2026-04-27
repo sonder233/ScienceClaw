@@ -179,6 +179,62 @@
         }, payload));
     }
 
+    window.__rpaEmitFileInput = async function(input, token) {
+        if (!input || input.tagName !== 'INPUT' || String(input.type || '').toLowerCase() !== 'file') return;
+        var files = [];
+        var meta = [];
+        var payloads = [];
+        var inputFiles = input.files || [];
+        var uploadSource = token && window.__rpaPendingUploadSources ? window.__rpaPendingUploadSources[token] : null;
+        var shouldReadPayloads = !(uploadSource && uploadSource.mode === 'path');
+        var maxBytes = 25 * 1024 * 1024;
+        function readFile(file) {
+            var item = {
+                name: file.name,
+                size: file.size,
+                mime: file.type,
+                last_modified: file.lastModified
+            };
+            if (file.size > maxBytes) {
+                item.missing_reason = 'too_large';
+                return Promise.resolve(item);
+            }
+            return new Promise(function(resolve) {
+                var reader = new FileReader();
+                reader.onload = function() {
+                    var result = String(reader.result || '');
+                    var comma = result.indexOf(',');
+                    item.data_base64 = comma >= 0 ? result.slice(comma + 1) : '';
+                    resolve(item);
+                };
+                reader.onerror = function() {
+                    item.missing_reason = 'read_error';
+                    resolve(item);
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+        for (var i = 0; i < inputFiles.length; i++) {
+            files.push(inputFiles[i].name);
+            meta.push({
+                name: inputFiles[i].name,
+                size: inputFiles[i].size,
+                mime: inputFiles[i].type,
+                last_modified: inputFiles[i].lastModified
+            });
+            if (shouldReadPayloads) payloads.push(await readFile(inputFiles[i]));
+        }
+        var signals = {
+            set_input_files: { files: files, meta: meta }
+        };
+        if (shouldReadPayloads) signals.upload_payloads = payloads;
+        if (uploadSource && typeof uploadSource === 'object') signals.upload_source = uploadSource;
+        emitAction('set_input_files', input, {
+            value: files[0] || '',
+            signals: signals
+        });
+    };
+
     if (!window.__rpaPlaywrightActions || !window.__rpaPlaywrightActions.install) {
         console.warn('[RPA] Recorder action runtime is unavailable');
         return;

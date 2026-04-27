@@ -63,6 +63,39 @@
         return type === 'date' || type === 'datetime-local' || type === 'month' || type === 'time' || type === 'week';
     }
 
+    var MAX_UPLOAD_STAGING_BYTES = 25 * 1024 * 1024;
+
+    function fileMeta(file) {
+        return {
+            name: file.name,
+            size: file.size,
+            mime: file.type,
+            last_modified: file.lastModified,
+        };
+    }
+
+    function readFilePayload(file) {
+        var meta = fileMeta(file);
+        if (file.size > MAX_UPLOAD_STAGING_BYTES) {
+            meta.missing_reason = 'too_large';
+            return Promise.resolve(meta);
+        }
+        return new Promise(function(resolve) {
+            var reader = new FileReader();
+            reader.onload = function() {
+                var result = String(reader.result || '');
+                var comma = result.indexOf(',');
+                meta.data_base64 = comma >= 0 ? result.slice(comma + 1) : '';
+                resolve(meta);
+            };
+            reader.onerror = function() {
+                meta.missing_reason = 'read_error';
+                resolve(meta);
+            };
+            reader.readAsDataURL(file);
+        });
+    }
+
     function sameOrRelatedTarget(a, b) {
         if (!a || !b) return false;
         if (a === b) return true;
@@ -100,6 +133,7 @@
 
         var activeTarget = null;
         var recentAction = null;
+        var recentFileInput = new WeakMap();
         var listeners = [];
 
         function addListener(type, handler) {
@@ -155,6 +189,45 @@
             markAction(action, target);
         }
 
+        function fileInputSignature(target) {
+            var inputFiles = target.files || [];
+            var parts = [];
+            for (var i = 0; i < inputFiles.length; i++) {
+                parts.push([inputFiles[i].name, inputFiles[i].size, inputFiles[i].lastModified].join(':'));
+            }
+            return parts.join('|');
+        }
+
+        function shouldSuppressFileInput(target) {
+            var signature = fileInputSignature(target);
+            var previous = recentFileInput.get(target);
+            if (previous && previous.signature === signature && now() - previous.time < 600) return true;
+            recentFileInput.set(target, { signature: signature, time: now() });
+            return false;
+        }
+
+        function emitFileInputAction(target) {
+            if (shouldSuppressFileInput(target)) return;
+            var files = [];
+            var meta = [];
+            var payloadPromises = [];
+            var inputFiles = target.files || [];
+            for (var i = 0; i < inputFiles.length; i++) {
+                files.push(inputFiles[i].name);
+                meta.push(fileMeta(inputFiles[i]));
+                payloadPromises.push(readFilePayload(inputFiles[i]));
+            }
+            Promise.all(payloadPromises).then(function(uploadPayloads) {
+                emitLogicalAction('set_input_files', target, {
+                    value: files[0] || '',
+                    signals: {
+                        set_input_files: { files: files, meta: meta },
+                        upload_payloads: uploadPayloads,
+                    },
+                });
+            });
+        }
+
         addListener('focusin', function(event) {
             if (!event.isTrusted || isPaused()) return;
             rememberActiveTarget(event.target);
@@ -196,13 +269,8 @@
             if (!isElement(target)) return;
 
             if (isFileInput(target)) {
-                var files = [];
-                var inputFiles = target.files || [];
-                for (var i = 0; i < inputFiles.length; i++) files.push(inputFiles[i].name);
-                emitLogicalAction('set_input_files', target, {
-                    value: files[0] || '',
-                    signals: { set_input_files: { files: files } },
-                });
+                if (window.__rpaSuppressFileInputEventsUntil && Date.now() < window.__rpaSuppressFileInputEventsUntil) return;
+                emitFileInputAction(target);
                 return;
             }
 
@@ -243,13 +311,8 @@
                 return;
             }
             if (isFileInput(target)) {
-                var files = [];
-                var inputFiles = target.files || [];
-                for (var i = 0; i < inputFiles.length; i++) files.push(inputFiles[i].name);
-                emitLogicalAction('set_input_files', target, {
-                    value: files[0] || '',
-                    signals: { set_input_files: { files: files } },
-                });
+                if (window.__rpaSuppressFileInputEventsUntil && Date.now() < window.__rpaSuppressFileInputEventsUntil) return;
+                emitFileInputAction(target);
             }
         });
 

@@ -1,9 +1,10 @@
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional, Tuple
 
 from backend.storage import get_repository
 from backend.config import settings
@@ -21,6 +22,8 @@ class SkillExporter:
         description: str,
         script: str,
         params: Dict[str, Any],
+        steps: Optional[List[Dict[str, Any]]] = None,
+        session_id: Optional[str] = None,
     ) -> str:
         """Export skill to MongoDB or local filesystem based on storage_backend.
 
@@ -38,10 +41,19 @@ class SkillExporter:
             if param_info.get("sensitive") and param_info.get("credential_id"):
                 has_auto_injected = True
                 continue
-            prop = {
-                "type": param_info.get("type", "string"),
-                "description": param_info.get("description", ""),
-            }
+            param_type = param_info.get("type", "string")
+            if param_type == "file":
+                prop = {
+                    "type": "string",
+                    "format": "file-path",
+                    "x-rpa-type": "file",
+                    "description": param_info.get("description", ""),
+                }
+            else:
+                prop = {
+                    "type": param_type,
+                    "description": param_info.get("description", ""),
+                }
             original = param_info.get("original_value", "")
             if original and original != "{{credential}}":
                 prop["default"] = original
@@ -69,6 +81,13 @@ class SkillExporter:
                 f"Pass `--param=value` only to override the pre-configured defaults.{example_text}\n"
             )
 
+        file_param_note = ""
+        if any(isinstance(info, dict) and info.get("type") == "file" for info in params.values()):
+            file_param_note = (
+                "\nFile parameters accept absolute paths, or paths relative to the "
+                "session workspace when invoked through RpaClaw.\n"
+            )
+
         skill_md = f"""---
 name: {skill_name}
 description: {description}
@@ -88,6 +107,7 @@ python3 skill.py
 
 The skill uses Playwright to automate browser interactions based on the recorded steps.
 {auto_inject_note}
+{file_param_note}
 ## Input Schema
 
 ```json
@@ -103,6 +123,7 @@ The skill is implemented in `skill.py` using Playwright for browser automation.
             # Save to filesystem
             skill_dir = Path(settings.external_skills_dir) / skill_name
             skill_dir.mkdir(parents=True, exist_ok=True)
+            self._copy_upload_assets(skill_dir, steps or [], session_id=session_id)
 
             (skill_dir / "SKILL.md").write_text(skill_md, encoding="utf-8")
             (skill_dir / "skill.py").write_text(script, encoding="utf-8")
@@ -141,3 +162,76 @@ The skill is implemented in `skill.py` using Playwright for browser automation.
             logger.info(f"Skill '{skill_name}' exported to MongoDB for user {user_id}")
 
         return skill_name
+
+    def _copy_upload_assets(
+        self,
+        skill_dir: Path,
+        steps: List[Dict[str, Any]],
+        *,
+        session_id: Optional[str],
+    ) -> None:
+        for asset_path, source_path in self._iter_upload_assets(steps, session_id=session_id):
+            try:
+                source = Path(source_path)
+                if not source.exists():
+                    logger.warning("Upload asset source missing: %s", source)
+                    continue
+                target = skill_dir / asset_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+            except Exception as exc:
+                logger.warning("Failed to copy upload asset %s: %s", asset_path, exc)
+
+    def _iter_upload_assets(
+        self,
+        steps: List[Dict[str, Any]],
+        *,
+        session_id: Optional[str],
+    ) -> List[Tuple[str, str]]:
+        assets: List[Tuple[str, str]] = []
+        for step in steps:
+            signals = step.get("signals") if isinstance(step, dict) else None
+            if not isinstance(signals, dict):
+                continue
+            source = signals.get("upload_source")
+            if not isinstance(source, dict):
+                continue
+            staging = signals.get("upload_staging")
+
+            def staging_path(item: Dict[str, Any]) -> str:
+                explicit = item.get("path")
+                if explicit:
+                    return str(explicit)
+                if not session_id:
+                    return ""
+                staging_id = str(item.get("staging_id") or "")
+                stored = str(item.get("stored_filename") or item.get("original_filename") or "")
+                if not staging_id or not stored:
+                    return ""
+                return str(Path(settings.rpa_uploads_dir) / session_id / staging_id / stored)
+
+            def add(asset_path: Any, item: Dict[str, Any]) -> None:
+                if not asset_path or not isinstance(item, dict):
+                    return
+                path = staging_path(item)
+                if path:
+                    assets.append((str(asset_path).replace("\\", "/"), path))
+
+            if source.get("multi") and isinstance(source.get("items"), list) and isinstance(staging, dict):
+                staging_items = staging.get("items") if isinstance(staging.get("items"), list) else []
+                for index, item_source in enumerate(source["items"]):
+                    if not isinstance(item_source, dict):
+                        continue
+                    staging_item = staging_items[index] if index < len(staging_items) and isinstance(staging_items[index], dict) else {}
+                    add(item_source.get("asset_path") or item_source.get("default_asset_path"), staging_item)
+                continue
+
+            staging_item = {}
+            if isinstance(staging, dict):
+                items = staging.get("items")
+                if isinstance(items, list) and items and isinstance(items[0], dict):
+                    staging_item = items[0]
+                else:
+                    staging_item = staging
+            add(source.get("asset_path") or source.get("default_asset_path"), staging_item)
+        return assets

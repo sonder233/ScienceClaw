@@ -5,6 +5,14 @@ import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from backend.rpa.playwright_security import get_chromium_launch_kwargs, get_context_kwargs
+from backend.rpa.upload_source import (
+    default_upload_source_from_staging,
+    download_result_key,
+    render_file_source_expr,
+    render_legacy_input_files_expr,
+    rpa_asset_helper_lines,
+    upload_source_uses_asset_helper,
+)
 
 from .trace_models import RPAAcceptedTrace, RPATraceType
 
@@ -19,7 +27,9 @@ class TraceSkillCompiler:
         test_mode: bool = False,
     ) -> str:
         self._compiled_output_keys: Dict[int, str] = {}
-        self._param_lookup = self._build_param_lookup(params or {})
+        self._params = params or {}
+        self._use_upload_sources = is_local
+        self._param_lookup = self._build_param_lookup(self._params)
         self._param_cursors: Dict[str, int] = {}
         trace_list = list(traces)
         execute_skill_func = "\n".join(self._render_execute_skill(trace_list))
@@ -147,6 +157,8 @@ class TraceSkillCompiler:
             "    current_page = page",
             "    _trace_logger = kwargs.get('_on_log')",
         ]
+        if self._use_upload_sources and any(upload_source_uses_asset_helper(_trace_upload_source(trace)) for trace in traces):
+            lines.extend(rpa_asset_helper_lines("    "))
         used_output_keys: Dict[str, int] = {}
         for index, trace in enumerate(traces):
             trace_lines = self._render_trace(index, trace, traces[:index], used_output_keys)
@@ -242,7 +254,18 @@ class TraceSkillCompiler:
             lines.append("    # No stable locator was recorded for this manual action.")
             return lines
         expr = _locator_expression("current_page", locator)
-        if action == "click":
+        download_signal = _trace_download_signal(trace)
+        if action in {"click", "press"} and download_signal:
+            download_name = str(download_signal.get("filename") or trace.value or "file")
+            result_key = str(download_signal.get("result_key") or download_result_key(download_name))
+            lines.append("    async with current_page.expect_download() as _dl_info:")
+            if action == "click":
+                lines.append(f"        await {expr}.click()")
+            else:
+                lines.append(f"        await {expr}.press({str(trace.value or '')!r})")
+            lines.append("    _dl = await _dl_info.value")
+            self._append_download_save_lines(lines, result_key, download_name)
+        elif action == "click":
             lines.append(f"    await {expr}.click()")
             lines.append("    await current_page.wait_for_timeout(500)")
         elif action == "fill":
@@ -256,9 +279,34 @@ class TraceSkillCompiler:
             lines.append(f"    await {expr}.uncheck()")
         elif action == "select":
             lines.append(f"    await {expr}.select_option({str(trace.value or '')!r})")
+        elif action == "set_input_files":
+            upload_source = _trace_upload_source(trace)
+            if upload_source and self._use_upload_sources:
+                file_expr = render_file_source_expr(upload_source, self._params)
+            else:
+                signals = trace.signals if isinstance(trace.signals, dict) else {}
+                payload = signals.get("set_input_files")
+                files = payload.get("files") if isinstance(payload, dict) else []
+                file_expr = render_legacy_input_files_expr(files if isinstance(files, list) else [], trace.value)
+                lines.append(
+                    "    print('RPA_WARNING: upload trace has no configured file source; replay may fail', file=__import__('sys').stderr)"
+                )
+            lines.append(f"    await {expr}.set_input_files({file_expr})")
         else:
             lines.append(f"    # Unsupported manual action preserved as no-op: {action}")
         return lines
+
+    @staticmethod
+    def _append_download_save_lines(lines: List[str], result_key: str, recorded_name: str) -> None:
+        lines.append("    _dl_dir = kwargs.get('_downloads_dir', '.')")
+        lines.append("    import os as _os; _os.makedirs(_dl_dir, exist_ok=True)")
+        lines.append(f"    _dl_filename = {json.dumps(recorded_name)} or _dl.suggested_filename")
+        lines.append("    _dl_filename = _os.path.basename(str(_dl_filename)) or _dl.suggested_filename")
+        lines.append("    _dl_dest = _os.path.join(_dl_dir, _dl_filename)")
+        lines.append("    if _os.path.exists(_dl_dest):")
+        lines.append("        _os.remove(_dl_dest)")
+        lines.append("    await _dl.save_as(_dl_dest)")
+        lines.append(f"    _results[{result_key!r}] = {{'filename': _dl_filename, 'path': _dl_dest}}")
 
     def _render_data_capture_trace(
         self,
@@ -738,6 +786,20 @@ def _repo_base_from_url(url: str) -> str:
     return match.group(1) if match else ""
 
 
+def _trace_upload_source(trace: RPAAcceptedTrace) -> Dict[str, Any]:
+    signals = trace.signals if isinstance(trace.signals, dict) else {}
+    source = signals.get("upload_source")
+    if isinstance(source, dict):
+        return source
+    return default_upload_source_from_staging(signals, fallback_filename=str(trace.value or "upload.bin"))
+
+
+def _trace_download_signal(trace: RPAAcceptedTrace) -> Dict[str, Any]:
+    signals = trace.signals if isinstance(trace.signals, dict) else {}
+    download = signals.get("download")
+    return download if isinstance(download, dict) else {}
+
+
 def _is_github_repo_url(url: str) -> bool:
     return bool(_repo_base_from_url(url))
 
@@ -851,4 +913,3 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 '''
-

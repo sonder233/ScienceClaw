@@ -58,6 +58,77 @@ def test_compiler_wraps_each_trace_with_trace_level_logging():
     assert "TRACE_ERROR" in script
 
 
+def test_compiler_renders_path_upload_source_without_asset_helper():
+    script = TraceSkillCompiler().generate_script(
+        [
+            RPAAcceptedTrace(
+                trace_type=RPATraceType.MANUAL_ACTION,
+                action="set_input_files",
+                value="采购明细导入模板.xlsx",
+                locator_candidates=[
+                    {"locator": {"method": "role", "role": "button", "name": "Choose File"}},
+                ],
+                signals={
+                    "upload_source": {
+                        "mode": "path",
+                        "path": "/Users/gao/Desktop/采购明细导入模板.xlsx",
+                        "original_filename": "采购明细导入模板.xlsx",
+                    },
+                },
+            )
+        ],
+        is_local=True,
+    )
+
+    assert "set_input_files('/Users/gao/Desktop/采购明细导入模板.xlsx')" in script
+    assert "_rpa_asset_path" not in script
+
+
+def test_compiler_writes_download_result_for_dataflow_upload():
+    result_key = "download_________"
+    script = TraceSkillCompiler().generate_script(
+        [
+            RPAAcceptedTrace(
+                trace_id="trace-download",
+                trace_type=RPATraceType.MANUAL_ACTION,
+                action="click",
+                value="采购明细导入模板.xlsx",
+                locator_candidates=[
+                    {"locator": {"method": "role", "role": "link", "name": "下载模板"}},
+                ],
+                signals={
+                    "download": {
+                        "filename": "采购明细导入模板.xlsx",
+                        "result_key": result_key,
+                    },
+                },
+            ),
+            RPAAcceptedTrace(
+                trace_id="trace-upload",
+                trace_type=RPATraceType.MANUAL_ACTION,
+                action="set_input_files",
+                value="采购明细导入模板.xlsx",
+                locator_candidates=[
+                    {"locator": {"method": "role", "role": "button", "name": "Choose File"}},
+                ],
+                signals={
+                    "upload_source": {
+                        "mode": "dataflow",
+                        "source_step_id": "trace-download",
+                        "source_result_key": result_key,
+                        "file_field": "path",
+                    },
+                },
+            ),
+        ],
+        is_local=True,
+    )
+
+    assert "async with current_page.expect_download() as _dl_info:" in script
+    assert f"_results[{result_key!r}] = {{'filename': _dl_filename, 'path': _dl_dest}}" in script
+    assert f"set_input_files(_results[{result_key!r}]['path'])" in script
+
+
 def test_compiler_generalizes_highest_star_trace_instead_of_hardcoding_url():
     script = TraceSkillCompiler().generate_script(
         [
