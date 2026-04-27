@@ -1130,6 +1130,44 @@ def test_embedded_ai_code_preserves_random_like_locator_when_multiple_candidates
     assert '[data-testid="menu-btn-a1b2c3d4"]' in body
 
 
+def test_embedded_ai_code_preserves_collection_locator_when_nth_is_applied_to_variable():
+    trace = RPAAcceptedTrace(
+        trace_type=RPATraceType.AI_OPERATION,
+        source="ai",
+        description="Click table row column action",
+        locator_stability=RPALocatorStabilityMetadata(
+            primary_locator={
+                "method": "css",
+                "value": "#taskExportGridTable tbody.igrid-data tr.grid-row",
+            },
+            unstable_signals=[{"attribute": "id", "value": "taskExportGridTable"}],
+            alternate_locators=[
+                RPALocatorStabilityCandidate(
+                    locator={"method": "role", "role": "link", "name": "W3主页"},
+                    source="snapshot_actionable_node",
+                    confidence="high",
+                )
+            ],
+        ),
+        ai_execution=RPAAIExecution(
+            code=(
+                "async def run(page, results):\n"
+                "    _rows = page.locator('#taskExportGridTable tbody.igrid-data tr.grid-row')\n"
+                "    _row = _rows.nth(0)\n"
+                "    await _row.locator('td[field=\"tmpName\"] a').click()\n"
+                "    return {'action_performed': True}"
+            ),
+        ),
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert "page.locator('#taskExportGridTable tbody.igrid-data tr.grid-row')" in body
+    assert "_rows.nth(0)" in body
+    assert "get_by_role('link', name='W3主页')" not in body
+
+
 def test_embedded_ai_code_preserves_non_random_locator_even_when_stable_candidate_exists():
     trace = RPAAcceptedTrace(
         trace_type=RPATraceType.AI_OPERATION,

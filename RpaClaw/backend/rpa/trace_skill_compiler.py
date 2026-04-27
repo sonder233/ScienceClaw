@@ -868,7 +868,18 @@ def _rewrite_random_like_locator_in_code(code: str, trace: RPAAcceptedTrace) -> 
 
 
 def _code_uses_positional_collection_locator(code: str, selector: str) -> bool:
-    return f"page.locator({selector!r}).nth(" in str(code or "")
+    text = str(code or "")
+    if f"page.locator({selector!r}).nth(" in text:
+        return True
+    selector_literal = repr(selector)
+    assignment_pattern = re.compile(
+        rf"(?P<var>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*page\.locator\({re.escape(selector_literal)}\)"
+    )
+    for match in assignment_pattern.finditer(text):
+        var_name = re.escape(match.group("var"))
+        if re.search(rf"\b{var_name}\.nth\(", text[match.end():]):
+            return True
+    return False
 
 
 def _should_preserve_runtime_ai_instruction(trace: RPAAcceptedTrace) -> bool:
