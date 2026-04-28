@@ -9,6 +9,7 @@ from backend.rpa.trace_models import (
     RPATraceType,
 )
 from backend.rpa.trace_skill_compiler import TraceSkillCompiler
+from backend.rpa.upload_source import download_result_key, safe_name_stem
 
 
 def _execute_body(script: str) -> str:
@@ -101,6 +102,19 @@ def test_compiler_renders_path_upload_source_without_asset_helper():
 
     assert "set_input_files('/Users/gao/Desktop/采购明细导入模板.xlsx')" in script
     assert "_rpa_asset_path" not in script
+
+
+def test_download_result_key_uses_short_stable_fallback_for_non_ascii_names():
+    key = download_result_key("采购明细导入模板.xlsx")
+
+    assert key.startswith("download_file_")
+    assert "__" not in key
+    assert key == download_result_key("采购明细导入模板.xlsx")
+    assert key != download_result_key("销售明细导入模板.xlsx")
+
+
+def test_safe_name_stem_collapses_ascii_punctuation():
+    assert safe_name_stem("quarterly report (final).xlsx") == "quarterly_report_final"
 
 
 def test_compiler_writes_download_result_for_dataflow_upload():
@@ -599,7 +613,7 @@ def test_manual_download_click_compiles_to_expect_download():
     assert "async with current_page.expect_download() as _dl_info:" in body
     assert "await current_page.get_by_role('link', name='report.xlsx', exact=True).click()" in body
     assert "_dl = await _dl_info.value" in body
-    assert '_results["download_report"]' in body
+    assert "_results['download_report']" in body or '_results["download_report"]' in body
 
 
 def test_ai_operation_with_download_signal_compiles_to_expect_download():
@@ -628,7 +642,7 @@ def test_ai_operation_with_download_signal_compiles_to_expect_download():
     assert "async with current_page.expect_download() as _dl_info:" in body
     assert "            _result = await run(current_page, _results)" in body
     assert "_dl = await _dl_info.value" in body
-    assert '_results["download_report"]' in body
+    assert "_results['download_report']" in body or '_results["download_report"]' in body
 
 
 def test_ai_operation_with_existing_expect_download_is_not_wrapped_twice():

@@ -6,7 +6,7 @@ import json
 import asyncio
 from types import SimpleNamespace
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -821,6 +821,41 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(step.action, "open_tab_click")
         self.assertNotEqual(step.action, "download_click")
 
+    async def test_download_matching_happens_before_slow_metadata_collection(self):
+        page = _FakePage("https://example.com", "Example")
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "click",
+                "tab_id": tab_id,
+                "tag": "A",
+                "timestamp": 1234567893,
+                "locator": {"method": "css", "value": "a.export"},
+            },
+        )
+
+        async def fake_download_meta(_session_id, _download, filename):
+            self.session.steps[-1].timestamp = datetime.now() - timedelta(seconds=10)
+            return {
+                "filename": filename,
+                "result_key": "download:slow-report.xlsx",
+                "path": "/tmp/slow-report.xlsx",
+                "sha256": "abc123",
+            }
+
+        self.manager._download_meta = fake_download_meta
+
+        await page.handlers["download"](SimpleNamespace(suggested_filename="slow-report.xlsx"))
+
+        self.assertEqual(len(self.session.steps), 1)
+        step = self.session.steps[-1]
+        self.assertEqual(step.action, "click")
+        self.assertEqual(step.value, "slow-report.xlsx")
+        self.assertEqual(step.signals["download"]["path"], "/tmp/slow-report.xlsx")
+        self.assertEqual(step.signals["download"]["result_key"], "download:slow-report.xlsx")
+
     async def test_paused_download_event_is_merged_into_next_ai_trace(self):
         self.session.paused = True
         self.session.pending_download_events.append(
@@ -828,6 +863,10 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
                 "filename": "export.xlsx",
                 "tab_id": "tab-export",
                 "url": "https://example.com/exportQuery",
+                "path": "/tmp/export.xlsx",
+                "size": 1234,
+                "sha256": "hash-export",
+                "result_key": "download:export.xlsx",
             }
         )
         trace = TRACE_MODELS_MODULE.RPAAcceptedTrace(
@@ -844,6 +883,10 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(trace.signals["download"]["filename"], "export.xlsx")
         self.assertEqual(trace.signals["download"]["tab_id"], "tab-export")
+        self.assertEqual(trace.signals["download"]["path"], "/tmp/export.xlsx")
+        self.assertEqual(trace.signals["download"]["size"], 1234)
+        self.assertEqual(trace.signals["download"]["sha256"], "hash-export")
+        self.assertEqual(trace.signals["download"]["result_key"], "download:export.xlsx")
         self.assertEqual(trace.signals["download"]["count"], 1)
         self.assertEqual(self.session.pending_download_events, [])
 

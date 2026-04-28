@@ -1,13 +1,26 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional
 
 
 def safe_name_stem(filename: str, fallback: str = "file") -> str:
-    stem = str(filename or fallback).rsplit("/", 1)[-1].rsplit("\\", 1)[-1].split(".", 1)[0]
-    return re.sub(r"[^a-zA-Z0-9_]", "_", stem) or fallback
+    basename = str(filename or fallback).rsplit("/", 1)[-1].rsplit("\\", 1)[-1].strip()
+    stem = basename.rsplit(".", 1)[0] if "." in basename else basename
+    normalized = re.sub(r"[^a-zA-Z0-9_]+", "_", stem)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    if re.search(r"[a-zA-Z0-9]", normalized):
+        return normalized
+
+    fallback_stem = re.sub(r"[^a-zA-Z0-9_]+", "_", str(fallback or "file"))
+    fallback_stem = re.sub(r"_+", "_", fallback_stem).strip("_")
+    if not re.search(r"[a-zA-Z0-9]", fallback_stem):
+        fallback_stem = "file"
+    digest_source = stem or basename or str(filename or fallback)
+    digest = hashlib.sha1(digest_source.encode("utf-8", errors="ignore")).hexdigest()[:8]
+    return f"{fallback_stem}_{digest}"
 
 
 def download_result_key(filename: str) -> str:

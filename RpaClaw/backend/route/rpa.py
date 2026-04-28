@@ -12,6 +12,7 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 import httpx
 from fastapi.responses import Response as FastAPIResponse
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from backend.rpa.manager import rpa_manager
 from backend.rpa.generator import PlaywrightGenerator
@@ -26,9 +27,10 @@ from backend.rpa.mcp_step_projection import session_to_mcp_steps
 from backend.rpa.cdp_connector import get_cdp_connector
 from backend.rpa.screencast import SessionScreencastController
 from backend.rpa.upload_source import default_upload_source_from_staging, download_result_key
-from backend.rpa.file_transform import FileTransformService, transform_result_key
+from backend.rpa.file_transform import FileTransformService, extract_text, transform_result_key
 from backend.user.dependencies import get_current_user, User
 from backend.config import settings
+from backend.deepagent.engine import get_llm_model
 from backend.storage import get_repository
 from backend.credential.vault import inject_credentials
 
@@ -44,6 +46,7 @@ exporter = SkillExporter()
 assistant = RPAAssistant()
 trace_compiler = TraceSkillCompiler()
 file_transform_service = FileTransformService()
+FILE_TRANSFORM_INTENT_CONFIDENCE_THRESHOLD = 0.7
 
 
 class StartSessionRequest(BaseModel):
@@ -92,32 +95,141 @@ class FileTransformRequest(BaseModel):
     auto_link_next_upload: bool = True
 
 
-def _looks_like_file_transform_request(message: str) -> bool:
-    text = str(message or "").lower()
-    file_terms = ("文件", "excel", "xlsx", "表格", "downloaded file", "download file", "spreadsheet")
-    transform_terms = (
-        "处理",
-        "转换",
-        "转成",
-        "生成",
-        "重新生成",
-        "修改",
-        "改为",
-        "格式",
-        "清洗",
-        "整理",
-        "convert",
-        "transform",
-        "reformat",
-        "format",
-        "clean",
+class FileTransformIntentDecision(BaseModel):
+    is_file_transform: bool = False
+    confidence: float = 0.0
+    reason: str = ""
+    source_result_key: str | None = None
+    source_step_id: str | None = None
+    output_filename: str | None = None
+
+
+def _extract_json_object(text: str) -> Dict[str, Any]:
+    raw = str(text or "").strip()
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        if lines and lines[0].lstrip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        raw = "\n".join(lines).strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("LLM response did not contain a JSON object")
+    return json.loads(raw[start : end + 1])
+
+
+def _compact_file_artifacts(artifacts: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    compacted = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        compacted.append(
+            {
+                "kind": artifact.get("kind"),
+                "step_index": artifact.get("step_index"),
+                "step_id": artifact.get("step_id"),
+                "result_key": artifact.get("result_key"),
+                "filename": artifact.get("filename"),
+                "description": artifact.get("description"),
+                "size": artifact.get("size"),
+            }
+        )
+    return sorted(
+        compacted,
+        key=lambda item: item.get("step_index") if isinstance(item.get("step_index"), int) else -1,
+    )[-8:]
+
+
+def _normalize_file_transform_decision(
+    payload: Dict[str, Any],
+    artifacts: list[Dict[str, Any]],
+) -> FileTransformIntentDecision:
+    decision = FileTransformIntentDecision.model_validate(payload)
+    decision.confidence = max(0.0, min(float(decision.confidence or 0.0), 1.0))
+    if not decision.is_file_transform:
+        return decision
+
+    by_result_key = {
+        str(item.get("result_key")): item
+        for item in artifacts
+        if item.get("result_key")
+    }
+    by_step_id = {
+        str(item.get("step_id")): item
+        for item in artifacts
+        if item.get("step_id")
+    }
+    selected = None
+    if decision.source_result_key:
+        selected = by_result_key.get(decision.source_result_key)
+    if selected is None and decision.source_step_id:
+        selected = by_step_id.get(decision.source_step_id)
+    if selected is None and artifacts:
+        selected = sorted(
+            artifacts,
+            key=lambda item: item.get("step_index") if isinstance(item.get("step_index"), int) else -1,
+        )[-1]
+
+    if selected:
+        decision.source_result_key = str(selected.get("result_key") or "") or None
+        decision.source_step_id = str(selected.get("step_id") or "") or None
+    return decision
+
+
+async def _classify_file_transform_request(
+    message: str,
+    *,
+    artifacts: list[Dict[str, Any]],
+    model_config: dict | None,
+) -> FileTransformIntentDecision:
+    instruction = str(message or "").strip()
+    available_artifacts = _compact_file_artifacts(artifacts)
+    if not instruction or not available_artifacts:
+        return FileTransformIntentDecision(
+            is_file_transform=False,
+            confidence=0.0,
+            reason="No instruction or no existing file artifact is available.",
+        )
+
+    system_prompt = (
+        "You classify one natural-language command inside an RPA recording session. "
+        "Decide whether the command should be handled as a file transformation over an existing "
+        "recording artifact, instead of as a browser/page operation. Use the user's intent and the "
+        "provided artifact context; do not rely on keyword presence. A file transformation means the "
+        "user wants to modify, convert, clean, reshape, or generate a new file from one of the listed "
+        "download/transform artifacts. Do not classify normal browser navigation, clicking, uploading, "
+        "downloading, or asking about the page as file transformation. Return only JSON with keys: "
+        "is_file_transform boolean, confidence number from 0 to 1, reason string, source_result_key "
+        "string or null, source_step_id string or null, output_filename string or null."
     )
-    source_terms = ("刚才下载", "下载的", "下载文件", "downloaded", "download")
-    return (
-        any(term in text for term in file_terms)
-        and any(term in text for term in transform_terms)
-        and any(term in text for term in source_terms)
-    )
+    payload = {
+        "instruction": instruction,
+        "available_file_artifacts": available_artifacts,
+        "default_source_policy": (
+            "If the user refers to the recent/current/previous file without naming one, "
+            "choose the artifact with the largest step_index."
+        ),
+    }
+
+    try:
+        model = get_llm_model(config=model_config, max_tokens_override=700, streaming=False)
+        response = await model.ainvoke(
+            [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=json.dumps(payload, ensure_ascii=False, default=str)),
+            ]
+        )
+        parsed = _extract_json_object(extract_text(response))
+        return _normalize_file_transform_decision(parsed, available_artifacts)
+    except Exception as exc:
+        logger.warning("[RPA] File transform intent classification failed: %s", exc)
+        return FileTransformIntentDecision(
+            is_file_transform=False,
+            confidence=0.0,
+            reason=f"Semantic classification failed: {exc}",
+        )
 
 
 async def _create_file_transform_for_session(
@@ -1271,19 +1383,40 @@ async def chat_with_assistant(
     # Resolve user's model config
     model_config = await _resolve_user_model_config(str(current_user.id))
 
-    if _looks_like_file_transform_request(request.message):
+    file_transform_intent = await _classify_file_transform_request(
+        request.message,
+        artifacts=rpa_manager.downloadable_steps(session_id),
+        model_config=model_config,
+    )
+    if (
+        file_transform_intent.is_file_transform
+        and file_transform_intent.confidence >= FILE_TRANSFORM_INTENT_CONFIDENCE_THRESHOLD
+    ):
         async def file_transform_event_generator():
             try:
                 rpa_manager.pause_recording(session_id)
                 yield {
                     "event": "agent_thought",
-                    "data": json.dumps({"text": "识别到文件处理请求，正在处理最近的文件产物。"}, ensure_ascii=False),
+                    "data": json.dumps(
+                        {
+                            "text": (
+                                "已根据录制上下文识别到文件处理意图，"
+                                "正在处理对应的文件产物。"
+                            ),
+                            "reason": file_transform_intent.reason,
+                            "confidence": file_transform_intent.confidence,
+                        },
+                        ensure_ascii=False,
+                    ),
                 }
                 result = await _create_file_transform_for_session(
                     session_id=session_id,
                     current_user=current_user,
                     request=FileTransformRequest(
                         instruction=request.message,
+                        source_result_key=file_transform_intent.source_result_key,
+                        source_step_id=file_transform_intent.source_step_id,
+                        output_filename=file_transform_intent.output_filename,
                         auto_link_next_upload=True,
                     ),
                 )

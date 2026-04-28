@@ -1,4 +1,5 @@
 import importlib
+import asyncio
 from datetime import datetime
 
 import pytest
@@ -10,6 +11,16 @@ from backend.rpa.trace_models import RPAAcceptedTrace, RPAAIExecution, RPATraceT
 
 
 ROUTE_MODULE = importlib.import_module("backend.route.rpa")
+
+
+class _FakeIntentModel:
+    def __init__(self, response: str):
+        self.response = response
+        self.calls = []
+
+    async def ainvoke(self, messages):
+        self.calls.append(messages)
+        return self.response
 
 
 def test_generate_session_script_prefers_traces_over_legacy_steps():
@@ -30,6 +41,89 @@ def test_generate_session_script_prefers_traces_over_legacy_steps():
 
     assert "Auto-generated skill from RPA trace recording" in script
     assert "top10_prs" in script
+
+
+def test_file_transform_intent_uses_semantic_model(monkeypatch):
+    model = _FakeIntentModel(
+        '{"is_file_transform":true,"confidence":0.93,"reason":"User wants to reshape the latest downloaded workbook.",'
+        '"source_result_key":"download_report","source_step_id":"step-download","output_filename":"cleaned.xlsx"}'
+    )
+    monkeypatch.setattr(ROUTE_MODULE, "get_llm_model", lambda **kwargs: model)
+
+    async def run():
+        return await ROUTE_MODULE._classify_file_transform_request(
+            "把刚才导出的内容整理成可以上传的版本",
+            artifacts=[
+                {
+                    "kind": "download",
+                    "step_index": 3,
+                    "step_id": "step-download",
+                    "result_key": "download_report",
+                    "filename": "report.xlsx",
+                }
+            ],
+            model_config=None,
+        )
+
+    decision = asyncio.run(run())
+
+    assert model.calls
+    assert decision.is_file_transform is True
+    assert decision.confidence == pytest.approx(0.93)
+    assert decision.source_result_key == "download_report"
+    assert decision.source_step_id == "step-download"
+    assert decision.output_filename == "cleaned.xlsx"
+
+
+def test_file_transform_intent_does_not_keyword_fallback_when_model_rejects(monkeypatch):
+    model = _FakeIntentModel(
+        '{"is_file_transform":false,"confidence":0.18,"reason":"The user wants a browser operation.",'
+        '"source_result_key":null,"source_step_id":null,"output_filename":null}'
+    )
+    monkeypatch.setattr(ROUTE_MODULE, "get_llm_model", lambda **kwargs: model)
+
+    async def run():
+        return await ROUTE_MODULE._classify_file_transform_request(
+            "点击下载文件按钮，不要处理这个 Excel 表格",
+            artifacts=[
+                {
+                    "kind": "download",
+                    "step_index": 1,
+                    "step_id": "step-download",
+                    "result_key": "download_report",
+                    "filename": "report.xlsx",
+                }
+            ],
+            model_config=None,
+        )
+
+    decision = asyncio.run(run())
+
+    assert model.calls
+    assert decision.is_file_transform is False
+
+
+def test_file_transform_intent_requires_existing_artifact(monkeypatch):
+    called = False
+
+    def fake_get_llm_model(**kwargs):
+        nonlocal called
+        called = True
+        return _FakeIntentModel("{}")
+
+    monkeypatch.setattr(ROUTE_MODULE, "get_llm_model", fake_get_llm_model)
+
+    async def run():
+        return await ROUTE_MODULE._classify_file_transform_request(
+            "把刚才下载的文件清洗一下",
+            artifacts=[],
+            model_config=None,
+        )
+
+    decision = asyncio.run(run())
+
+    assert called is False
+    assert decision.is_file_transform is False
 
 
 def test_generate_session_script_uses_recorded_actions_when_present():
@@ -765,4 +859,3 @@ async def test_test_script_passes_route_timeout_to_executor(monkeypatch):
         assert captured["timeout"] == ROUTE_MODULE.RPA_TEST_TIMEOUT_S
     finally:
         manager.sessions.pop(session.id, None)
-

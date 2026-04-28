@@ -873,7 +873,6 @@ class RPASessionManager:
 
         async def on_download(download):
             suggested = download.suggested_filename or "download"
-            download_meta = await self._download_meta(session_id, download, suggested)
             # Wait briefly for the click step to be recorded before upgrading it
             await asyncio.sleep(0.3)
             tab_meta = self._tab_meta.get(session_id, {}).get(tab_id)
@@ -881,6 +880,8 @@ class RPASessionManager:
             step = self._find_recent_action_step(session_id, tab_id=tab_id)
             if not step and opener_tab_id:
                 step = self._find_recent_action_step(session_id, popup_target_tab_id=tab_id)
+
+            download_meta = await self._download_meta(session_id, download, suggested)
             if step:
                 step.value = suggested
                 self._merge_step_signal(
@@ -905,6 +906,11 @@ class RPASessionManager:
                         "tab_id": tab_id,
                         "opener_tab_id": opener_tab_id,
                         "event_timestamp_ms": int(datetime.now().timestamp() * 1000),
+                        **{
+                            key: download_meta[key]
+                            for key in ("path", "saved_path", "size", "sha256", "result_key")
+                            if key in download_meta
+                        },
                     }
                 )
                 return
@@ -915,7 +921,13 @@ class RPASessionManager:
                 "url": getattr(page, "url", ""),
                 "timestamp": int(datetime.now().timestamp() * 1000),
                 "tab_id": tab_id,
-                "signals": {"download": download_meta},
+                "signals": {
+                    "download": {
+                        **download_meta,
+                        "tab_id": tab_id,
+                        "opener_tab_id": opener_tab_id,
+                    }
+                },
             }
             await self._run_tracked_event(session_id, evt)
 
@@ -2270,6 +2282,11 @@ class RPASessionManager:
             "tab_id": first.get("tab_id"),
             "opener_tab_id": first.get("opener_tab_id"),
             "event_timestamp_ms": first.get("event_timestamp_ms"),
+            "path": first.get("path"),
+            "saved_path": first.get("saved_path"),
+            "size": first.get("size"),
+            "sha256": first.get("sha256"),
+            "result_key": first.get("result_key"),
             "count": len(downloads),
         }
         if len(downloads) > 1:
