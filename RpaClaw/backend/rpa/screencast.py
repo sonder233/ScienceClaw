@@ -464,6 +464,14 @@ class SessionScreencastController:
                         const nested = label.querySelector && label.querySelector('input[type="file"]');
                         return nested || null;
                     };
+                    const classOf = (el) => {
+                        if (!el) return '';
+                        if (typeof el.className === 'string') return el.className;
+                        if (el.className && typeof el.className.baseVal === 'string') return el.className.baseVal;
+                        return '';
+                    };
+                    const UPLOAD_WIDGET_RE = /(?:^|[\\s_-])(?:upload|uploader|file-?picker|file-?chooser|dropzone|drag-?and-?drop)(?:$|[\\s_-])/i;
+                    const looksLikeUploadWidget = (el) => UPLOAD_WIDGET_RE.test(classOf(el));
                     const findFileInput = (node) => {
                         if (isFileInput(node)) return node;
 
@@ -476,11 +484,26 @@ class SessionScreencastController:
                             if (nested) return nested;
                         }
 
-                        // Walk up a few ancestors and accept a wrapper only when it
-                        // contains exactly one file input — this matches widgets like
-                        // aui-upload where the trigger button is a sibling of the
-                        // hidden <input type="file">, while still avoiding form-wide
-                        // false positives.
+                        // Only escalate to ancestors when the click happened inside
+                        // something that self-identifies as an upload widget (its
+                        // class contains "upload"/"uploader"/"file-picker"/...).
+                        // Otherwise unrelated clicks (download links, dropdown
+                        // triggers, toolbar buttons) that merely share an ancestor
+                        // with a far-away <input type="file"> would hijack the
+                        // bridge and pop the file-source dialog.
+                        const MAX_WIDGET_LOOKUP_HOPS = 4;
+                        let widgetRoot = null;
+                        let probe = node;
+                        for (let i = 0; i < MAX_WIDGET_LOOKUP_HOPS && probe; i++) {
+                            if (looksLikeUploadWidget(probe)) { widgetRoot = probe; break; }
+                            probe = probe.parentElement;
+                        }
+                        if (!widgetRoot) return null;
+
+                        // Within the upload widget, accept a wrapper only when it
+                        // contains exactly one file input — matches aui-upload-style
+                        // widgets where the visible trigger is a sibling of the
+                        // hidden <input type="file">.
                         const MAX_ANCESTOR_HOPS = 4;
                         let current = node.parentElement;
                         for (let i = 0; i < MAX_ANCESTOR_HOPS && current; i++) {
@@ -489,6 +512,7 @@ class SessionScreencastController:
                                 if (candidates.length === 1) return candidates[0];
                                 if (candidates.length > 1) break;
                             }
+                            if (current === widgetRoot) break;
                             current = current.parentElement;
                         }
                         return null;
