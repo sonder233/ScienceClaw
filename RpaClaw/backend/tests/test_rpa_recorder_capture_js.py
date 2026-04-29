@@ -33,7 +33,31 @@ def _run_capture_probe(scenario: str) -> dict:
             children: options.children || [],
             isContentEditable: false,
             contains(other) {{
-              return other === this || this.children.includes(other);
+              if (other === this) return true;
+              const stack = [...this.children];
+              while (stack.length) {{
+                const node = stack.pop();
+                if (node === other) return true;
+                if (node && node.children) stack.push(...node.children);
+              }}
+              return false;
+            }},
+            querySelector(selector) {{
+              if (options.querySelector && Object.prototype.hasOwnProperty.call(options.querySelector, selector)) {{
+                return options.querySelector[selector];
+              }}
+              const stack = [...this.children];
+              while (stack.length) {{
+                const node = stack.pop();
+                if (!node) continue;
+                if (selector === 'input[type="file"]'
+                    && node.tagName === 'INPUT'
+                    && (node.getAttribute && node.getAttribute('type') === 'file')) {{
+                  return node;
+                }}
+                if (node.children) stack.push(...node.children);
+              }}
+              return null;
             }},
             getAttribute(name) {{
               return Object.prototype.hasOwnProperty.call(attributes, name) ? attributes[name] : null;
@@ -162,6 +186,49 @@ def _run_capture_probe(scenario: str) -> dict:
               attributes: {{ role: 'button' }},
             }});
             installedOptions.emitAction('hover', button, {{}});
+          }} else if (scenario === 'dropdown-trigger-with-sibling-file-upload') {{
+            // Mirrors a Vue/Element-style toolbar: a dropdown trigger and an
+            // upload widget live as siblings under the same outer container.
+            // Clicking the dropdown trigger must NOT retarget into the outer
+            // container (which contains an input[type="file"]), otherwise the
+            // recorded locator would target a wrapper whose click handler
+            // opens the OS file picker.
+            const fileInput = makeElement({{
+              tagName: 'INPUT',
+              attributes: {{ type: 'file', name: 'file' }},
+            }});
+            const uploadZone = makeElement({{
+              tagName: 'DIV',
+              className: 'aui-upload aui-upload--text',
+              attributes: {{ tabindex: '0' }},
+              children: [fileInput],
+            }});
+            const importDialog = makeElement({{
+              tagName: 'DIV',
+              className: 'gtm-import-c',
+              children: [uploadZone],
+            }});
+            const triggerLabel = makeElement({{
+              tagName: 'I',
+              className: 'gtm-drop-button-fa gtm-fa-chevron-down',
+            }});
+            const trigger = makeElement({{
+              tagName: 'DIV',
+              textContent: 'Import',
+              className: 'gtm-drop-buttons-enter gtm-drop-buttons-actived',
+              children: [triggerLabel],
+            }});
+            const dropdownGroup = makeElement({{
+              tagName: 'DIV',
+              className: 'gtm-drop-buttons-main gtm-drop-buttons_mini',
+              children: [trigger],
+            }});
+            makeElement({{
+              tagName: 'DIV',
+              className: 'gtm-Import-group toolbar-item',
+              children: [dropdownGroup, importDialog],
+            }});
+            installedOptions.emitAction('click', trigger, {{}});
           }} else if (scenario === 'menu-item-hover') {{
             const menu = makeElement({{
               tagName: 'UL',
@@ -252,6 +319,20 @@ def test_plain_button_hover_does_not_get_trigger_signal():
     event = payload["emitted"][0]
     assert event["action"] == "hover"
     assert "hover" not in event.get("signals", {})
+
+
+def test_dropdown_trigger_with_sibling_file_upload_does_not_retarget_outward():
+    payload = _run_capture_probe("dropdown-trigger-with-sibling-file-upload")
+
+    event = payload["emitted"][0]
+    assert event["action"] == "click"
+    # The locator must describe the dropdown trigger itself, not an outer
+    # wrapper that also contains the hidden file-input upload zone.
+    assert "Import" in (event["locator"].get("name") or "")
+    snapshot_classes = event["element_snapshot"].get("classes", [])
+    assert "gtm-drop-buttons-enter" in snapshot_classes
+    assert "gtm-Import-group" not in snapshot_classes
+    assert "aui-upload" not in snapshot_classes
 
 
 def test_menu_item_hover_gets_menu_context_signal():

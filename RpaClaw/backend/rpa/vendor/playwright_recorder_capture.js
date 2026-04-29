@@ -54,15 +54,16 @@
             // Don't escape into ancestors that wrap a separate file input:
             // upload widgets (e.g. aui-upload) often listen on their container
             // and trigger the OS file picker on any descendant click.
-            if (cur !== el && containsFileInput(cur) && !el.contains(cur.querySelector('input[type="file"]'))) {
-                break;
-            }
-            if (dropdownBoundary && cur.parentElement === dropdownBoundary.parentElement && cur !== dropdownBoundary) {
-                break;
+            if (cur !== el && containsFileInput(cur)) {
+                var fileInput = cur.querySelector('input[type="file"]');
+                if (fileInput && !(el === fileInput || (el.contains && el.contains(fileInput)))) {
+                    break;
+                }
             }
             if (INTERACTIVE.indexOf(cur.tagName) >= 0) return cur;
             var role = cur.getAttribute && cur.getAttribute('role');
             if (role && INTERACTIVE_ROLES.indexOf(role) >= 0) return cur;
+            if (dropdownBoundary && cur === dropdownBoundary) break;
             cur = cur.parentElement;
         }
         var controlledTrigger = controlledMenuTrigger(el);
