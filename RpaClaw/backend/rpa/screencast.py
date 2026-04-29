@@ -500,22 +500,32 @@ class SessionScreencastController:
                         }
                         if (!widgetRoot) return null;
 
-                        // Within the upload widget, accept a wrapper only when it
-                        // contains exactly one file input — matches aui-upload-style
-                        // widgets where the visible trigger is a sibling of the
-                        // hidden <input type="file">.
-                        const MAX_ANCESTOR_HOPS = 4;
-                        let current = node.parentElement;
-                        for (let i = 0; i < MAX_ANCESTOR_HOPS && current; i++) {
-                            if (current.querySelectorAll) {
-                                const candidates = current.querySelectorAll('input[type="file"]');
-                                if (candidates.length === 1) return candidates[0];
-                                if (candidates.length > 1) break;
+                        // The widget root may also contain UI that is NOT the
+                        // upload trigger — e.g. an "attachment-list" rendered as
+                        // a sibling of the trigger element. The trigger area is
+                        // the closest upload-flavored ancestor of the file input
+                        // itself; clicks outside that area (but still inside the
+                        // widget root) should not pop the bridge dialog.
+                        const inputs = widgetRoot.querySelectorAll
+                            ? widgetRoot.querySelectorAll('input[type="file"]')
+                            : [];
+                        if (!inputs || inputs.length !== 1) return null;
+                        const fileInput = inputs[0];
+
+                        let triggerArea = fileInput.parentElement;
+                        let triggerProbe = triggerArea;
+                        let hops = 0;
+                        while (triggerProbe && hops < MAX_WIDGET_LOOKUP_HOPS) {
+                            if (looksLikeUploadWidget(triggerProbe)) {
+                                triggerArea = triggerProbe;
+                                break;
                             }
-                            if (current === widgetRoot) break;
-                            current = current.parentElement;
+                            if (triggerProbe === widgetRoot) break;
+                            triggerProbe = triggerProbe.parentElement;
+                            hops++;
                         }
-                        return null;
+                        if (!triggerArea || !triggerArea.contains(node)) return null;
+                        return fileInput;
                     };
                     const input = findFileInput(start);
                     if (!input) return null;
