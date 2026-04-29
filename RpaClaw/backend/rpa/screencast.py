@@ -471,11 +471,25 @@ class SessionScreencastController:
                         const labelInput = fileInputFromLabel(label);
                         if (labelInput) return labelInput;
 
-                        // Only inspect descendants of the clicked element itself. Searching
-                        // every ancestor also matches sibling upload inputs in the same form.
                         if (node.querySelector) {
                             const nested = node.querySelector('input[type="file"]');
                             if (nested) return nested;
+                        }
+
+                        // Walk up a few ancestors and accept a wrapper only when it
+                        // contains exactly one file input — this matches widgets like
+                        // aui-upload where the trigger button is a sibling of the
+                        // hidden <input type="file">, while still avoiding form-wide
+                        // false positives.
+                        const MAX_ANCESTOR_HOPS = 4;
+                        let current = node.parentElement;
+                        for (let i = 0; i < MAX_ANCESTOR_HOPS && current; i++) {
+                            if (current.querySelectorAll) {
+                                const candidates = current.querySelectorAll('input[type="file"]');
+                                if (candidates.length === 1) return candidates[0];
+                                if (candidates.length > 1) break;
+                            }
+                            current = current.parentElement;
                         }
                         return null;
                     };
