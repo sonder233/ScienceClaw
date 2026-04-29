@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 RPA_PAGE_TIMEOUT_MS = 60000
 HOVER_PROMOTION_WINDOW_MS = 2500
+FILECHOOSER_MARKER_TTL_S = 15 * 60
+FILECHOOSER_CLICK_WINDOW_S = 2.5
 
 
 class RPAStep(BaseModel):
@@ -407,6 +409,99 @@ class RPASessionManager:
         markers.append(payload)
         del markers[:-10]
 
+    def _consume_recent_filechooser_marker(
+        self,
+        session_id: str,
+        *,
+        tab_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        markers = self._recent_filechoosers.get(session_id)
+        if not markers:
+            return None
+
+        now_s = datetime.now().timestamp()
+        kept: List[Dict[str, Any]] = []
+        selected_kept_index: Optional[int] = None
+        for marker in markers:
+            if not isinstance(marker, dict):
+                continue
+            marker_ts = marker.get("timestamp")
+            if not isinstance(marker_ts, (int, float)):
+                continue
+            if now_s - float(marker_ts) > FILECHOOSER_MARKER_TTL_S:
+                continue
+            marker_tab_id = marker.get("tab_id")
+            if tab_id and marker_tab_id and marker_tab_id != tab_id:
+                kept.append(marker)
+                continue
+            selected_kept_index = len(kept)
+            kept.append(marker)
+
+        if selected_kept_index is None:
+            self._recent_filechoosers[session_id] = kept[-10:]
+            return None
+
+        selected = kept.pop(selected_kept_index)
+        self._recent_filechoosers[session_id] = kept[-10:]
+        return selected
+
+    def _suppress_filechooser_opener_step(
+        self,
+        session_id: str,
+        evt: Dict[str, Any],
+        signals: Dict[str, Any],
+    ) -> None:
+        marker = self._consume_recent_filechooser_marker(
+            session_id,
+            tab_id=evt.get("tab_id"),
+        )
+        if not marker:
+            return
+
+        marker_ts = marker.get("timestamp")
+        if not isinstance(marker_ts, (int, float)):
+            return
+
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+
+        marker_tab_id = marker.get("tab_id") or evt.get("tab_id")
+        marker_ts_float = float(marker_ts)
+        for index in range(len(session.steps) - 1, -1, -1):
+            step = session.steps[index]
+            if step.source != "record" or step.action != "click":
+                continue
+            if marker_tab_id and step.tab_id and step.tab_id != marker_tab_id:
+                continue
+            if step.signals and any(key in step.signals for key in ("download", "popup")):
+                continue
+            step_ts = step.timestamp.timestamp()
+            if abs(step_ts - marker_ts_float) > FILECHOOSER_CLICK_WINDOW_S:
+                continue
+
+            removed_step = session.steps.pop(index)
+            removed_trace_id = f"trace-{removed_step.id}"
+            session.traces = [
+                trace for trace in session.traces if getattr(trace, "trace_id", "") != removed_trace_id
+            ]
+            self._rebuild_manual_recording_state(session)
+            signals["upload_trigger"] = {
+                "step_id": removed_step.id,
+                "action": removed_step.action,
+                "description": removed_step.description or "",
+                "target": removed_step.target or "",
+                "tab_id": removed_step.tab_id,
+                "suppressed_replay": True,
+                "reason": "filechooser_opener",
+            }
+            logger.debug(
+                "[RPA] Suppressed filechooser opener click %s for upload step in session %s",
+                removed_step.id,
+                session_id,
+            )
+            return
+
     async def _stage_upload_payloads(self, session_id: str, signals: Dict[str, Any]) -> None:
         payloads = signals.pop("upload_payloads", None)
         if settings.storage_backend != "local" or not isinstance(payloads, list):
@@ -569,6 +664,7 @@ class RPASessionManager:
             evt["signals"] = signals
         await self._stage_upload_payloads(session_id, signals)
         self._attach_upload_hint(session_id, signals)
+        self._suppress_filechooser_opener_step(session_id, evt, signals)
 
     def _find_recent_action_step(
         self,
