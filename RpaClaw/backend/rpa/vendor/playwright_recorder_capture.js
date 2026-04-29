@@ -12,12 +12,54 @@
     var INTERACTIVE_ROLES = ['button', 'link', 'checkbox', 'radio', 'tab', 'menuitem',
         'option', 'switch', 'combobox'];
 
+    function containsFileInput(node) {
+        if (!node || !node.querySelector) return false;
+        try {
+            return !!node.querySelector('input[type="file"]');
+        } catch (error) {
+            return false;
+        }
+    }
+
+    function classListContainsToken(el, pattern) {
+        if (!el) return false;
+        var raw = '';
+        if (typeof el.className === 'string') raw = el.className;
+        else if (el.className && typeof el.className.baseVal === 'string') raw = el.className.baseVal;
+        if (!raw) return false;
+        return pattern.test(raw);
+    }
+
+    var DROPDOWN_BOUNDARY_RE = /(?:^|[\s_-])(?:dropdown|drop-down|drop-buttons|menu|popover|popup|combobox)(?:$|[\s_-])/i;
+
+    function findDropdownBoundary(el) {
+        var cur = el;
+        while (cur && cur !== document.body) {
+            if (classListContainsToken(cur, DROPDOWN_BOUNDARY_RE)) return cur;
+            cur = cur.parentElement;
+        }
+        return null;
+    }
+
     function retarget(el) {
         if (!el || !el.tagName) return null;
         if (['INPUT', 'TEXTAREA', 'SELECT'].indexOf(el.tagName) >= 0) return el;
         if (el.isContentEditable) return el;
+        // If the click is inside a self-contained dropdown/menu component, do
+        // not let retarget escape that boundary — otherwise we may pick up an
+        // unrelated interactive ancestor (or its file-input sibling).
+        var dropdownBoundary = findDropdownBoundary(el);
         var cur = el;
         while (cur && cur !== document.body) {
+            // Don't escape into ancestors that wrap a separate file input:
+            // upload widgets (e.g. aui-upload) often listen on their container
+            // and trigger the OS file picker on any descendant click.
+            if (cur !== el && containsFileInput(cur) && !el.contains(cur.querySelector('input[type="file"]'))) {
+                break;
+            }
+            if (dropdownBoundary && cur.parentElement === dropdownBoundary.parentElement && cur !== dropdownBoundary) {
+                break;
+            }
             if (INTERACTIVE.indexOf(cur.tagName) >= 0) return cur;
             var role = cur.getAttribute && cur.getAttribute('role');
             if (role && INTERACTIVE_ROLES.indexOf(role) >= 0) return cur;
