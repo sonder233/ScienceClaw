@@ -325,6 +325,30 @@ class RPASessionManager:
         await asyncio.to_thread(write_files)
         return meta
 
+    async def stage_chat_attachment(
+        self,
+        session_id: str,
+        *,
+        filename: str,
+        content: bytes,
+        mime: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if session_id not in self.sessions:
+            raise ValueError(f"Session {session_id} not found")
+        return await self._stage_upload_bytes(
+            session_id, filename=filename, content=content, mime=mime
+        )
+
+    def get_chat_attachment(self, session_id: str, staging_id: str) -> Optional[Dict[str, Any]]:
+        target_dir = self._session_upload_dir(session_id) / staging_id
+        meta_path = target_dir / "meta.json"
+        if not meta_path.exists():
+            return None
+        try:
+            return json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
     @staticmethod
     def _unique_download_path(download_dir: Path, filename: str) -> Path:
         safe_name = safe_asset_filename(filename or "download")
@@ -1483,6 +1507,7 @@ class RPASessionManager:
         output_path: str,
         result: Dict[str, Any],
         auto_link_next_upload: bool = True,
+        template_file: Optional[Dict[str, Any]] = None,
     ) -> RPAStep:
         session = self.sessions.get(session_id)
         if not session:
@@ -1493,22 +1518,23 @@ class RPASessionManager:
             len(session.steps) - 1,
         )
         insert_at = min(max(source_index + 1, 0), len(session.steps))
-        signals = {
-            "file_transform": {
-                "input": {
-                    "mode": "dataflow",
-                    "source_step_id": source_step_id,
-                    "source_result_key": source_result_key,
-                    "file_field": "path",
-                },
-                "instruction": instruction,
-                "output_filename": output_filename,
-                "output_result_key": output_result_key,
-                "script_path": script_path,
-                "output_path": output_path,
-                "code": code,
-            }
+        transform_signal: Dict[str, Any] = {
+            "input": {
+                "mode": "dataflow",
+                "source_step_id": source_step_id,
+                "source_result_key": source_result_key,
+                "file_field": "path",
+            },
+            "instruction": instruction,
+            "output_filename": output_filename,
+            "output_result_key": output_result_key,
+            "script_path": script_path,
+            "output_path": output_path,
+            "code": code,
         }
+        if template_file:
+            transform_signal["template_file"] = template_file
+        signals = {"file_transform": transform_signal}
         step = RPAStep(
             id=str(uuid.uuid4()),
             action="file_transform",

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, Globe, FileUp, FileDown, Workflow, CloudUpload, ArrowRight, Loader2, FileText, AlertCircle, ChevronDown, ChevronUp, ClipboardCheck } from 'lucide-vue-next';
+import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, Globe, FileUp, FileDown, Workflow, CloudUpload, ArrowRight, Loader2, FileText, AlertCircle, ChevronDown, ChevronUp, ClipboardCheck, Paperclip } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import RpaFlowGuide from '@/components/rpa/RpaFlowGuide.vue';
 import RpaStepTimeline from '@/components/rpa/RpaStepTimeline.vue';
@@ -252,6 +252,71 @@ const newMessage = ref('');
 const sending = ref(false);
 const agentRunning = ref(false);
 const chatScrollRef = ref<HTMLElement | null>(null);
+
+interface ChatAttachment {
+  staging_id: string;
+  filename: string;
+  size: number;
+}
+const chatAttachment = ref<ChatAttachment | null>(null);
+const chatAttachmentUploading = ref(false);
+const chatAttachmentError = ref('');
+const chatAttachmentInputRef = ref<HTMLInputElement | null>(null);
+const ALLOWED_ATTACHMENT_EXT = ['.xlsx', '.xlsm', '.xls', '.csv', '.tsv', '.txt', '.docx'];
+
+const triggerChatAttachmentPicker = () => {
+  chatAttachmentError.value = '';
+  chatAttachmentInputRef.value?.click();
+};
+
+const removeChatAttachment = () => {
+  chatAttachment.value = null;
+  chatAttachmentError.value = '';
+  if (chatAttachmentInputRef.value) {
+    chatAttachmentInputRef.value.value = '';
+  }
+};
+
+const handleChatAttachmentChange = async (event: Event) => {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file || !sessionId.value) return;
+  const lower = file.name.toLowerCase();
+  if (!ALLOWED_ATTACHMENT_EXT.some(ext => lower.endsWith(ext))) {
+    chatAttachmentError.value = `不支持的文件类型，仅允许 ${ALLOWED_ATTACHMENT_EXT.join(', ')}`;
+    input.value = '';
+    return;
+  }
+  chatAttachmentUploading.value = true;
+  chatAttachmentError.value = '';
+  try {
+    const form = new FormData();
+    form.append('file', file);
+    const resp = await apiClient.post<{ staging_id: string; filename: string; size: number }>(
+      `/rpa/session/${sessionId.value}/chat/attachment`,
+      form,
+      { headers: { 'Content-Type': 'multipart/form-data' } },
+    );
+    const data = resp.data;
+    chatAttachment.value = {
+      staging_id: data.staging_id,
+      filename: data.filename || file.name,
+      size: data.size ?? file.size,
+    };
+  } catch (err: any) {
+    chatAttachmentError.value = err?.response?.data?.detail || err?.message || '上传失败';
+  } finally {
+    chatAttachmentUploading.value = false;
+    input.value = '';
+  }
+};
+
+const formatAttachmentSize = (bytes: number) => {
+  if (!bytes) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+};
 
 const scrollAssistantToBottom = () => {
   void nextTick(() => {
@@ -962,14 +1027,22 @@ const sendMessage = async () => {
   scrollAssistantToBottom();
 
   try {
+    const attachmentStagingId = chatAttachment.value?.staging_id || null;
     const resp = await fetch(`/api/v1/rpa/session/${sessionId.value}/chat`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
       },
-      body: JSON.stringify({ message: userText, mode: 'trace_first' }),
+      body: JSON.stringify({
+        message: userText,
+        mode: 'trace_first',
+        attachment_staging_id: attachmentStagingId,
+      }),
     });
+    if (attachmentStagingId) {
+      chatAttachment.value = null;
+    }
 
     if (!resp.ok || !resp.body) {
       chatMessages.value[msgIdx].text = '请求失败，请重试。';
@@ -1570,15 +1643,56 @@ const sendMessage = async () => {
         </div>
 
         <div class="p-4 bg-[#eff1f2] dark:bg-[#212122] border-t border-gray-100 dark:border-gray-800">
+          <input
+            ref="chatAttachmentInputRef"
+            type="file"
+            class="hidden"
+            :accept="ALLOWED_ATTACHMENT_EXT.join(',')"
+            @change="handleChatAttachmentChange"
+          />
+          <div v-if="chatAttachment || chatAttachmentUploading || chatAttachmentError" class="mb-2">
+            <div
+              v-if="chatAttachment"
+              class="flex items-center gap-2 bg-white dark:bg-[#272728] border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 text-[11px]"
+            >
+              <FileText :size="14" class="text-[#831bd7]" />
+              <div class="flex-1 min-w-0">
+                <div class="truncate font-medium text-gray-700 dark:text-gray-200">{{ chatAttachment.filename }}</div>
+                <div class="text-[10px] text-gray-400">模板 · {{ formatAttachmentSize(chatAttachment.size) }}</div>
+              </div>
+              <button
+                type="button"
+                @click="removeChatAttachment"
+                class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+                aria-label="移除模板"
+              >
+                <X :size="14" />
+              </button>
+            </div>
+            <div v-else-if="chatAttachmentUploading" class="flex items-center gap-2 text-[11px] text-gray-500">
+              <Loader2 :size="14" class="animate-spin" />
+              <span>正在上传模板...</span>
+            </div>
+            <div v-else-if="chatAttachmentError" class="text-[11px] text-red-500">{{ chatAttachmentError }}</div>
+          </div>
           <div class="relative">
             <input
               v-model="newMessage"
               @keyup.enter="sendMessage"
               :disabled="sending || agentRunning"
-              class="w-full bg-white dark:bg-[#272728] border border-gray-200 dark:border-gray-700 rounded-2xl py-3 pl-4 pr-12 text-xs focus:ring-2 focus:ring-[#831bd7] focus:border-transparent shadow-sm placeholder:text-gray-400 outline-none disabled:opacity-50"
-              :placeholder="agentRunning ? 'Agent 运行中...' : (sending ? 'AI 正在处理...' : '描述录制目标或操作...')"
+              class="w-full bg-white dark:bg-[#272728] border border-gray-200 dark:border-gray-700 rounded-2xl py-3 pl-10 pr-12 text-xs focus:ring-2 focus:ring-[#831bd7] focus:border-transparent shadow-sm placeholder:text-gray-400 outline-none disabled:opacity-50"
+              :placeholder="agentRunning ? 'Agent 运行中...' : (sending ? 'AI 正在处理...' : (chatAttachment ? '描述如何按这个模板处理文件...' : '描述录制目标或操作...'))"
               type="text"
             />
+            <button
+              type="button"
+              @click="triggerChatAttachmentPicker"
+              :disabled="sending || agentRunning || chatAttachmentUploading"
+              class="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-[#831bd7] transition-colors p-1.5 disabled:opacity-50"
+              :title="chatAttachment ? '替换模板文件' : '附加模板文件'"
+            >
+              <Paperclip :size="16" />
+            </button>
             <button
               @click="sendMessage"
               :disabled="sending || agentRunning"

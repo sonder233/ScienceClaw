@@ -1424,3 +1424,87 @@ def test_embedded_ai_code_does_not_rewrite_without_unstable_signal_even_if_alter
     body = _execute_body(script)
 
     assert '[aria-label="Open menu"]' in body
+
+
+def test_compiler_renders_file_transform_with_template_asset():
+    transform_code = (
+        "def transform_file(input_file, output_file, template_file=None, instruction=''):\n"
+        "    open(output_file, 'wb').write(open(input_file, 'rb').read())\n"
+    )
+    script = TraceSkillCompiler().generate_script(
+        [
+            RPAAcceptedTrace(
+                trace_id="trace-transform-template",
+                trace_type=RPATraceType.FILE_TRANSFORM,
+                action="file_transform",
+                value="filled_report.xlsx",
+                output_key="transform_filled_report",
+                ai_execution=RPAAIExecution(language="python", code=transform_code),
+                signals={
+                    "file_transform": {
+                        "input": {
+                            "mode": "dataflow",
+                            "source_result_key": "download_data",
+                            "file_field": "path",
+                        },
+                        "instruction": "fill the template using the downloaded data",
+                        "output_filename": "filled_report.xlsx",
+                        "output_result_key": "transform_filled_report",
+                        "code": transform_code,
+                        "template_file": {
+                            "staging_id": "up_abc",
+                            "stored_filename": "company_template.xlsx",
+                            "original_filename": "company_template.xlsx",
+                            "path": "/workspace/uploads/sess/up_abc/company_template.xlsx",
+                            "size": 1024,
+                            "sha256": "deadbeef",
+                        },
+                    },
+                },
+            ),
+        ],
+        is_local=True,
+    )
+
+    body = _execute_body(script)
+    assert "_rpa_asset_path('assets/' + 'company_template.xlsx')" in body
+    assert "_transform_kwargs['template_file'] = _transform_template" in body
+    assert "_transform_fn(_transform_input, _transform_output, **_transform_kwargs)" in body
+
+
+def test_compiler_file_transform_without_template_keeps_template_none():
+    transform_code = (
+        "def transform_file(input_file, output_file, instruction=''):\n"
+        "    open(output_file, 'wb').write(open(input_file, 'rb').read())\n"
+    )
+    script = TraceSkillCompiler().generate_script(
+        [
+            RPAAcceptedTrace(
+                trace_id="trace-transform-plain",
+                trace_type=RPATraceType.FILE_TRANSFORM,
+                action="file_transform",
+                value="converted.xlsx",
+                output_key="transform_converted",
+                ai_execution=RPAAIExecution(language="python", code=transform_code),
+                signals={
+                    "file_transform": {
+                        "input": {
+                            "mode": "dataflow",
+                            "source_result_key": "download_data",
+                            "file_field": "path",
+                        },
+                        "instruction": "convert",
+                        "output_filename": "converted.xlsx",
+                        "output_result_key": "transform_converted",
+                        "code": transform_code,
+                    },
+                },
+            ),
+        ],
+        is_local=True,
+    )
+
+    body = _execute_body(script)
+    assert "_transform_template = None" in body
+    assert "_rpa_asset_path('assets/'" not in body
+    assert "_transform_fn(_transform_input, _transform_output, **_transform_kwargs)" in body

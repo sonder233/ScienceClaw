@@ -258,7 +258,11 @@ class TraceSkillCompiler:
             "    tabs = {}",
             "    _trace_logger = kwargs.get('_on_log')",
         ]
-        if self._use_upload_sources and any(upload_source_uses_asset_helper(_trace_upload_source(trace)) for trace in traces):
+        needs_asset_helper = (
+            self._use_upload_sources
+            and any(upload_source_uses_asset_helper(_trace_upload_source(trace)) for trace in traces)
+        ) or any(_trace_has_transform_template(trace) for trace in traces)
+        if needs_asset_helper:
             lines.extend(rpa_asset_helper_lines("    "))
         used_output_keys: Dict[str, int] = {}
         for index, trace in enumerate(traces):
@@ -539,6 +543,17 @@ class TraceSkillCompiler:
         output_filename = str(transform.get("output_filename") or trace.value or "converted.xlsx")
         instruction = str(transform.get("instruction") or trace.user_instruction or trace.description or "")
         code = str(transform.get("code") or (trace.ai_execution.code if trace.ai_execution else "") or "")
+        template_file = transform.get("template_file") if isinstance(transform.get("template_file"), dict) else None
+        template_filename = ""
+        template_inline_path = ""
+        if template_file:
+            template_filename = str(
+                template_file.get("stored_filename")
+                or template_file.get("filename")
+                or template_file.get("original_filename")
+                or ""
+            )
+            template_inline_path = str(template_file.get("path") or "")
         lines = ["", f"    # trace {index}: {trace.description or 'file transform'}"]
         if not source_result_key or not output_result_key or not code:
             lines.append("    # File transform trace is missing source/result/code and was skipped.")
@@ -550,12 +565,33 @@ class TraceSkillCompiler:
                 "    _transform_dir = kwargs.get('_downloads_dir', '.')",
                 "    _os.makedirs(_transform_dir, exist_ok=True)",
                 f"    _transform_output = _os.path.join(_transform_dir, {output_filename!r})",
+            ]
+        )
+        if template_filename:
+            lines.extend(
+                [
+                    f"    _transform_template = _rpa_asset_path('assets/' + {template_filename!r})",
+                    "    if not _os.path.exists(_transform_template):",
+                    f"        _transform_template = {template_inline_path!r}",
+                    "    if not _os.path.exists(_transform_template):",
+                    f"        raise RuntimeError('file transform template missing: ' + {template_filename!r})",
+                ]
+            )
+        else:
+            lines.append("    _transform_template = None")
+        lines.extend(
+            [
                 "    _transform_ns = {'__name__': 'rpa_transform'}",
                 f"    exec({code!r}, _transform_ns, _transform_ns)",
                 "    _transform_fn = _transform_ns.get('transform_file')",
                 "    if not callable(_transform_fn):",
                 "        raise RuntimeError('file transform script has no transform_file function')",
-                f"    _transform_fn(_transform_input, _transform_output, {instruction!r})",
+                "    import inspect as _inspect",
+                "    _transform_kwargs = {'instruction': " + repr(instruction) + "}",
+                "    _transform_params = _inspect.signature(_transform_fn).parameters",
+                "    if 'template_file' in _transform_params:",
+                "        _transform_kwargs['template_file'] = _transform_template",
+                "    _transform_fn(_transform_input, _transform_output, **_transform_kwargs)",
                 "    if not _os.path.exists(_transform_output):",
                 "        raise RuntimeError('file transform did not create output file')",
                 "    from openpyxl import load_workbook as _load_workbook",
@@ -1049,6 +1085,17 @@ def _trace_download_signal(trace: RPAAcceptedTrace) -> Dict[str, Any]:
     signals = trace.signals if isinstance(trace.signals, dict) else {}
     download = signals.get("download")
     return download if isinstance(download, dict) else {}
+
+
+def _trace_has_transform_template(trace: RPAAcceptedTrace) -> bool:
+    signals = trace.signals if isinstance(trace.signals, dict) else {}
+    transform = signals.get("file_transform") if isinstance(signals, dict) else {}
+    if not isinstance(transform, dict):
+        return False
+    template = transform.get("template_file")
+    return isinstance(template, dict) and bool(
+        template.get("stored_filename") or template.get("filename") or template.get("original_filename")
+    )
 
 
 def _is_github_repo_url(url: str) -> bool:

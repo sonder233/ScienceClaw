@@ -231,7 +231,9 @@ The skill is implemented in `skill.py` using Playwright for browser automation.
         *,
         session_id: Optional[str],
     ) -> None:
-        for asset_path, source_path in self._iter_upload_assets(steps, session_id=session_id):
+        all_assets = list(self._iter_upload_assets(steps, session_id=session_id))
+        all_assets.extend(self._iter_transform_template_assets(steps, session_id=session_id))
+        for asset_path, source_path in all_assets:
             try:
                 source = Path(source_path)
                 if not source.exists():
@@ -242,6 +244,38 @@ The skill is implemented in `skill.py` using Playwright for browser automation.
                 shutil.copy2(source, target)
             except Exception as exc:
                 logger.warning("Failed to copy upload asset %s: %s", asset_path, exc)
+
+    def _iter_transform_template_assets(
+        self,
+        steps: List[Dict[str, Any]],
+        *,
+        session_id: Optional[str],
+    ) -> List[Tuple[str, str]]:
+        assets: List[Tuple[str, str]] = []
+        for step in steps:
+            signals = step.get("signals") if isinstance(step, dict) else None
+            if not isinstance(signals, dict):
+                continue
+            transform = signals.get("file_transform")
+            if not isinstance(transform, dict):
+                continue
+            template = transform.get("template_file")
+            if not isinstance(template, dict):
+                continue
+            stored = str(template.get("stored_filename") or template.get("filename") or template.get("original_filename") or "")
+            if not stored:
+                continue
+            explicit = str(template.get("path") or "")
+            source_path = explicit
+            if not source_path and session_id:
+                staging_id = str(template.get("staging_id") or "")
+                if staging_id:
+                    source_path = str(Path(settings.rpa_uploads_dir) / session_id / staging_id / stored)
+            if not source_path:
+                continue
+            asset_path = f"assets/{stored}"
+            assets.append((asset_path, source_path))
+        return assets
 
     def _iter_upload_assets(
         self,

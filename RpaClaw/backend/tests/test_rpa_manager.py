@@ -2230,5 +2230,130 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(next(tab for tab in tabs if tab["tab_id"] == tab_id)["url"], "https://example.com")
 
 
+class RPAManagerFileTransformTemplateTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        import tempfile
+
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        from backend.config import settings as _settings
+
+        self._orig_uploads = _settings.rpa_uploads_dir
+        _settings.rpa_uploads_dir = self._tmpdir.name
+
+        def _restore():
+            _settings.rpa_uploads_dir = self._orig_uploads
+
+        self.addCleanup(_restore)
+
+        self.manager = MANAGER_MODULE.RPASessionManager()
+        self.session = MANAGER_MODULE.RPASession(
+            id="sess-tmpl",
+            user_id="user-1",
+            sandbox_session_id="sandbox-1",
+        )
+        self.manager.sessions[self.session.id] = self.session
+
+    async def test_stage_and_get_chat_attachment_roundtrip(self):
+        meta = await self.manager.stage_chat_attachment(
+            self.session.id,
+            filename="company_template.xlsx",
+            content=b"fake xlsx bytes",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        self.assertTrue(meta["staging_id"].startswith("up_"))
+        self.assertEqual(meta["original_filename"], "company_template.xlsx")
+        self.assertEqual(meta["size"], len(b"fake xlsx bytes"))
+        self.assertTrue(Path(meta["path"]).exists())
+
+        recovered = self.manager.get_chat_attachment(self.session.id, meta["staging_id"])
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered["sha256"], meta["sha256"])
+        self.assertEqual(recovered["path"], meta["path"])
+
+        missing = self.manager.get_chat_attachment(self.session.id, "up_doesnotexist")
+        self.assertIsNone(missing)
+
+    async def test_add_file_transform_step_attaches_template_file(self):
+        download_step = MANAGER_MODULE.RPAStep(
+            id="step-download",
+            action="download_click",
+            target="",
+            signals={"download": {"filename": "report.xlsx"}},
+            value="report.xlsx",
+            description="download report",
+            source="manual",
+            result_key="download_report",
+        )
+        self.session.steps.append(download_step)
+        self.session.runtime_results.write(
+            "download_report",
+            {"filename": "report.xlsx", "path": "/tmp/report.xlsx"},
+        )
+
+        template_meta = await self.manager.stage_chat_attachment(
+            self.session.id,
+            filename="company_template.xlsx",
+            content=b"template bytes",
+        )
+
+        step = await self.manager.add_file_transform_step(
+            self.session.id,
+            source_result_key="download_report",
+            source_step_id="step-download",
+            instruction="fill template",
+            output_filename="filled_report.xlsx",
+            output_result_key="transform_filled_report",
+            code="def transform_file(input_file, output_file, template_file=None, instruction=''):\n    pass\n",
+            script_path="/tmp/script.py",
+            output_path="/tmp/filled_report.xlsx",
+            result={"filename": "filled_report.xlsx", "path": "/tmp/filled_report.xlsx"},
+            auto_link_next_upload=False,
+            template_file=template_meta,
+        )
+
+        signal = step.signals["file_transform"]
+        self.assertIn("template_file", signal)
+        self.assertEqual(signal["template_file"]["staging_id"], template_meta["staging_id"])
+        self.assertEqual(signal["template_file"]["stored_filename"], "company_template.xlsx")
+        self.assertEqual(signal["template_file"]["sha256"], template_meta["sha256"])
+
+        trace = next(t for t in self.session.traces if t.trace_type == TRACE_MODELS_MODULE.RPATraceType.FILE_TRANSFORM)
+        self.assertEqual(trace.signals["file_transform"]["template_file"]["staging_id"], template_meta["staging_id"])
+
+    async def test_add_file_transform_step_without_template_omits_field(self):
+        download_step = MANAGER_MODULE.RPAStep(
+            id="step-download",
+            action="download_click",
+            target="",
+            signals={"download": {"filename": "report.xlsx"}},
+            value="report.xlsx",
+            description="download report",
+            source="manual",
+            result_key="download_report",
+        )
+        self.session.steps.append(download_step)
+        self.session.runtime_results.write(
+            "download_report",
+            {"filename": "report.xlsx", "path": "/tmp/report.xlsx"},
+        )
+
+        step = await self.manager.add_file_transform_step(
+            self.session.id,
+            source_result_key="download_report",
+            source_step_id="step-download",
+            instruction="just convert",
+            output_filename="converted.xlsx",
+            output_result_key="transform_converted",
+            code="def transform_file(input_file, output_file, instruction=''):\n    pass\n",
+            script_path="/tmp/script.py",
+            output_path="/tmp/converted.xlsx",
+            result={"filename": "converted.xlsx", "path": "/tmp/converted.xlsx"},
+            auto_link_next_upload=False,
+        )
+
+        self.assertNotIn("template_file", step.signals["file_transform"])
+
+
 if __name__ == "__main__":
     unittest.main()

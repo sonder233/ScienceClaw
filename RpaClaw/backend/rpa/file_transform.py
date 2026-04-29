@@ -49,19 +49,29 @@ def extract_python_code(text: str) -> str:
 def ensure_transform_script(code: str) -> str:
     script = extract_python_code(code)
     if "def transform_file(" not in script:
-        raise ValueError("Generated transform script must define transform_file(input_file, output_file, instruction='')")
+        raise ValueError(
+            "Generated transform script must define "
+            "transform_file(input_file, output_file, template_file=None, instruction='')"
+        )
     wrapper = '''
 
 
 if __name__ == "__main__":
     import argparse
+    import inspect
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-file", required=True)
     parser.add_argument("--output-file", required=True)
+    parser.add_argument("--template-file", default=None)
     parser.add_argument("--instruction", default="")
     args = parser.parse_args()
-    transform_file(args.input_file, args.output_file, args.instruction)
+    _kwargs = {"instruction": args.instruction}
+    if args.template_file is not None:
+        _kwargs["template_file"] = args.template_file
+    elif "template_file" in inspect.signature(transform_file).parameters:
+        _kwargs["template_file"] = None
+    transform_file(args.input_file, args.output_file, **_kwargs)
 '''
     if "if __name__ ==" not in script:
         script = script.rstrip() + wrapper
@@ -85,11 +95,17 @@ def _copy_worksheet(src, dst):
         dst.append([cell.value for cell in row])
 
 
-def transform_file(input_file, output_file, instruction=""):
+def transform_file(input_file, output_file, template_file=None, instruction=""):
     input_path = Path(input_file)
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     suffix = input_path.suffix.lower()
+
+    if template_file:
+        template_path = Path(template_file)
+        if template_path.exists():
+            shutil.copy2(template_path, output_path)
+            return str(output_path)
 
     if suffix in {".xlsx", ".xlsm"}:
         wb = load_workbook(input_path)
@@ -152,23 +168,38 @@ class FileTransformService:
         instruction: str,
         input_path: Path,
         output_filename: str,
+        template_path: Optional[Path] = None,
         model_config: Optional[Dict[str, Any]] = None,
     ) -> str:
         if not instruction.strip():
             return fallback_transform_script()
 
-        prompt_payload = {
+        prompt_payload: Dict[str, Any] = {
             "instruction": instruction,
             "input_preview": preview_file(input_path),
             "output_filename": output_filename,
         }
+        if template_path is not None:
+            prompt_payload["template_preview"] = preview_file(template_path)
+
+        template_clause = (
+            " A template_file path is provided at runtime; load it as the output base "
+            "(e.g. via openpyxl.load_workbook) and write data extracted from input_file "
+            "into the appropriate cells/sheets, then save to output_file."
+            if template_path is not None
+            else " template_file may be None; if None, build the output workbook from input alone."
+        )
         system_prompt = (
             "You generate deterministic Python file transformation code for an RPA workflow. "
             "Return only Python code. The code must define exactly one callable named "
-            "transform_file(input_file, output_file, instruction=''). Use only Python standard "
-            "library and openpyxl. Do not use pandas. The function must create a valid .xlsx "
-            "file at output_file, preserve source data unless the instruction asks to reshape it, "
-            "and raise a clear exception if the input cannot be transformed."
+            "transform_file(input_file, output_file, template_file=None, instruction=''). "
+            "input_file, output_file, and template_file are all runtime path arguments — "
+            "never hardcode any of these paths or filenames inside the function. "
+            "Use only Python standard library and openpyxl. Do not use pandas. The function "
+            "must create a valid .xlsx file at output_file, preserve source data unless the "
+            "instruction asks to reshape it, and raise a clear exception if the input cannot "
+            "be transformed."
+            + template_clause
         )
         model = get_llm_model(config=model_config, streaming=False)
         response = await model.ainvoke(
@@ -186,10 +217,11 @@ class FileTransformService:
         input_path: Path,
         output_path: Path,
         instruction: str,
+        template_path: Optional[Path] = None,
         timeout: float = TRANSFORM_TIMEOUT_S,
     ) -> Dict[str, Any]:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        proc = await asyncio.create_subprocess_exec(
+        argv = [
             sys.executable,
             str(script_path),
             "--input-file",
@@ -198,6 +230,11 @@ class FileTransformService:
             str(output_path),
             "--instruction",
             instruction,
+        ]
+        if template_path is not None:
+            argv.extend(["--template-file", str(template_path)])
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -240,6 +277,7 @@ class FileTransformService:
         input_path: Path,
         instruction: str,
         output_filename: str,
+        template_path: Optional[Path] = None,
         model_config: Optional[Dict[str, Any]] = None,
         output_key: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -257,6 +295,7 @@ class FileTransformService:
             instruction=instruction,
             input_path=input_path,
             output_filename=safe_output,
+            template_path=template_path,
             model_config=model_config,
         )
 
@@ -266,8 +305,9 @@ class FileTransformService:
             input_path=input_path,
             output_path=output_path,
             instruction=instruction,
+            template_path=template_path,
         )
-        spec = {
+        spec: Dict[str, Any] = {
             "transform_id": transform_id,
             "instruction": instruction,
             "input_path": str(input_path),
@@ -277,6 +317,8 @@ class FileTransformService:
             "output_path": str(output_path),
             "code": script,
         }
+        if template_path is not None:
+            spec["template_path"] = str(template_path)
         (work_dir / "transform_spec.json").write_text(
             json.dumps(spec, ensure_ascii=False, indent=2),
             encoding="utf-8",

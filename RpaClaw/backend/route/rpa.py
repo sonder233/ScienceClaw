@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request, UploadFile, File, Body
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -72,6 +72,7 @@ class SaveSkillRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     mode: str = "chat"
+    attachment_staging_id: str | None = None
 
 
 class ConfirmRequest(BaseModel):
@@ -93,6 +94,7 @@ class FileTransformRequest(BaseModel):
     output_filename: str | None = None
     output_result_key: str | None = None
     auto_link_next_upload: bool = True
+    template_staging_id: str | None = None
 
 
 class FileTransformIntentDecision(BaseModel):
@@ -270,6 +272,17 @@ async def _create_file_transform_for_session(
     output_result_key = request.output_result_key or transform_result_key(output_filename)
     model_config = await _resolve_user_model_config(str(current_user.id))
 
+    template_meta: Optional[Dict[str, Any]] = None
+    template_path: Optional[Path] = None
+    if request.template_staging_id:
+        template_meta = rpa_manager.get_chat_attachment(session_id, request.template_staging_id)
+        if not template_meta:
+            raise HTTPException(status_code=400, detail="template attachment not found")
+        template_path_text = str(template_meta.get("path") or "")
+        template_path = Path(template_path_text) if template_path_text else None
+        if template_path is None or not template_path.exists():
+            raise HTTPException(status_code=400, detail="template attachment file is missing on disk")
+
     try:
         transform = await file_transform_service.create_transform(
             session_id=session_id,
@@ -277,6 +290,7 @@ async def _create_file_transform_for_session(
             instruction=instruction,
             output_filename=output_filename,
             output_key=output_result_key,
+            template_path=template_path,
             model_config=model_config,
         )
         step = await rpa_manager.add_file_transform_step(
@@ -291,6 +305,7 @@ async def _create_file_transform_for_session(
             output_path=str(transform["output_path"]),
             result=transform["result"],
             auto_link_next_upload=request.auto_link_next_upload,
+            template_file=template_meta,
         )
     except HTTPException:
         raise
@@ -1194,6 +1209,47 @@ async def promote_step_upload_staging(
     }
 
 
+@router.post("/session/{session_id}/chat/attachment")
+async def upload_chat_attachment(
+    session_id: str,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    raw_name = file.filename or ""
+    suffix = Path(raw_name).suffix.lower()
+    allowed = {".xlsx", ".xlsm", ".xls", ".csv", ".tsv", ".txt", ".docx"}
+    if suffix not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported attachment type: {suffix or 'unknown'}",
+        )
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    try:
+        meta = await rpa_manager.stage_chat_attachment(
+            session_id,
+            filename=raw_name or f"attachment{suffix}",
+            content=content,
+            mime=file.content_type or "",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": "success",
+        "staging_id": meta.get("staging_id"),
+        "filename": meta.get("original_filename"),
+        "stored_filename": meta.get("stored_filename"),
+        "size": meta.get("size"),
+        "sha256": meta.get("sha256"),
+    }
+
+
 @router.post("/session/{session_id}/file-transform")
 async def create_file_transform_step(
     session_id: str,
@@ -1383,11 +1439,20 @@ async def chat_with_assistant(
     # Resolve user's model config
     model_config = await _resolve_user_model_config(str(current_user.id))
 
-    file_transform_intent = await _classify_file_transform_request(
-        request.message,
-        artifacts=rpa_manager.downloadable_steps(session_id),
-        model_config=model_config,
-    )
+    if request.attachment_staging_id:
+        if not rpa_manager.get_chat_attachment(session_id, request.attachment_staging_id):
+            raise HTTPException(status_code=400, detail="attachment not found")
+        file_transform_intent = FileTransformIntentDecision(
+            is_file_transform=True,
+            confidence=1.0,
+            reason="explicit attachment in chat input",
+        )
+    else:
+        file_transform_intent = await _classify_file_transform_request(
+            request.message,
+            artifacts=rpa_manager.downloadable_steps(session_id),
+            model_config=model_config,
+        )
     if (
         file_transform_intent.is_file_transform
         and file_transform_intent.confidence >= FILE_TRANSFORM_INTENT_CONFIDENCE_THRESHOLD
@@ -1418,6 +1483,7 @@ async def chat_with_assistant(
                         source_step_id=file_transform_intent.source_step_id,
                         output_filename=file_transform_intent.output_filename,
                         auto_link_next_upload=True,
+                        template_staging_id=request.attachment_staging_id,
                     ),
                 )
                 step = result["step"]
