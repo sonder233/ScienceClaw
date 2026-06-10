@@ -330,12 +330,21 @@ watch(
                     {{ candidate.kind }}: {{ candidate.playwright_locator || formatRpaStepLocator(candidate.locator) }}
                   </span>
                   <span
+                    v-if="candidate.risk_level"
+                    class="shrink-0 rounded-md bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700 dark:bg-amber-950/40 dark:text-amber-200"
+                  >
+                    {{ candidate.risk_level }}
+                  </span>
+                  <span
                     v-if="triedCandidateIndices.has(candidateIndex)"
                     class="shrink-0 rounded-md bg-[#edeef0] px-1.5 py-0.5 text-[10px] font-bold text-gray-500 dark:bg-white/10"
                   >
                     已尝试
                   </span>
                 </div>
+                <p v-if="candidate.reason_summary" class="timeline-wrap mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                  {{ candidate.reason_summary }}
+                </p>
               </button>
             </div>
           </div>

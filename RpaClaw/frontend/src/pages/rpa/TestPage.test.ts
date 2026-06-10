@@ -122,7 +122,7 @@ const mockSession = (session: any) => {
   });
 };
 
-describe('TestPage trace-first failure retry', () => {
+describe('TestPage trace-first repair retry', () => {
   beforeEach(() => {
     vi.stubGlobal('WebSocket', MockWebSocket);
     document.body.innerHTML = '';
@@ -133,10 +133,11 @@ describe('TestPage trace-first failure retry', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     document.body.innerHTML = '';
   });
 
-  it('retries failed locators by failed trace id and never calls step endpoints', async () => {
+  it('applies failed locator repair proposals and never calls step endpoints', async () => {
     mockSession({
       timeline: [
         {
@@ -161,8 +162,41 @@ describe('TestPage trace-first failure retry', () => {
           },
         });
       }
+      if (url === '/rpa/session/session-1/repair/analyze') {
+        return Promise.resolve({
+          data: {
+            context: { failed_trace_id: 'trace-failed' },
+            intent: { intent_summary: 'Click failed target' },
+            proposals: [
+              {
+                proposal_id: 'repair-1',
+                reason_summary: 'Switch to an accepted trace locator candidate.',
+                failure_category: 'locator-not-found',
+                patch_type: 'select_existing_locator_candidate',
+                risk_level: 'unknown',
+                confidence: 'medium',
+                requires_user_confirmation: true,
+                patch: {
+                  candidate_index: 3,
+                  after: {
+                    candidate: {
+                      kind: 'css',
+                      original_index: 3,
+                      locator: { method: 'css', value: '#fixed' },
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        });
+      }
+      if (url === '/rpa/session/session-1/repair/repair-1/apply') {
+        return Promise.resolve({ data: { status: 'success' } });
+      }
       return Promise.resolve({ data: {} });
     });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
 
     const { app, root } = await mountTestPage();
     await flushAsyncUpdates();
@@ -170,11 +204,12 @@ describe('TestPage trace-first failure retry', () => {
 
     root.querySelector<HTMLButtonElement>('[data-testid="retry-candidate"]')?.click();
     await vi.waitFor(() => {
-      expect(post).toHaveBeenCalledWith('/rpa/session/session-1/trace/trace-failed/locator', {
-        candidate_index: 3,
+      expect(post).toHaveBeenCalledWith('/rpa/session/session-1/repair/repair-1/apply', {
+        confirmed: true,
       });
     });
 
+    expect(post.mock.calls.some(([url]) => String(url).includes('/trace/trace-failed/locator'))).toBe(false);
     expect(post.mock.calls.some(([url]) => String(url).includes('/step/'))).toBe(false);
 
     app.unmount();

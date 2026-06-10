@@ -102,6 +102,27 @@ interface LocatorCandidate {
   locator: Record<string, any>;
   playwright_locator?: string;
   original_index?: number;
+  proposal_id?: string;
+  risk_level?: string;
+  confidence?: string;
+  requires_user_confirmation?: boolean;
+  reason_summary?: string;
+}
+
+interface RepairProposal {
+  proposal_id: string;
+  reason_summary: string;
+  failure_category: string;
+  patch_type: string;
+  risk_level: string;
+  confidence: string;
+  requires_user_confirmation: boolean;
+  patch: {
+    candidate_index?: number;
+    after?: {
+      candidate?: LocatorCandidate;
+    };
+  };
 }
 
 const failedStepIndex = ref<number | null>(null);
@@ -110,6 +131,19 @@ const failedStepCandidates = ref<LocatorCandidate[]>([]);
 const failedStepError = ref('');
 const triedCandidateIndices = ref<Set<number>>(new Set());
 const retryingWithCandidate = ref(false);
+const analyzingRepair = ref(false);
+const repairContext = ref<Record<string, any> | null>(null);
+const repairIntent = ref<Record<string, any> | null>(null);
+const repairProposals = ref<RepairProposal[]>([]);
+
+const repairSummary = computed(() => {
+  if (analyzingRepair.value) return '正在分析失败步骤...';
+  if (repairProposals.value.length > 0) {
+    return `已生成 ${repairProposals.value.length} 个修复候选，应用后需要重新全量回放。`;
+  }
+  if (repairContext.value) return '已定位失败步骤，但暂无可自动应用的修复候选。';
+  return '';
+});
 
 const loadSkillConfigDraft = async () => {
   if (!sessionId.value) return;
@@ -310,6 +344,55 @@ const activateTab = async (tabId: string) => {
   }
 };
 
+const proposalsToFailedCandidates = (proposals: RepairProposal[]): LocatorCandidate[] => (
+  proposals
+    .filter((proposal) => proposal.patch_type === 'select_existing_locator_candidate')
+    .map((proposal) => {
+      const candidate = proposal.patch.after?.candidate || {};
+      return {
+        ...candidate,
+        original_index: proposal.patch.candidate_index,
+        proposal_id: proposal.proposal_id,
+        risk_level: proposal.risk_level,
+        confidence: proposal.confidence,
+        requires_user_confirmation: proposal.requires_user_confirmation,
+        reason_summary: proposal.reason_summary,
+      } as LocatorCandidate;
+    })
+);
+
+const analyzeRepairFailure = async (testPayload: Record<string, any>) => {
+  if (!sessionId.value || testSuccess.value) return;
+  analyzingRepair.value = true;
+  repairContext.value = null;
+  repairIntent.value = null;
+  repairProposals.value = [];
+  try {
+    const resp = await apiClient.post(`/rpa/session/${sessionId.value}/repair/analyze`, {
+      test_result: testPayload,
+      logs: testPayload.logs || [],
+      params: params.value,
+    });
+    repairContext.value = resp.data.context || null;
+    repairIntent.value = resp.data.intent || null;
+    repairProposals.value = resp.data.proposals || [];
+    const proposalCandidates = proposalsToFailedCandidates(repairProposals.value);
+    if (proposalCandidates.length > 0) {
+      failedStepCandidates.value = proposalCandidates;
+    }
+  } catch (err: any) {
+    repairContext.value = null;
+    repairIntent.value = null;
+    repairProposals.value = [];
+    testLogs.value = [
+      ...testLogs.value,
+      `自愈分析失败: ${err.response?.data?.detail || err.message}`,
+    ];
+  } finally {
+    analyzingRepair.value = false;
+  }
+};
+
 const runTest = async () => {
   if (!sessionId.value) {
     error.value = '缺少 sessionId';
@@ -340,6 +423,9 @@ const runTest = async () => {
   failedTraceId.value = null;
   failedStepCandidates.value = [];
   failedStepError.value = '';
+  repairContext.value = null;
+  repairIntent.value = null;
+  repairProposals.value = [];
 
   try {
     connectScreencast(sessionId.value);
@@ -372,6 +458,9 @@ const runTest = async () => {
     failedStepCandidates.value = resp.data.failed_step_candidates || [];
     failedStepError.value = result.error || '';
     testDone.value = true;
+    if (!testSuccess.value && newFailedTraceId) {
+      await analyzeRepairFailure(resp.data);
+    }
   } catch (err: any) {
     testLogs.value.push(`错误: ${err.response?.data?.detail || err.message}`);
     testSuccess.value = false;
@@ -390,11 +479,22 @@ const retryWithCandidate = async (candidateIndex: number) => {
 
   try {
     const candidate = failedStepCandidates.value[candidateIndex];
-    const originalIndex = candidate.original_index ?? candidateIndex;
-    await apiClient.post(
-      `/rpa/session/${sessionId.value}/trace/${failedTraceId.value}/locator`,
-      { candidate_index: originalIndex },
-    );
+    if (candidate.proposal_id) {
+      const confirmed = candidate.requires_user_confirmation
+        ? window.confirm('该修复候选涉及高风险或未知风险，确认后会修改当前 trace 的定位器并重新全量回放。是否继续？')
+        : true;
+      if (!confirmed) return;
+      await apiClient.post(
+        `/rpa/session/${sessionId.value}/repair/${candidate.proposal_id}/apply`,
+        { confirmed },
+      );
+    } else {
+      const originalIndex = candidate.original_index ?? candidateIndex;
+      await apiClient.post(
+        `/rpa/session/${sessionId.value}/trace/${failedTraceId.value}/locator`,
+        { candidate_index: originalIndex },
+      );
+    }
 
     triedCandidateIndices.value.add(candidateIndex);
     await loadSessionDiagnostics();
@@ -403,6 +503,9 @@ const retryWithCandidate = async (candidateIndex: number) => {
     failedTraceId.value = null;
     failedStepCandidates.value = [];
     failedStepError.value = '';
+    repairContext.value = null;
+    repairIntent.value = null;
+    repairProposals.value = [];
     await runTest();
   } catch (err: any) {
     error.value = `切换定位器失败: ${err.response?.data?.detail || err.message}`;
@@ -636,7 +739,7 @@ onBeforeUnmount(() => {
               v-if="testDone && !testSuccess && (failedTraceId || failedStepIndex !== null) && failedStepCandidates.length > 0"
               class="text-xs leading-relaxed text-red-700"
             >
-              步骤 {{ (failedStepIndex ?? 0) + 1 }} 执行失败，左侧已展示候选定位器，请选择一个后自动重试。
+              步骤 {{ (failedStepIndex ?? 0) + 1 }} 执行失败，左侧已展示修复候选，请选择一个后重新全量回放。
             </p>
             <p
               v-else-if="testDone && !testSuccess"
@@ -660,7 +763,7 @@ onBeforeUnmount(() => {
             </button>
             <button
               class="flex w-full items-center justify-center gap-2 rounded-xl bg-[#831bd7] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-[#7018b8] disabled:opacity-50"
-              :disabled="saving"
+              :disabled="saving || !testDone || !testSuccess"
               @click="saveSkill"
             >
               <Save :size="15" />
@@ -679,6 +782,36 @@ onBeforeUnmount(() => {
             class="rounded-xl border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/30 p-3"
           >
             <p class="text-xs text-red-600">{{ error }}</p>
+          </div>
+
+          <div
+            v-if="testDone && !testSuccess && (repairSummary || failedTraceId)"
+            class="rounded-xl border border-amber-200 bg-amber-50 p-3 dark:border-amber-800 dark:bg-amber-900/30"
+          >
+            <h3 class="mb-2 text-sm font-bold text-amber-900 dark:text-amber-100">失败自愈</h3>
+            <p class="text-xs leading-relaxed text-amber-800 dark:text-amber-100">
+              {{ repairSummary || '正在等待失败步骤上下文。' }}
+            </p>
+            <div v-if="repairIntent" class="mt-2 rounded-lg bg-white/70 p-2 dark:bg-black/20">
+              <p class="text-[11px] font-semibold text-amber-900 dark:text-amber-100">
+                {{ repairIntent.intent_summary || '失败步骤意图待确认' }}
+              </p>
+            </div>
+            <div v-if="repairProposals.length" class="mt-2 space-y-1">
+              <div
+                v-for="proposal in repairProposals"
+                :key="proposal.proposal_id"
+                class="rounded-lg bg-white/70 px-2 py-1.5 text-[11px] text-amber-900 dark:bg-black/20 dark:text-amber-100"
+              >
+                <div class="flex items-center justify-between gap-2">
+                  <span class="font-semibold">{{ proposal.failure_category }}</span>
+                  <span class="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 font-bold dark:bg-amber-950/50">
+                    {{ proposal.risk_level }}
+                  </span>
+                </div>
+                <p class="mt-1 leading-relaxed">{{ proposal.reason_summary }}</p>
+              </div>
+            </div>
           </div>
 
           <div>

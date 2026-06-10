@@ -1,6 +1,7 @@
 import json
 import logging
 import asyncio
+from types import SimpleNamespace
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Dict, Any, Literal
@@ -18,6 +19,7 @@ from backend.rpa.skill_exporter import SkillExporter
 from backend.rpa.assistant import RPAAssistant, RPAReActAgent, _active_agents
 from backend.rpa.recording_runtime_agent import RecordingRuntimeAgent, RecordingAgentResult
 from backend.rpa.trace_models import RPAAcceptedTrace
+from backend.rpa.trace_models import RPARuntimeResults
 from backend.rpa.trace_ordering import order_traces_by_recording_time
 from backend.rpa.trace_timeline import build_trace_timeline_items
 from backend.rpa.trace_skill_compiler import TraceSkillCompiler
@@ -34,6 +36,22 @@ from backend.models import get_model_config, resolve_default_model_config
 from backend.storage import get_repository
 from backend.credential.vault import inject_credentials
 from backend.rpa.runtime_context import inject_runtime_context_kwargs, runtime_requirements_from_traces
+from backend.rpa.repair_context import build_failure_context, build_restore_check
+from backend.rpa.repair_engine import RepairEngine
+from backend.rpa.repair_intent import analyze_failure_intent
+from backend.rpa.repair_models import (
+    RepairAnalyzeRequest,
+    RepairApplyRequest,
+    RepairRestoreCheckRequest,
+    RepairValidateRequest,
+    SavedSkillRepairAnalyzeRequest,
+)
+from backend.rpa.repair_patch import (
+    RepairConfirmationRequired,
+    UnsupportedRepairPatch,
+    apply_repair_patch,
+)
+from backend.rpa.repair_store import repair_store
 from backend.rpa.harness.config import harness_capture_enabled
 from backend.rpa.region_context import (
     RPARegionElementBoundsRequest,
@@ -56,6 +74,7 @@ executor = ScriptExecutor()
 exporter = SkillExporter()
 assistant = RPAAssistant()
 trace_compiler = TraceSkillCompiler()
+repair_engine = RepairEngine()
 
 
 class StartSessionRequest(BaseModel):
@@ -254,6 +273,63 @@ def _ensure_harness_capture_enabled() -> None:
 def _build_harness_capture_payload(session_id: str) -> dict[str, Any] | None:
     state = rpa_manager.get_harness_capture_session(session_id)
     return state.model_dump(mode="json") if state is not None else None
+
+
+def _validate_skill_name_path_segment(skill_name: str) -> str:
+    normalized = str(skill_name or "").strip()
+    if not normalized or "/" in normalized or "\\" in normalized or normalized in {".", ".."}:
+        raise HTTPException(status_code=400, detail="Invalid skill name")
+    return normalized
+
+
+async def _load_saved_rpa_skill_meta(skill_name: str, current_user: User) -> dict[str, Any]:
+    safe_name = _validate_skill_name_path_segment(skill_name)
+    if settings.storage_backend == "local":
+        skill_dir = Path(settings.external_skills_dir) / safe_name
+        meta_path = skill_dir / "skill.meta.json"
+        if not meta_path.exists():
+            raise HTTPException(status_code=404, detail=f"Skill '{safe_name}' not found")
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Saved skill metadata is not valid JSON") from exc
+    else:
+        repo = get_repository("skills")
+        doc = await repo.find_one({"user_id": str(current_user.id), "name": safe_name})
+        if not doc:
+            raise HTTPException(status_code=404, detail=f"Skill '{safe_name}' not found")
+        files = doc.get("files") or {}
+        raw_meta = files.get("skill.meta.json") or "{}"
+        try:
+            meta = json.loads(raw_meta) if isinstance(raw_meta, str) else dict(raw_meta)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Saved skill metadata is not valid JSON") from exc
+
+    if meta.get("kind") != "rpa-recording":
+        raise HTTPException(status_code=400, detail="Saved skill is not an RPA recording skill")
+    recording = meta.get("recording") if isinstance(meta.get("recording"), dict) else {}
+    if recording.get("recording_source") != "trace":
+        raise HTTPException(status_code=400, detail="Saved skill has no trace recording metadata")
+    return meta
+
+
+def _saved_skill_session_view(skill_name: str, meta: dict[str, Any]) -> Any:
+    recording = meta.get("recording") if isinstance(meta.get("recording"), dict) else {}
+    traces = [
+        RPAAcceptedTrace.model_validate(trace)
+        for trace in recording.get("traces", []) or []
+        if isinstance(trace, dict)
+    ]
+    runtime_payload = recording.get("runtime_results")
+    try:
+        runtime_results = RPARuntimeResults.model_validate(runtime_payload or {})
+    except Exception:
+        runtime_results = RPARuntimeResults()
+    return SimpleNamespace(
+        id=f"saved-skill:{skill_name}",
+        traces=traces,
+        runtime_results=runtime_results,
+    )
 
 
 async def _apply_recording_agent_result(session_id: str, result: RecordingAgentResult) -> None:
@@ -940,6 +1016,190 @@ async def test_script(
         "logs": logs,
         "script": script,
         **failed_retry_context,
+    }
+
+
+@router.post("/session/{session_id}/repair/analyze")
+async def analyze_session_repair(
+    session_id: str,
+    request: RepairAnalyzeRequest = RepairAnalyzeRequest(),
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _ensure_session_owner(session, current_user)
+    rpa_manager.touch_session(session_id)
+
+    context = build_failure_context(session, request)
+    if not context.failed_trace_id:
+        raise HTTPException(status_code=400, detail="Replay result did not map to a failed trace")
+    intent = analyze_failure_intent(context)
+    proposals = repair_engine.generate_proposals(context, intent)
+    repair_store.replace_session_analysis(session_id, context, intent, proposals)
+    return {
+        "status": "success",
+        "context": context.model_dump(mode="json"),
+        "intent": intent.model_dump(mode="json"),
+        "proposals": [proposal.model_dump(mode="json") for proposal in proposals],
+    }
+
+
+@router.get("/session/{session_id}/repair/proposals")
+async def list_session_repair_proposals(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _ensure_session_owner(session, current_user)
+
+    context = repair_store.get_session_context(session_id)
+    intent = repair_store.get_session_intent(session_id)
+    proposals = repair_store.list_session_proposals(session_id)
+    return {
+        "status": "success",
+        "context": context.model_dump(mode="json") if context else None,
+        "intent": intent.model_dump(mode="json") if intent else None,
+        "proposals": [proposal.model_dump(mode="json") for proposal in proposals],
+    }
+
+
+@router.post("/session/{session_id}/repair/{proposal_id}/apply")
+async def apply_session_repair_proposal(
+    session_id: str,
+    proposal_id: str,
+    request: RepairApplyRequest = RepairApplyRequest(),
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _ensure_session_owner(session, current_user)
+    rpa_manager.touch_session(session_id)
+
+    proposal = repair_store.get_proposal(session_id, proposal_id)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="Repair proposal not found")
+    try:
+        trace = await apply_repair_patch(
+            rpa_manager,
+            session_id,
+            proposal,
+            confirmed=request.confirmed,
+        )
+    except RepairConfirmationRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (UnsupportedRepairPatch, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    repair_store.upsert_proposal(session_id, proposal)
+    return {
+        "status": "success",
+        "proposal": proposal.model_dump(mode="json"),
+        "trace": trace.model_dump(mode="json") if hasattr(trace, "model_dump") else trace,
+        "timeline": _build_session_timeline(session),
+    }
+
+
+@router.post("/session/{session_id}/repair/{proposal_id}/validate")
+async def validate_session_repair_proposal(
+    session_id: str,
+    proposal_id: str,
+    request: RepairValidateRequest = RepairValidateRequest(),
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _ensure_session_owner(session, current_user)
+
+    proposal = repair_store.get_proposal(session_id, proposal_id)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="Repair proposal not found")
+    _ensure_no_unresolved_manual_diagnostics(session)
+    _ensure_has_compile_traces(session)
+    script = _generate_session_script(session, request.params, test_mode=True)
+    compile(script, "<rpa_repair_validation>", "exec")
+    proposal.status = "validation_pending"
+    repair_store.upsert_proposal(session_id, proposal)
+    return {
+        "status": "success",
+        "proposal": proposal.model_dump(mode="json"),
+        "validation": {
+            "status": "script_compiled",
+            "full_replay_required": True,
+            "next_action": f"Run POST /rpa/session/{session_id}/test for full-session replay.",
+        },
+    }
+
+
+@router.post("/session/{session_id}/repair/restore-check")
+async def check_session_repair_restore(
+    session_id: str,
+    request: RepairRestoreCheckRequest = RepairRestoreCheckRequest(),
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _ensure_session_owner(session, current_user)
+
+    page_state: Dict[str, Any] = {}
+    page = rpa_manager.get_page(session_id)
+    if page is not None:
+        page_state["url"] = getattr(page, "url", "") or ""
+        try:
+            page_state["title"] = await page.title()
+        except Exception:
+            page_state["title"] = ""
+    result = build_restore_check(session, request, current_page=page_state)
+    return {"status": "success", "restore": result.model_dump(mode="json")}
+
+
+@router.post("/skills/{skill_name}/repair/analyze")
+async def analyze_saved_skill_repair(
+    skill_name: str,
+    request: SavedSkillRepairAnalyzeRequest = SavedSkillRepairAnalyzeRequest(),
+    current_user: User = Depends(get_current_user),
+):
+    safe_name = _validate_skill_name_path_segment(skill_name)
+    meta = await _load_saved_rpa_skill_meta(safe_name, current_user)
+    session_view = _saved_skill_session_view(safe_name, meta)
+    analyze_request = RepairAnalyzeRequest(
+        test_result=request.run_result,
+        logs=request.logs,
+        user_intent_override=request.user_intent_override,
+        failed_trace_index=request.failed_trace_index,
+        failed_trace_id=request.failed_trace_id,
+        current_page=request.current_page,
+    )
+    context = build_failure_context(session_view, analyze_request, scope="saved-skill-run")
+    if not context.failed_trace_id:
+        raise HTTPException(status_code=400, detail="Run result did not map to a failed trace")
+    context.skill_name = safe_name
+    context.skill_version = str(meta.get("active_version") or meta.get("generated_at") or "")
+    intent = analyze_failure_intent(context)
+    proposals = repair_engine.generate_proposals(context, intent)
+    store_key = f"saved-skill:{current_user.id}:{safe_name}"
+    repair_store.replace_session_analysis(store_key, context, intent, proposals)
+    return {
+        "status": "success",
+        "context": context.model_dump(mode="json"),
+        "intent": intent.model_dump(mode="json"),
+        "proposals": [proposal.model_dump(mode="json") for proposal in proposals],
+        "repair_draft": {
+            "draft_id": context.context_id,
+            "skill_name": safe_name,
+            "will_modify_original_skill": False,
+            "live_retry_allowed_by_default": False,
+            "next_actions": [
+                "Review the failed trace, intent, risk, and proposal diff.",
+                "Validate any patch in isolation or copy it into a new skill version draft.",
+                "Publish a new version only after explicit user confirmation.",
+            ],
+        },
     }
 
 
